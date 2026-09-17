@@ -1,0 +1,28 @@
+{
+  "name": "hnjcxy-3d-scene",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "海南警察学院 3D 可视化场景：Vue3 + Three.js + 高德地图 JS API 2.0 (GLCustomLayer 融合)",
+  "scripts": {
+    "dev": "vite",
+    "generate:model": "node scripts/generate-placeholder-glb.mjs",
+    "build": "vue-tsc --noEmit && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@turf/area": "^7.2.0",
+    "jspdf": "^2.5.2",
+    "proj4": "^2.15.0",
+    "three": "0.162.0",
+    "vue": "^3.4.0"
+  },
+  "devDependencies": {
+    "@types/proj4": "^2.5.5",
+    "@types/three": "0.162.0",
+    "@vitejs/plugin-vue": "^5.2.0",
+    "typescript": "^5.6.0",
+    "vite": "^5.4.0",
+    "vue-tsc": "^2.1.0"
+  }
+}

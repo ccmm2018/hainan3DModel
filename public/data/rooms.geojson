@@ -1,0 +1,51 @@
+{
+  "type": "FeatureCollection",
+  "name": "hnjcxy_rooms",
+  "features": [
+    {
+      "type": "Feature",
+      "geometry": { "type": "Point", "coordinates": [110.280328, 19.75491] },
+      "properties": { "building": "教学楼", "roomNo": "101", "floor": 1, "status": "occupied", "area": 60, "department": "教务处" }
+    },
+    {
+      "type": "Feature",
+      "geometry": { "type": "Point", "coordinates": [110.280328, 19.75491] },
+      "properties": { "building": "教学楼", "roomNo": "102", "floor": 1, "status": "idle", "area": 60, "department": "侦查系" }
+    },
+    {
+      "type": "Feature",
+      "geometry": { "type": "Point", "coordinates": [110.280328, 19.75491] },
+      "properties": { "building": "教学楼", "roomNo": "103", "floor": 1, "status": "maintenance", "area": 45, "department": "边防管理系", "remark": "多媒体设备检修中" }
+    },
+    {
+      "type": "Feature",
+      "geometry": { "type": "Point", "coordinates": [110.280328, 19.75491] },
+      "properties": { "building": "教学楼", "roomNo": "201", "floor": 2, "status": "occupied", "area": 60, "department": "网络安全与执法系" }
+    },
+    {
+      "type": "Feature",
+      "geometry": { "type": "Point", "coordinates": [110.280328, 19.75491] },
+      "properties": { "building": "教学楼", "roomNo": "202", "floor": 2, "status": "idle", "area": 60, "department": "教务处" }
+    },
+    {
+      "type": "Feature",
+      "geometry": { "type": "Point", "coordinates": [110.280328, 19.75491] },
+      "properties": { "building": "教学楼", "roomNo": "301", "floor": 3, "status": "occupied", "area": 72, "department": "侦查系" }
+    },
+    {
+      "type": "Feature",
+      "geometry": { "type": "Point", "coordinates": [110.280328, 19.75491] },
+      "properties": { "building": "实验楼", "roomNo": "101", "floor": 1, "status": "idle", "area": 80, "department": "实验实训中心" }
+    },
+    {
+      "type": "Feature",
+      "geometry": { "type": "Point", "coordinates": [110.280328, 19.75491] },
+      "properties": { "building": "实验楼", "roomNo": "102", "floor": 1, "status": "occupied", "area": 80, "department": "实验实训中心" }
+    },
+    {
+      "type": "Feature",
+      "geometry": { "type": "Point", "coordinates": [110.280328, 19.75491] },
+      "properties": { "building": "实验楼", "roomNo": "201", "floor": 2, "status": "maintenance", "area": 65, "department": "实验实训中心", "remark": "通风系统维修" }
+    }
+  ]
+}

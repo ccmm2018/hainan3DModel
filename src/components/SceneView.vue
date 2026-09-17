@@ -1,0 +1,1258 @@
+<template>
+  <div ref="shellRef" class="scene-shell">
+    <div ref="mapContainer" class="scene-map"></div>
+
+    <!-- 加载/错误遮罩 -->
+    <div v-if="status !== 'ready'" class="scene-overlay">
+      <template v-if="status === 'loading-amap'">
+        <span class="spinner"></span>
+        <strong>正在加载高德地图 JS API…</strong>
+      </template>
+      <template v-else-if="status === 'loading-model'">
+        <span class="spinner"></span>
+        <strong>正在加载校园 GLB 模型…</strong>
+        <small v-if="modelProgress >= 0">{{ modelProgress }}%</small>
+      </template>
+      <template v-else-if="status === 'error'">
+        <strong class="err">{{ errorMessage }}</strong>
+        <div class="err-hint">
+          <template v-if="!keyConfigured">
+            1. 打开高德开放平台 console.amap.com，创建「Web端(JS API)」应用<br />
+            2. 复制 Key 和「安全密钥 securityJsCode」<br />
+            3. 填入项目根目录的 <code>.env</code> 文件（已为你生成）<br />
+            4. 保存后重启 <code>npm run dev</code>
+          </template>
+          <template v-else>请检查模型路径、网络连接后刷新重试</template>
+        </div>
+      </template>
+    </div>
+
+    <!-- 标题徽标 -->
+    <div class="scene-badge">
+      <span class="badge-light"></span>
+      海南警察学院 · 3D 可视化场景
+    </div>
+
+    <!-- 工具栏 -->
+    <div class="toolbar">
+      <button class="toolbar__btn" @click="exportOpen = true">打印 / 导出</button>
+    </div>
+
+    <!-- 室内视角提示 -->
+    <div v-if="isIndoorView" class="indoor-badge">
+      <span class="indoor-badge__dot"></span>
+      室内视角 · 按 ESC 退出
+    </div>
+
+    <!-- 搜索框 -->
+    <div class="search-box">
+      <input
+        v-model="searchQuery"
+        type="text"
+        placeholder="搜索建筑名称，回车定位…"
+        @input="onSearchInput"
+        @keydown.enter="onSearchEnter"
+        @focus="searchFocused = true"
+        @blur="searchFocused = false"
+      />
+      <ul v-if="searchFocused && filteredObjects.length" class="search-dropdown">
+        <li
+          v-for="item in filteredObjects"
+          :key="item.name"
+          @mousedown.prevent="selectByName(item.name)"
+        >
+          <span class="search-dropdown__name">{{ item.name }}</span>
+          <span class="search-dropdown__coord">{{ item.lngLat[0].toFixed(5) }}, {{ item.lngLat[1].toFixed(5) }}</span>
+        </li>
+      </ul>
+    </div>
+
+    <!-- 悬停 tooltip -->
+    <div v-if="hovered" class="tooltip" :style="tooltipStyle">
+      {{ hovered.name }}
+      <span v-if="hovered.isRoom" class="tooltip__status" :style="{ color: roomStatusColor(hovered.room) }">
+        {{ roomStatusLabel(hovered.room) }}
+      </span>
+    </div>
+
+    <!-- 节点锚点标记：指示浮层指向的模型节点 -->
+    <div
+      v-if="anchorDot"
+      class="anchor-dot"
+      :style="{ left: `${anchorDot.x}px`, top: `${anchorDot.y}px` }"
+    ></div>
+
+    <!-- 属性面板（场景模式）：锚定在被点击的模型节点旁 -->
+    <div
+      v-if="selected && viewMode === 'scene'"
+      ref="panelEl"
+      class="property-panel"
+      :style="panelPos"
+    >
+      <div class="property-panel__head">
+        <span class="dot"></span>
+        <strong>{{ selectedProps.name }}</strong>
+        <button class="property-panel__close" aria-label="关闭" @click="closePanel">×</button>
+      </div>
+      <dl>
+        <div>
+          <dt>类型</dt>
+          <dd>{{ categoryLabel(selectedProps.category) }}</dd>
+        </div>
+        <div>
+          <dt>高度</dt>
+          <dd>{{ selectedProps.height ?? '—' }}</dd>
+        </div>
+        <div>
+          <dt>所属部门</dt>
+          <dd>{{ selectedProps.department ?? '—' }}</dd>
+        </div>
+        <div>
+          <dt>经纬度</dt>
+          <dd>{{ selected.lngLat[0].toFixed(6) }}, {{ selected.lngLat[1].toFixed(6) }}</dd>
+        </div>
+      </dl>
+      <p v-if="selectedProps.description" class="property-panel__desc">
+        {{ selectedProps.description }}
+      </p>
+      <div class="property-panel__actions">
+        <button class="property-panel__fly" @click="flyToSelected">定位到该建筑</button>
+        <button class="property-panel__rooms" @click="enterRoomMode">查看楼盘表</button>
+      </div>
+    </div>
+
+    <!-- 楼盘表面板（房间模式 / 分配模式共用） -->
+    <div v-if="viewMode === 'room' || viewMode === 'allocate'" class="room-panel">
+      <div class="room-panel__head">
+        <span class="dot"></span>
+        <strong>{{ roomBuilding?.name ?? '' }} · {{ viewMode === 'allocate' ? '房屋分配' : '楼盘表' }}</strong>
+        <button v-if="viewMode === 'room'" class="room-panel__alloc" @click="enterAllocationMode">分配模式</button>
+        <button class="room-panel__exit" @click="viewMode === 'allocate' ? exitAllocationMode() : exitRoomMode()">退出</button>
+      </div>
+      <div class="floor-switch">
+        <button
+          v-for="f in roomFloors"
+          :key="f"
+          class="floor-switch__btn"
+          :class="{ active: f === currentFloor }"
+          @click="switchFloor(f)"
+        >
+          {{ f }}F
+        </button>
+      </div>
+      <div class="legend">
+        <span v-for="s in ROOM_STATUS_ORDER" :key="s">
+          <i :style="{ background: ROOM_STATUS_CONFIG[s].color }"></i>
+          {{ ROOM_STATUS_CONFIG[s].label }}
+        </span>
+      </div>
+    </div>
+
+    <!-- 房间详情面板（仅房间模式）：锚定在被点击的房间格子旁 -->
+    <div
+      v-if="selectedRoom && viewMode === 'room'"
+      ref="roomDetailEl"
+      class="room-detail"
+      :style="roomDetailPos"
+    >
+      <div class="room-detail__head">
+        <strong>房间 {{ selectedRoom.roomNo }}</strong>
+        <span class="room-detail__status" :style="{ color: roomStatusColor(selectedRoom) }">
+          {{ roomStatusLabel(selectedRoom) }}
+        </span>
+        <button class="room-detail__close" aria-label="关闭" @click="selectedRoom = null">×</button>
+      </div>
+      <dl>
+        <div><dt>楼层</dt><dd>{{ selectedRoom.floor }}F</dd></div>
+        <div><dt>面积</dt><dd>{{ selectedRoom.area }} ㎡</dd></div>
+        <div><dt>使用部门</dt><dd>{{ selectedRoom.department ?? '—' }}</dd></div>
+        <div><dt>状态</dt><dd>{{ roomStatusLabel(selectedRoom) }}</dd></div>
+      </dl>
+      <p v-if="selectedRoom.remark" class="room-detail__desc">{{ selectedRoom.remark }}</p>
+    </div>
+
+    <!-- 房屋分配侧边栏 -->
+    <AllocationPanel
+      v-if="viewMode === 'allocate'"
+      :rooms="selectedRooms"
+      :total-area="totalArea"
+      :submitting="allocating"
+      :result-message="allocResultMessage"
+      :result-type="allocResultType"
+      @close="exitAllocationMode"
+      @remove="removeSelectedRoom"
+      @confirm="confirmAllocation"
+    />
+
+    <!-- 操作提示 -->
+    <div class="hint-bar">
+      <template v-if="viewMode === 'scene'">点击模型拾取建筑 · 双击进入室内视角 · 悬停显示名称 · 输入搜索定位</template>
+      <template v-else-if="viewMode === 'room'">点击房间查看详情 · 切换楼层查看不同布局</template>
+      <template v-else>点击房间选中（可跨楼层） · 右侧查看已选与总面积</template>
+    </div>
+
+    <!-- 打印/导出对话框 -->
+    <ExportDialog v-if="exportOpen" :scene="scene" :title="exportTitle" @close="exportOpen = false" />
+  </div>
+</template>
+
+<script setup lang="ts">
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, type Ref } from 'vue';
+import * as THREE from 'three';
+import { loadAMap } from '../utils/loadAMap';
+import { MapScene, type PickResult } from '../core/MapScene';
+import { DEFAULT_SCENE_CONFIG, type SceneConfig } from '../config/mapConfig';
+import {
+  SAMPLE_BUILDING_DATA,
+  fetchBuildingData,
+  type BuildingDataMap,
+  type BuildingProps,
+} from '../data/buildingData';
+import {
+  SAMPLE_ROOM_DATA,
+  fetchRoomData,
+  ROOM_STATUS_CONFIG,
+  ROOM_STATUS_ORDER,
+  type Room,
+  type RoomDataMap,
+} from '../data/roomData';
+import ExportDialog from './ExportDialog.vue';
+import AllocationPanel from './AllocationPanel.vue';
+import { computeTotalArea, submitAllocation } from '../utils/allocation';
+
+type Status = 'loading-amap' | 'loading-model' | 'ready' | 'error';
+
+const mapContainer = ref<HTMLDivElement | null>(null);
+const status = ref<Status>('loading-amap');
+const errorMessage = ref('');
+const keyConfigured = ref(false);
+const modelProgress = ref(-1);
+
+const config: SceneConfig = DEFAULT_SCENE_CONFIG;
+// 属性数据源：优先从 GeoJSON / 后端 API 读取，失败则回退到内置示例数据
+const buildingData = ref<BuildingDataMap>(SAMPLE_BUILDING_DATA);
+const roomData = ref<RoomDataMap>(SAMPLE_ROOM_DATA);
+
+const hovered = ref<PickResult | null>(null);
+const selected = ref<PickResult | null>(null);
+
+const viewMode = ref<'scene' | 'room' | 'allocate'>('scene');
+const roomBuilding = ref<{ name: string; object: THREE.Object3D } | null>(null);
+const roomFloors = ref<number[]>([]);
+const currentFloor = ref(1);
+const selectedRoom = ref<Room | null>(null);
+
+const isIndoorView = ref(false);
+const exportOpen = ref(false);
+
+// 分配模式状态
+const selectedRooms = ref<Room[]>([]);
+const allocating = ref(false);
+const allocResultMessage = ref<string | null>(null);
+const allocResultType = ref<'success' | 'error' | null>(null);
+
+const searchQuery = ref('');
+const searchFocused = ref(false);
+const objectList = ref<Array<{ name: string; lngLat: [number, number]; object: THREE.Object3D }>>([]);
+
+let scene: MapScene | null = null;
+
+// ---------------------------------------------------------------------------
+// 浮层锚定：弹窗显示在被点击的「模型节点」位置，而不是固定右下角
+// ---------------------------------------------------------------------------
+/** 外层容器（计算边界、做边缘夹紧） */
+const shellRef = ref<HTMLDivElement | null>(null);
+/** 属性面板 / 房间详情 DOM（用于测量真实尺寸，实现边缘自动翻转） */
+const panelEl = ref<HTMLElement | null>(null);
+const roomDetailEl = ref<HTMLElement | null>(null);
+
+/** 浮层与节点之间的间距（px），保持「紧挨着节点」的观感 */
+const ANCHOR_GAP = 14;
+/** 浮层与容器边缘的最小留白（px） */
+const EDGE_MARGIN = 12;
+
+/** 容器尺寸（窗口 resize 时刷新） */
+const containerSize = ref({ w: 0, h: 0 });
+
+function readContainerSize() {
+  const el = shellRef.value;
+  containerSize.value = {
+    w: el?.clientWidth || window.innerWidth,
+    h: el?.clientHeight || window.innerHeight,
+  };
+}
+
+const clamp = (v: number, min: number, max: number) => Math.min(Math.max(v, min), max);
+const toStyle = (p: { left: number; top: number }) => ({
+  left: `${Math.round(p.left)}px`,
+  top: `${Math.round(p.top)}px`,
+});
+
+/**
+ * 创建「贴着节点显示」的面板定位。
+ * 默认显示在节点右下方，空间不足时自动翻到左侧 / 上方，并夹紧在容器内。
+ */
+function createAnchoredPanel(
+  elRef: Ref<HTMLElement | null>,
+  anchorRef: Ref<{ x: number; y: number } | null>,
+) {
+  const size = ref({ w: 300, h: 240 });
+
+  /** 面板内容变化后调用：等 DOM 更新完测量真实尺寸 */
+  function measure() {
+    readContainerSize();
+    nextTick(() => {
+      const el = elRef.value;
+      if (!el) return;
+      const w = el.offsetWidth;
+      const h = el.offsetHeight;
+      if (w && h) size.value = { w, h };
+    });
+  }
+
+  const style = computed(() => {
+    // 容器尺寸兜底：读不到时用视口尺寸，避免算出 (0,0) 导致浮层被夹到页面左上角
+    const cw = containerSize.value.w || window.innerWidth;
+    const ch = containerSize.value.h || window.innerHeight;
+    const a = anchorRef.value;
+    const m = EDGE_MARGIN;
+
+    // 无锚点时的兜底：贴右侧居中
+    if (!a) {
+      return toStyle({
+        left: Math.max(m, cw - size.value.w - m),
+        top: Math.max(m, (ch - size.value.h) / 2),
+      });
+    }
+
+    // 默认显示在节点「左上方」，紧挨着节点；
+    // 左侧/上方空间不足时翻到节点右侧/下方，再夹紧在容器内。
+    let left = a.x - ANCHOR_GAP - size.value.w;
+    let top = a.y - ANCHOR_GAP - size.value.h;
+    if (left < m) left = a.x + ANCHOR_GAP;
+    if (top < m) top = a.y + ANCHOR_GAP;
+
+    return toStyle({
+      left: clamp(left, m, Math.max(m, cw - size.value.w - m)),
+      top: clamp(top, m, Math.max(m, ch - size.value.h - m)),
+    });
+  });
+
+  return { style, measure };
+}
+
+/** 被点击节点在容器内的像素坐标（面板 / 房间详情各一份） */
+const panelAnchor = ref<{ x: number; y: number } | null>(null);
+const roomAnchor = ref<{ x: number; y: number } | null>(null);
+
+const panel = createAnchoredPanel(panelEl, panelAnchor);
+const panelPos = panel.style;
+const roomDetail = createAnchoredPanel(roomDetailEl, roomAnchor);
+const roomDetailPos = roomDetail.style;
+
+/** 锚点标记：指示浮层指向的模型节点 */
+const anchorDot = computed(() => {
+  if (selected.value && viewMode.value === 'scene') return panelAnchor.value;
+  if (selectedRoom.value && viewMode.value === 'room') return roomAnchor.value;
+  return null;
+});
+
+/** 悬停 tooltip 位置（贴光标，靠近边缘时自动翻转） */
+const tooltipStyle = computed(() => {
+  const h = hovered.value;
+  if (!h) return {};
+  const { w: cw, h: ch } = containerSize.value;
+  // 粗略估算气泡尺寸（中文约 13px/字），用于判断是否需要翻转
+  const estW = Math.min(280, (h.name.length + 6) * 13);
+  const estH = 30;
+  const flipX = h.screenX + 14 + estW > cw;
+  const flipY = h.screenY + 14 + estH > ch;
+  return {
+    left: `${h.screenX + (flipX ? -14 : 14)}px`,
+    top: `${h.screenY + (flipY ? -14 : 14)}px`,
+    transform: `translate(${flipX ? '-100%' : '0'}, ${flipY ? '-100%' : '0'})`,
+  };
+});
+
+/** 视角变化（拖拽/缩放/旋转/飞行）后重新投影锚点，让浮层跟随节点 */
+function updateAnchors() {
+  if (!scene) return;
+  if (selected.value) {
+    const pos = scene.projectToScreen(selected.value.point);
+    if (pos) panelAnchor.value = pos;
+  }
+  if (selectedRoom.value) {
+    const pos = scene.getRoomScreenPos(selectedRoom.value.id);
+    if (pos) roomAnchor.value = pos;
+  }
+}
+
+function onWindowResize() {
+  readContainerSize();
+  updateAnchors();
+}
+
+/** 开发态诊断：输出锚点与容器尺寸，便于排查浮层定位问题（生产构建不输出） */
+function debugAnchor(label: string) {
+  if (!import.meta.env.DEV) return;
+  console.debug(
+    `[浮层锚定] ${label}`,
+    '节点屏幕坐标 =',
+    panelAnchor.value ?? roomAnchor.value,
+    '容器尺寸 =',
+    containerSize.value,
+  );
+}
+
+/** 容器尺寸变化监听（窗口 resize + 布局变化都覆盖） */
+let shellObserver: ResizeObserver | null = null;
+
+function observeContainer() {
+  readContainerSize();
+  window.addEventListener('resize', onWindowResize);
+  if (typeof ResizeObserver !== 'undefined' && shellRef.value) {
+    shellObserver = new ResizeObserver(() => {
+      readContainerSize();
+      updateAnchors();
+    });
+    shellObserver.observe(shellRef.value);
+  }
+}
+
+function unobserveContainer() {
+  window.removeEventListener('resize', onWindowResize);
+  shellObserver?.disconnect();
+  shellObserver = null;
+}
+
+const filteredObjects = computed(() => {
+  const q = searchQuery.value.trim().toLowerCase();
+  if (!q) return [];
+  return objectList.value.filter((o) => o.name.toLowerCase().includes(q)).slice(0, 10);
+});
+
+const selectedProps = computed<BuildingProps>(() => {
+  if (!selected.value) return { name: '' };
+  const base = buildingData.value[selected.value.name];
+  const height = base?.height ?? estimateHeight(selected.value.target);
+  return { ...(base ?? {}), name: selected.value.name, height };
+});
+
+const categoryLabel = (c?: string) =>
+  ({ building: '建筑', road: '道路', water: '水系', other: '其他' } as Record<string, string>)[c ?? 'other'] ?? '其他';
+
+const roomStatusLabel = (room?: Room): string =>
+  room ? (ROOM_STATUS_CONFIG[room.status]?.label ?? '') : '';
+
+const roomStatusColor = (room?: Room): string =>
+  room ? (ROOM_STATUS_CONFIG[room.status]?.color ?? '#888') : '#888';
+
+function estimateHeight(obj: THREE.Object3D): string {
+  const box = new THREE.Box3().setFromObject(obj);
+  // 地图 customCoords 空间为 Z-up，建筑高度取 Z 轴方向跨度
+  const h = box.max.z - box.min.z;
+  if (h > 0) return `${h.toFixed(1)} m`;
+  return '';
+}
+
+function closePanel() {
+  selected.value = null;
+  panelAnchor.value = null;
+  scene?.clearHighlight();
+}
+
+function flyToSelected() {
+  if (selected.value) scene?.flyToObject(selected.value.target);
+}
+
+// ---------------------------------------------------------------------------
+// 楼盘表模式
+// ---------------------------------------------------------------------------
+function enterRoomMode() {
+  if (!selected.value || selected.value.isRoom) return;
+  const { name, target } = selected.value;
+  const rooms = roomData.value[name] ?? [];
+  scene?.showRooms(target, rooms);
+  roomBuilding.value = { name, object: target };
+  roomFloors.value = scene?.getRoomFloors() ?? [];
+  currentFloor.value = roomFloors.value[0] ?? 1;
+  selectedRoom.value = null;
+  selected.value = null;
+  scene?.clearHighlight();
+  viewMode.value = 'room';
+}
+
+function exitRoomMode() {
+  scene?.clearRooms();
+  scene?.highlightRoom(null, 0);
+  viewMode.value = 'scene';
+  roomBuilding.value = null;
+  roomFloors.value = [];
+  selectedRoom.value = null;
+}
+
+function switchFloor(floor: number) {
+  currentFloor.value = floor;
+  scene?.setRoomFloor(floor);
+  if (viewMode.value === 'allocate') {
+    // 分配模式：保留已选房间的高亮
+    scene?.setSelectedRooms(new Set(selectedRooms.value.map((r) => r.id)));
+  } else {
+    selectedRoom.value = null;
+    scene?.highlightRoom(null, 0);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 室内视角 & 导出
+// ---------------------------------------------------------------------------
+const exportTitle = computed(() => {
+  if (viewMode.value === 'room' && roomBuilding.value) {
+    return `${roomBuilding.value.name}-${currentFloor.value}F楼盘表`;
+  }
+  return '海南警察学院-3D场景';
+});
+
+function handleDoubleClick(result: PickResult | null) {
+  // 双击建筑进入室内视角（忽略房间格子/空白）
+  if (!result || result.isRoom) return;
+  selected.value = null;
+  scene?.clearHighlight();
+  scene?.enterIndoorView(result.target);
+  isIndoorView.value = true;
+}
+
+function handleEscKey(e: KeyboardEvent) {
+  if (e.key === 'Escape') {
+    if (isIndoorView.value) {
+      scene?.exitIndoorView();
+      isIndoorView.value = false;
+    } else if (viewMode.value === 'allocate') {
+      exitAllocationMode();
+    } else if (exportOpen.value) {
+      exportOpen.value = false;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 分配模式
+// ---------------------------------------------------------------------------
+const totalArea = computed(() => computeTotalArea(selectedRooms.value));
+
+function enterAllocationMode() {
+  if (viewMode.value !== 'room' || !roomBuilding.value) return;
+  viewMode.value = 'allocate';
+  selectedRoom.value = null;
+  selectedRooms.value = [];
+  allocResultMessage.value = null;
+  allocResultType.value = null;
+  scene?.setSelectedRooms(new Set());
+}
+
+function exitAllocationMode() {
+  viewMode.value = 'room';
+  selectedRooms.value = [];
+  allocResultMessage.value = null;
+  allocResultType.value = null;
+  scene?.setSelectedRooms(new Set());
+}
+
+function toggleRoomSelection(room: Room) {
+  const idx = selectedRooms.value.findIndex((r) => r.id === room.id);
+  if (idx >= 0) selectedRooms.value.splice(idx, 1);
+  else selectedRooms.value.push(room);
+  scene?.setSelectedRooms(new Set(selectedRooms.value.map((r) => r.id)));
+}
+
+function removeSelectedRoom(roomId: string) {
+  selectedRooms.value = selectedRooms.value.filter((r) => r.id !== roomId);
+  scene?.setSelectedRooms(new Set(selectedRooms.value.map((r) => r.id)));
+}
+
+async function confirmAllocation(payload: { requestedArea: number; applicant: string }) {
+  allocating.value = true;
+  allocResultMessage.value = null;
+  try {
+    const result = await submitAllocation(
+      {
+        roomIds: selectedRooms.value.map((r) => r.id),
+        roomNos: selectedRooms.value.map((r) => r.roomNo),
+        totalArea: totalArea.value,
+        requestedArea: payload.requestedArea,
+        applicant: payload.applicant || undefined,
+      },
+      config.allocationApiUrl,
+    );
+    allocResultType.value = result.success ? 'success' : 'error';
+    allocResultMessage.value = result.message;
+
+    if (result.success) {
+      // 本地更新房间状态为「占用」并刷新格子颜色
+      for (const room of selectedRooms.value) {
+        room.status = 'occupied';
+        scene?.updateRoomStatus(room.id, 'occupied');
+      }
+      selectedRooms.value = [];
+      scene?.setSelectedRooms(new Set());
+    }
+  } finally {
+    allocating.value = false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 搜索
+// ---------------------------------------------------------------------------
+function selectByName(name: string) {
+  if (viewMode.value === 'allocate') exitAllocationMode();
+  if (viewMode.value === 'room') exitRoomMode();
+  const found = objectList.value.find((o) => o.name === name);
+  if (!found) return;
+  searchQuery.value = name;
+  searchFocused.value = false;
+  scene?.flyToObject(found.object);
+  const wp = new THREE.Vector3();
+  found.object.getWorldPosition(wp);
+  const result: PickResult = {
+    object: found.object,
+    target: found.object,
+    name: found.name,
+    point: wp,
+    lngLat: found.lngLat,
+    screenX: 0,
+    screenY: 0,
+    isRoom: false,
+  };
+  selected.value = result;
+  panelAnchor.value =
+    scene?.projectToScreen(wp) ?? {
+      x: containerSize.value.w / 2,
+      y: containerSize.value.h / 2,
+    };
+  panel.measure();
+  debugAnchor(`搜索定位「${found.name}」`);
+  scene?.highlight(found.object, config.highlightColor);
+}
+
+function onSearchInput() {
+  // 由 computed 自动过滤
+}
+
+function onSearchEnter() {
+  if (filteredObjects.value.length) selectByName(filteredObjects.value[0].name);
+}
+
+// ---------------------------------------------------------------------------
+// 数据加载
+// ---------------------------------------------------------------------------
+async function loadBuildingData(): Promise<void> {
+  const url = config.dataUrl;
+  if (!url) return;
+  try {
+    buildingData.value = await fetchBuildingData(url);
+  } catch (err) {
+    console.warn('[建筑数据] 加载失败，回退示例数据：', err);
+  }
+}
+
+async function loadRoomData(): Promise<void> {
+  const url = config.roomDataUrl;
+  if (!url) return;
+  try {
+    roomData.value = await fetchRoomData(url);
+  } catch (err) {
+    console.warn('[房间数据] 加载失败，回退示例数据：', err);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 生命周期
+// ---------------------------------------------------------------------------
+onMounted(async () => {
+  // 浮层定位依赖容器尺寸，必须尽早读取（否则尺寸为 0 会把弹窗夹到页面左上角）
+  observeContainer();
+
+  // 并行加载建筑/房间属性数据（不阻塞地图初始化）
+  loadBuildingData();
+  loadRoomData();
+
+  window.addEventListener('keydown', handleEscKey);
+
+  const key = import.meta.env.VITE_AMAP_KEY;
+  const securityCode = import.meta.env.VITE_AMAP_SECURITY_CODE;
+
+  if (!key || key.includes('填写')) {
+    status.value = 'error';
+    keyConfigured.value = false;
+    errorMessage.value = '未配置高德地图 key';
+    return;
+  }
+  keyConfigured.value = true;
+
+  try {
+    status.value = 'loading-amap';
+    const AMap = await loadAMap({ key, securityJsCode: securityCode });
+
+    if (!mapContainer.value) return;
+    scene = new MapScene(mapContainer.value, config, {
+      onModelProgress: (p) => (modelProgress.value = p),
+      onModelReady: () => {
+        status.value = 'ready';
+        objectList.value = scene?.listObjects() ?? [];
+      },
+      onModelError: () => {
+        status.value = 'error';
+        errorMessage.value = `GLB 模型加载失败：${config.modelUrl}`;
+      },
+      onMapError: (err) => {
+        status.value = 'error';
+        errorMessage.value = `地图初始化失败：${String(err)}`;
+      },
+      onHover: (result) => {
+        hovered.value = result;
+        if (viewMode.value === 'allocate') return; // 分配模式仅显示 tooltip
+        if (viewMode.value === 'room') {
+          // 房间模式：悬停房间格子
+          if (result?.isRoom && result.room) scene?.highlightRoom(result.room.id, 0.5);
+          else scene?.highlightRoom(null, 0);
+          return;
+        }
+        // 场景模式：悬停建筑（未选中时才应用）
+        if (!selected.value) {
+          if (result && !result.isRoom) scene?.highlight(result.target, config.hoverColor);
+          else scene?.clearHighlight();
+        }
+      },
+      onSelect: (result) => {
+        if (viewMode.value === 'allocate') {
+          // 分配模式：点击房间切换选中（跨楼层）
+          if (result?.isRoom && result.room) toggleRoomSelection(result.room);
+          return;
+        }
+        if (viewMode.value === 'room') {
+          // 房间模式：点击房间 → 详情（浮层锚定到该房间格子）
+          if (result?.isRoom && result.room) {
+            selectedRoom.value = result.room;
+            roomAnchor.value =
+              scene?.getRoomScreenPos(result.room.id) ?? { x: result.screenX, y: result.screenY };
+            roomDetail.measure();
+            scene?.highlightRoom(result.room.id, 0.7);
+          } else {
+            selectedRoom.value = null;
+            roomAnchor.value = null;
+            scene?.highlightRoom(null, 0);
+          }
+          return;
+        }
+        // 场景模式：点击建筑 → 属性面板（浮层锚定到点击的节点位置）
+        if (result && !result.isRoom) {
+          selected.value = result;
+          panelAnchor.value =
+            scene?.projectToScreen(result.point) ?? { x: result.screenX, y: result.screenY };
+          panel.measure();
+          debugAnchor(`点击「${result.name}」`);
+          scene?.highlight(result.target, config.highlightColor);
+        } else {
+          selected.value = null;
+          panelAnchor.value = null;
+          scene?.clearHighlight();
+        }
+      },
+      onDoubleClick: (result) => handleDoubleClick(result),
+      // 地图平移/缩放/旋转/飞行时，让锚定浮层跟随节点
+      onViewChange: () => updateAnchors(),
+    });
+
+    status.value = 'loading-model';
+    scene.init(AMap);
+  } catch (err) {
+    status.value = 'error';
+    errorMessage.value = `初始化失败：${(err as Error).message}`;
+  }
+});
+
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', handleEscKey);
+  unobserveContainer();
+  scene?.destroy();
+  scene = null;
+});
+</script>
+
+<style scoped>
+.scene-shell {
+  position: relative;
+  width: 100%;
+  height: 100dvh;
+  min-height: 480px;
+  overflow: hidden;
+  background: #0e1420;
+}
+
+.scene-map { position: absolute; inset: 0; }
+
+.scene-overlay {
+  position: absolute;
+  z-index: 300;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: #dce6f5;
+  background: rgba(14, 20, 32, 0.82);
+  backdrop-filter: blur(6px);
+}
+.scene-overlay strong { font-size: 15px; font-weight: 500; }
+.scene-overlay .err { color: #f87171; }
+.scene-overlay small { color: #8a97ad; font-size: 12px; }
+
+.err-hint {
+  max-width: 420px;
+  padding: 12px 16px;
+  border: 1px solid #33415c;
+  border-radius: 6px;
+  color: #a7b4c8;
+  background: rgba(20, 27, 43, 0.6);
+  font-size: 12px;
+  line-height: 1.9;
+  text-align: left;
+}
+.err-hint code {
+  padding: 1px 6px;
+  border-radius: 3px;
+  color: #eaf2ff;
+  background: #1a2335;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.spinner {
+  width: 30px;
+  height: 30px;
+  border: 2px solid #24324a;
+  border-top-color: #38bdf8;
+  border-radius: 50%;
+  animation: spin 0.9s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.scene-badge {
+  position: absolute;
+  z-index: 120;
+  top: 16px;
+  left: 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  padding: 0 12px;
+  border: 1px solid #24324a;
+  border-radius: 4px;
+  color: #c3d0e5;
+  background: rgba(20, 27, 43, 0.88);
+  font-size: 12px;
+  backdrop-filter: blur(8px);
+  pointer-events: none;
+}
+
+.badge-light, .dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #34d399;
+  box-shadow: 0 0 0 3px rgba(52, 211, 153, 0.15);
+}
+
+/* 工具栏 */
+.toolbar {
+  position: absolute;
+  z-index: 120;
+  top: 16px;
+  right: 16px;
+}
+.toolbar__btn {
+  height: 34px;
+  padding: 0 14px;
+  border: 1px solid #33415c;
+  border-radius: 6px;
+  color: #c3d0e5;
+  background: rgba(20, 27, 43, 0.9);
+  font-size: 13px;
+  cursor: pointer;
+  backdrop-filter: blur(8px);
+}
+.toolbar__btn:hover { border-color: #38bdf8; color: #eaf2ff; }
+
+/* 室内视角提示 */
+.indoor-badge {
+  position: absolute;
+  z-index: 120;
+  top: 60px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 30px;
+  padding: 0 14px;
+  border: 1px solid #f59e0b;
+  border-radius: 20px;
+  color: #ffe7c2;
+  background: rgba(20, 27, 43, 0.9);
+  font-size: 12px;
+  pointer-events: none;
+  backdrop-filter: blur(8px);
+}
+.indoor-badge__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #f59e0b;
+  box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.15);
+}
+
+/* 搜索框 */
+.search-box {
+  position: absolute;
+  z-index: 140;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 320px;
+  max-width: calc(100% - 200px);
+}
+.search-box input {
+  width: 100%;
+  height: 38px;
+  padding: 0 14px;
+  border: 1px solid #24324a;
+  border-radius: 6px;
+  color: #dce6f5;
+  background: rgba(20, 27, 43, 0.92);
+  font-size: 13px;
+  outline: none;
+  backdrop-filter: blur(8px);
+  transition: border-color 0.15s ease;
+}
+.search-box input:focus { border-color: #38bdf8; }
+.search-box input::placeholder { color: #6b7890; }
+
+.search-dropdown {
+  position: absolute;
+  top: 44px;
+  left: 0;
+  right: 0;
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  border: 1px solid #24324a;
+  border-radius: 6px;
+  background: rgba(20, 27, 43, 0.97);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.4);
+  backdrop-filter: blur(10px);
+  max-height: 280px;
+  overflow-y: auto;
+}
+.search-dropdown li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+  color: #dce6f5;
+}
+.search-dropdown li:hover { background: #22314a; }
+.search-dropdown__coord { color: #6b7890; font-size: 11px; font-family: ui-monospace, monospace; }
+
+/* tooltip */
+.tooltip {
+  position: absolute;
+  z-index: 150;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border: 1px solid #38bdf8;
+  border-radius: 4px;
+  color: #e6f4ff;
+  background: rgba(13, 22, 38, 0.94);
+  font-size: 12px;
+  white-space: nowrap;
+  pointer-events: none;
+}
+.tooltip__status { font-size: 11px; }
+
+/* 节点锚点标记：指示浮层指向的模型节点 */
+.anchor-dot {
+  position: absolute;
+  z-index: 125;
+  width: 10px;
+  height: 10px;
+  margin: -5px 0 0 -5px;
+  border: 2px solid #38bdf8;
+  border-radius: 50%;
+  background: rgba(56, 189, 248, 0.28);
+  pointer-events: none;
+  animation: anchor-pulse 1.8s ease-out infinite;
+}
+@keyframes anchor-pulse {
+  0% { box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.3); }
+  70% { box-shadow: 0 0 0 11px rgba(56, 189, 248, 0); }
+  100% { box-shadow: 0 0 0 11px rgba(56, 189, 248, 0); }
+}
+
+/* 属性面板（位置由 JS 按被点击节点动态计算） */
+.property-panel {
+  position: absolute;
+  z-index: 130;
+  width: 300px;
+  max-width: calc(100% - 24px);
+  border: 1px solid #24324a;
+  border-radius: 8px;
+  background: rgba(20, 27, 43, 0.95);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.35);
+  backdrop-filter: blur(12px);
+  overflow: hidden;
+}
+.property-panel__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 14px;
+  border-bottom: 1px solid #24324a;
+  color: #eaf2ff;
+}
+.property-panel__head strong { flex: 1; font-size: 15px; font-weight: 600; }
+.property-panel__close {
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: 4px;
+  color: #8a97ad;
+  background: transparent;
+  font-size: 18px;
+  cursor: pointer;
+}
+.property-panel__close:hover { color: #f87171; background: #22314a; }
+
+.property-panel dl { margin: 0; padding: 6px 14px 12px; }
+.property-panel dl div {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 0;
+  font-size: 13px;
+  border-bottom: 1px dashed #1e2a40;
+}
+.property-panel dl div:last-child { border-bottom: 0; }
+.property-panel dt { color: #8a97ad; }
+.property-panel dd {
+  margin: 0;
+  color: #eaf2ff;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  text-align: right;
+}
+.property-panel__desc {
+  margin: 0;
+  padding: 0 14px 14px;
+  color: #a7b4c8;
+  font-size: 12px;
+  line-height: 1.7;
+}
+.property-panel__actions {
+  display: flex;
+  gap: 8px;
+  padding: 0 14px 14px;
+}
+.property-panel__actions button {
+  flex: 1;
+  height: 34px;
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.property-panel__fly {
+  border: 1px solid #38bdf8;
+  color: #d6f0ff;
+  background: rgba(56, 189, 248, 0.12);
+}
+.property-panel__fly:hover { background: rgba(56, 189, 248, 0.24); }
+.property-panel__rooms {
+  border: 1px solid #34d399;
+  color: #d6ffe9;
+  background: rgba(52, 211, 153, 0.12);
+}
+.property-panel__rooms:hover { background: rgba(52, 211, 153, 0.24); }
+
+/* 楼盘表面板 */
+.room-panel {
+  position: absolute;
+  z-index: 130;
+  left: 16px;
+  top: 64px;
+  width: 220px;
+  border: 1px solid #24324a;
+  border-radius: 8px;
+  background: rgba(20, 27, 43, 0.95);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.35);
+  backdrop-filter: blur(12px);
+  overflow: hidden;
+}
+.room-panel__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 11px 14px;
+  border-bottom: 1px solid #24324a;
+  color: #eaf2ff;
+}
+.room-panel__head strong { flex: 1; font-size: 14px; font-weight: 600; }
+.room-panel__exit {
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid #f87171;
+  border-radius: 4px;
+  color: #fca5a5;
+  background: transparent;
+  font-size: 12px;
+  cursor: pointer;
+}
+.room-panel__exit:hover { background: rgba(248, 113, 113, 0.15); }
+
+.room-panel__alloc {
+  height: 26px;
+  padding: 0 10px;
+  margin-right: 6px;
+  border: 1px solid #22d3ee;
+  border-radius: 4px;
+  color: #a5f3fc;
+  background: rgba(34, 211, 238, 0.12);
+  font-size: 12px;
+  cursor: pointer;
+}
+.room-panel__alloc:hover { background: rgba(34, 211, 238, 0.24); }
+
+.floor-switch {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 12px 14px 8px;
+}
+.floor-switch__btn {
+  min-width: 40px;
+  height: 30px;
+  border: 1px solid #33415c;
+  border-radius: 4px;
+  color: #a7b4c8;
+  background: #1a2335;
+  font-size: 12px;
+  cursor: pointer;
+}
+.floor-switch__btn:hover { border-color: #38bdf8; color: #eaf2ff; }
+.floor-switch__btn.active {
+  border-color: #38bdf8;
+  color: #0b1220;
+  background: #38bdf8;
+  font-weight: 600;
+}
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 6px 14px 12px;
+}
+.legend span {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: #a7b4c8;
+  font-size: 11px;
+}
+.legend i {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+}
+
+/* 房间详情（位置由 JS 按被点击的房间格子动态计算） */
+.room-detail {
+  position: absolute;
+  z-index: 130;
+  width: 280px;
+  max-width: calc(100% - 24px);
+  border: 1px solid #24324a;
+  border-radius: 8px;
+  background: rgba(20, 27, 43, 0.95);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.35);
+  backdrop-filter: blur(12px);
+  overflow: hidden;
+}
+.room-detail__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 14px;
+  border-bottom: 1px solid #24324a;
+  color: #eaf2ff;
+}
+.room-detail__head strong { flex: 1; font-size: 15px; font-weight: 600; }
+.room-detail__status { font-size: 12px; }
+.room-detail__close {
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: 4px;
+  color: #8a97ad;
+  background: transparent;
+  font-size: 18px;
+  cursor: pointer;
+}
+.room-detail__close:hover { color: #f87171; background: #22314a; }
+
+.room-detail dl { margin: 0; padding: 6px 14px 12px; }
+.room-detail dl div {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 0;
+  font-size: 13px;
+  border-bottom: 1px dashed #1e2a40;
+}
+.room-detail dl div:last-child { border-bottom: 0; }
+.room-detail dt { color: #8a97ad; }
+.room-detail dd {
+  margin: 0;
+  color: #eaf2ff;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  text-align: right;
+}
+.room-detail__desc {
+  margin: 0;
+  padding: 0 14px 14px;
+  color: #a7b4c8;
+  font-size: 12px;
+  line-height: 1.7;
+}
+
+.hint-bar {
+  position: absolute;
+  z-index: 120;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 6px 14px;
+  border: 1px solid #24324a;
+  border-radius: 20px;
+  color: #7d8aa3;
+  background: rgba(20, 27, 43, 0.82);
+  font-size: 11px;
+  pointer-events: none;
+  backdrop-filter: blur(8px);
+}
+</style>

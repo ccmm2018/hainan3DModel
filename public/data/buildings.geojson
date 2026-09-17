@@ -1,0 +1,72 @@
+{
+  "type": "FeatureCollection",
+  "name": "hnjcxy_buildings",
+  "features": [
+    {
+      "type": "Feature",
+      "geometry": { "type": "Point", "coordinates": [110.280328, 19.75491] },
+      "properties": {
+        "name": "教学楼",
+        "height": 24,
+        "department": "教务处",
+        "category": "building",
+        "description": "本科教学主楼，含多媒体教室与智慧教室。"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": { "type": "Point", "coordinates": [110.2804, 19.755] },
+      "properties": {
+        "name": "实验楼",
+        "height": 20,
+        "department": "实验实训中心",
+        "category": "building",
+        "description": "承担刑技、网络、电子数据等实验实训教学。"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": { "type": "Point", "coordinates": [110.2802, 19.7548] },
+      "properties": {
+        "name": "图书馆",
+        "height": 18,
+        "department": "图书馆",
+        "category": "building",
+        "description": "馆藏纸质图书 51.7 万册，电子图书 42 万册。"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": { "type": "Point", "coordinates": [110.2805, 19.7547] },
+      "properties": {
+        "name": "警体综合训练馆",
+        "height": 16,
+        "department": "警体部",
+        "category": "building",
+        "description": "含射击馆、搏击馆、泅渡馆、模拟街区等训练场馆。"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": { "type": "Point", "coordinates": [110.2801, 19.7551] },
+      "properties": {
+        "name": "学生公寓",
+        "height": 15,
+        "department": "后勤保障",
+        "category": "building",
+        "description": "4 人一间，独立卫浴，配备空调与热水。"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": { "type": "Point", "coordinates": [110.2806, 19.7552] },
+      "properties": {
+        "name": "食堂",
+        "height": 10,
+        "department": "后勤保障",
+        "category": "building",
+        "description": "学生食堂，提供多样化餐饮服务。"
+      }
+    }
+  ]
+}

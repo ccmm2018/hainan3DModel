@@ -143,3 +143,45 @@ export function wgs84Gcj02Offset(lng: number, lat: number): { dlng: number; dlat
   );
   return { dlng, dlat, meters };
 }
+
+/**
+ * 将 GeoJSON（FeatureCollection / Feature / Geometry）中的坐标
+ * 从 WGS84 统一转换为 GCJ-02（高德坐标系），使外部地理数据（QGIS 导出等）
+ * 能与高德底图正确对齐。
+ *
+ * - 递归处理 Point / LineString / Polygon / Multi* 以及 GeometryCollection。
+ * - 返回新的 GeoJSON 对象，不修改入参。
+ * - 约定：本项目「数据源为 WGS84」，统一在此处转换为 GCJ-02；
+ *   若数据源本身已是 GCJ-02，请勿重复转换。
+ */
+export function normalizeGeoJSONToGcj02(geojson: any): any {
+  if (!geojson || typeof geojson !== 'object') return geojson;
+  const clone = JSON.parse(JSON.stringify(geojson));
+
+  const transformCoords = (coords: any): any => {
+    // 叶子节点：[lng, lat] 或 [lng, lat, z]
+    if (Array.isArray(coords) && typeof coords[0] === 'number') {
+      const [lng, lat, ...rest] = coords as number[];
+      const [glng, glat] = wgs84ToGcj02(lng, lat);
+      return [glng, glat, ...rest];
+    }
+    if (Array.isArray(coords)) return coords.map((c) => transformCoords(c));
+    return coords;
+  };
+
+  const walk = (obj: any): void => {
+    if (!obj || typeof obj !== 'object') return;
+    if (obj.type === 'FeatureCollection' && Array.isArray(obj.features)) {
+      obj.features.forEach(walk);
+    } else if (obj.type === 'Feature') {
+      walk(obj.geometry);
+    } else if (obj.type === 'GeometryCollection' && Array.isArray(obj.geometries)) {
+      obj.geometries.forEach(walk);
+    } else if (obj.coordinates) {
+      obj.coordinates = transformCoords(obj.coordinates);
+    }
+  };
+
+  walk(clone);
+  return clone;
+}

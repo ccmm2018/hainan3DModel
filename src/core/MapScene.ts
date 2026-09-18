@@ -132,11 +132,23 @@ export class MapScene {
       zoom: this.config.zoom,
       pitch: this.config.pitch,
       viewMode: '3D',
-      mapStyle: this.config.mapStyle || 'amap://styles/whitesmoke',
+      mapStyle: this.config.mapStyle || 'amap://styles/dark',
       zooms: [3, 20],
-      showLabel: true,
+      showLabel: this.config.showLabel,
       rotationEnable: true,
     });
+
+    // 底图降噪：去除 POI（point）兴趣点，仅保留背景 / 道路 / 建筑
+    try {
+      this.map.setFeatures(this.config.mapFeatures);
+    } catch {
+      /* 个别版本不支持 setFeatures，可忽略 */
+    }
+
+    // 商用授权下隐藏左下角 logo / 版权（免费版请勿开启，会违反高德服务条款）
+    if (this.config.hideAMapAttribution) {
+      this.container.classList.add('hide-amap-attribution');
+    }
 
     this.customCoords = this.map.customCoords;
     this.customCoords.setCenter(this.gcjCenter);

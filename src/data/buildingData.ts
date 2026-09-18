@@ -14,6 +14,8 @@
  * 属性映射键：以「对象名称」（GLB 节点名 / GeoJSON name 字段）作为主键。
  */
 
+import { normalizeGeoJSONToGcj02 } from '../utils/coordTransform';
+
 export interface BuildingProps {
   /** 名称 */
   name: string;
@@ -102,7 +104,7 @@ export async function fetchBuildingData(url: string): Promise<BuildingDataMap> {
   const json = await res.json();
 
   if (json?.type === 'FeatureCollection') {
-    return loadBuildingDataFromGeoJSON(json);
+    return loadBuildingDataFromGeoJSON(normalizeGeoJSONToGcj02(json));
   }
   if (Array.isArray(json)) {
     return loadBuildingDataFromArray(json as BuildingProps[]);

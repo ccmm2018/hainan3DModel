@@ -15,8 +15,18 @@ export interface SceneConfig {
   zoom: number;
   /** 初始倾斜角（3D 视角） */
   pitch: number;
-  /** 高德地图样式 */
+  /** 高德地图样式（内置：normal / dark / light / whitesmoke / grey / fresh 等；
+   *  也可填高德控制台「自定义地图」发布的样式 ID：amap://styles/<styleId>，
+   *  以彻底统一底图色系为项目专属配色） */
   mapStyle?: string;
+  /**
+   * 底图显示要素（底图降噪用）。
+   * 可选值：bg(区域面) / road(道路) / building(建筑) / point(兴趣点 POI)。
+   * 默认去掉 point（POI），保留背景 / 道路 / 建筑，让底图更干净。
+   */
+  mapFeatures: string[];
+  /** 是否显示地图文字注记（地名 / 路名等）。底图降噪时设为 false */
+  showLabel: boolean;
   /** GLB 模型文件路径（相对 public 目录） */
   modelUrl: string;
   /** 建筑属性数据源（GeoJSON 文件路径或后端 API URL），留空则用内置示例数据 */
@@ -60,6 +70,19 @@ export interface SceneConfig {
   defaultFloorCount: number;
   /** 房屋分配提交后端 API 地址（留空则本地模拟） */
   allocationApiUrl: string;
+  /**
+   * 是否隐藏高德地图左下角的 logo 与版权信息。
+   *
+   * ⚠️ 合规提醒（务必阅读）：
+   * 高德地图 JS API「免费版」的《服务条款》要求必须保留地图 logo 与版权信息，
+   * 且 API 会在每次渲染时重新注入这些节点，仅靠删除 DOM 无法彻底去除。
+   * 隐藏它们仅在「已获得高德商用授权」的前提下才合规；否则属于违反服务条款，
+   * 高德有权限制 / 封禁对应 key 的使用。
+   *
+   * 因此该开关默认关闭（false）以保证免费版合规；
+   * 请在你已与高德签订商用授权、明确允许去除品牌标识后再置为 true。
+   */
+  hideAMapAttribution: boolean;
 }
 
 /**
@@ -71,7 +94,7 @@ export const DEFAULT_SCENE_CONFIG: SceneConfig = {
   center: [110.280328, 19.75491],
   zoom: 16.5,
   pitch: 55,
-  mapStyle: 'amap://styles/whitesmoke',
+  mapStyle: 'amap://styles/dark',
   modelUrl: '/models/hnjcxy.glb',
   dataUrl: '/data/buildings.geojson',
   roomDataUrl: '/data/rooms.geojson',
@@ -91,4 +114,7 @@ export const DEFAULT_SCENE_CONFIG: SceneConfig = {
   indoorPitch: 40,
   defaultFloorCount: 4,
   allocationApiUrl: '',
+  hideAMapAttribution: false,
+  mapFeatures: ['bg', 'road', 'building'],
+  showLabel: false,
 };

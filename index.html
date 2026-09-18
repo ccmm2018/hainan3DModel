@@ -6,6 +6,21 @@
     <meta name="theme-color" content="#0e1420" />
     <meta name="description" content="海南警察学院 3D 可视化场景" />
     <title>海南警察学院 3D 可视化场景</title>
+    <!--
+      高德地图 logo / 版权隐藏样式（默认不生效）。
+      仅当 MapScene 检测到 config.hideAMapAttribution === true 时，
+      才会给地图容器加上 .hide-amap-attribution 类，下面规则才生效。
+      ⚠️ 该隐藏仅在高德「商用授权」允许去除品牌标识时方可启用，免费版请勿开启。
+    -->
+    <style>
+      .hide-amap-attribution .amap-logo,
+      .hide-amap-attribution .amap-copyright {
+        display: none !important;
+        visibility: hidden !important;
+        opacity: 0 !important;
+        pointer-events: none !important;
+      }
+    </style>
   </head>
   <body>
     <div id="app"></div>

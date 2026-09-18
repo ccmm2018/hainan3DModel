@@ -5,6 +5,8 @@
  * 数据来源：GeoJSON 或后端 API，与 buildingData 类似。
  */
 
+import { normalizeGeoJSONToGcj02 } from '../utils/coordTransform';
+
 /** 房间状态 */
 export type RoomStatus = 'idle' | 'occupied' | 'maintenance';
 
@@ -119,7 +121,7 @@ export async function fetchRoomData(url: string): Promise<RoomDataMap> {
   if (!res.ok) throw new Error(`加载失败：HTTP ${res.status}`);
   const json = await res.json();
 
-  if (json?.type === 'FeatureCollection') return loadRoomDataFromGeoJSON(json);
+  if (json?.type === 'FeatureCollection') return loadRoomDataFromGeoJSON(normalizeGeoJSONToGcj02(json));
   if (Array.isArray(json)) return loadRoomDataFromArray(json as Room[]);
   if (Array.isArray(json?.data)) return loadRoomDataFromArray(json.data as Room[]);
   if (Array.isArray(json?.list)) return loadRoomDataFromArray(json.list as Room[]);

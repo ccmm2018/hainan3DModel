@@ -123,12 +123,18 @@ export class MapScene {
   private AMap: any = null;
   private measureMode: 'none' | 'distance' | 'area' = 'none';
   private measureReportMode: 'distance' | 'area' = 'distance';
-  private measurePoints: [number, number][] = [];
-  private measureMarkers: any[] = [];
-  private measureTemp: any[] = [];
-  private measureMoveHandler: ((e: any) => void) | null = null;
-  private measureClickHandler: ((e: any) => void) | null = null;
-  private measureDblHandler: ((e: any) => void) | null = null;
+  /** 量算顶点（GCJ-02 经纬度） */
+  private measurePts: [number, number][] = [];
+  /** 量算图形所在的 Three.js 图层（绘制在 3D 模型之上，不会被 WebGL 自定义层盖住） */
+  private measureGroup: THREE.Group | null = null;
+  /** 是否处于「测量进行中」（已打点、尚未完成） */
+  private measuring = false;
+  // 容器级 DOM 监听：避免事件被 GLCustomLayer 画布吞掉，且可点在 3D 模型上
+  private measureDownHandler: ((e: PointerEvent) => void) | null = null;
+  private measureMoveDomHandler: ((e: PointerEvent) => void) | null = null;
+  private measureDblDomHandler: ((e: MouseEvent) => void) | null = null;
+  private measureClickDomHandler: ((e: MouseEvent) => void) | null = null;
+  private measureDownPos: { x: number; y: number; t: number } | null = null;
 
   constructor(container: HTMLDivElement, config: SceneConfig, callbacks: MapSceneCallbacks = {}) {
     this.container = container;
@@ -223,6 +229,10 @@ export class MapScene {
 
     this.scene = new THREE.Scene();
     this.camera = new THREE.PerspectiveCamera(60, width / height, 1, 1 << 30);
+
+    // 量算图层：独立于模型，始终绘制在模型之上
+    this.measureGroup = new THREE.Group();
+    this.scene.add(this.measureGroup);
 
     this.setupLights();
     this.loadModel(this.config.modelUrl);
@@ -689,138 +699,207 @@ export class MapScene {
 
   // -------------------------------------------------------------------------
   // 量算：测距（连续打点）/ 测面（闭合多边形）
+  // 关键修复：
+  //  1. AMap GLCustomLayer 的 WebGL 画布会盖住地图矢量覆盖物，旧实现用
+  //     AMap Polyline/Polygon 绘制，导致量算图形被 3D 模型挡住、点不到模型。
+  //     现改为在 Three.js 场景内绘制（measureGroup），始终显示在模型之上。
+  //  2. 旧实现用 map.on('click'/'dblclick')，事件易被 GLCustomLayer 吞掉，
+  //     且禁用 doubleClickZoom 后 map 的 dblclick 不再可靠触发。现改用容器级
+  //     DOM 监听 + map.containerToLngLat 取坐标，点在模型上也照样拾取；
+  //     结束用容器 dblclick + 显式「完成」按钮双保险。
   // -------------------------------------------------------------------------
   startMeasure(mode: 'distance' | 'area'): void {
-    if (!this.map) return;
+    if (!this.map || !this.scene) return;
     this.stopMeasure();
     this.measureMode = mode;
     this.measureReportMode = mode;
-    this.measureMoveHandler = (e: any) => this.onMeasureMove(e);
-    this.measureClickHandler = (e: any) => this.onMeasureClick(e);
-    this.measureDblHandler = (e: any) => this.onMeasureDblClick(e);
-    this.map.on('mousemove', this.measureMoveHandler);
-    this.map.on('click', this.measureClickHandler);
-    this.map.on('dblclick', this.measureDblHandler);
-    // 测量期间禁用双击放大，避免与「双击结束」冲突
+    this.measuring = true;
+    this.bindMeasureDom();
+    // 测量期间禁用双击放大，避免与「双击结束」冲突（DOM dblclick 仍会触发）
     try { this.map.setStatus({ doubleClickZoom: false }); } catch { /* ignore */ }
   }
 
-  stopMeasure(): void {
-    this.measureMode = 'none';
-    if (this.measureMoveHandler) { this.map?.off('mousemove', this.measureMoveHandler); this.measureMoveHandler = null; }
-    if (this.measureClickHandler) { this.map?.off('click', this.measureClickHandler); this.measureClickHandler = null; }
-    if (this.measureDblHandler) { this.map?.off('dblclick', this.measureDblHandler); this.measureDblHandler = null; }
-    this.clearTemp();
-    this.measureMarkers.forEach((m) => this.map?.remove(m));
-    this.measureMarkers = [];
-    this.measurePoints = [];
-    try { this.map?.setStatus({ doubleClickZoom: true }); } catch { /* ignore */ }
-    this.callbacks.onMeasureUpdate?.(null);
-  }
-
-  private onMeasureClick(e: any): void {
-    if (this.measureMode === 'none') return;
-    const ll = e?.lnglat;
-    if (!ll) return;
-    const pt: [number, number] = [ll.getLng(), ll.getLat()];
-    const n = this.measurePoints.length;
-    if (n > 0 && this.map.getDistance(this.measurePoints[n - 1], pt) < 0.5) return; // 忽略双击产生的重复点
-    this.measurePoints.push(pt);
-    const marker = new this.AMap.CircleMarker({
-      center: pt,
-      radius: 5,
-      strokeColor: this.measureMode === 'distance' ? '#38bdf8' : '#f59e0b',
-      strokeWeight: 2,
-      fillColor: '#ffffff',
-      fillOpacity: 1,
-      zIndex: 210,
-      bubble: true,
-    });
-    this.map.add(marker);
-    this.measureMarkers.push(marker);
-    this.renderMeasure();
-  }
-
-  private onMeasureMove(e: any): void {
-    if (this.measureMode === 'none' || this.measurePoints.length === 0) return;
-    const ll = e?.lnglat;
-    if (!ll) return;
-    this.renderMeasure([ll.getLng(), ll.getLat()]);
-  }
-
-  private onMeasureDblClick(_e: any): void {
-    if (this.measureMode === 'none') return;
+  /** 主动结束测量（保留结果图形），与双击结束等效 */
+  completeMeasure(): void {
     this.finishMeasure();
   }
 
-  private finishMeasure(): void {
+  stopMeasure(): void {
+    this.measuring = false;
+    this.unbindMeasureDom();
+    this.clearMeasureGraphics();
+    this.measurePts = [];
+    try { this.map?.setStatus({ doubleClickZoom: true }); } catch { /* ignore */ }
     this.measureMode = 'none';
-    if (this.measureMoveHandler) { this.map.off('mousemove', this.measureMoveHandler); this.measureMoveHandler = null; }
-    if (this.measureClickHandler) { this.map.off('click', this.measureClickHandler); this.measureClickHandler = null; }
-    if (this.measureDblHandler) { this.map.off('dblclick', this.measureDblHandler); this.measureDblHandler = null; }
-    try { this.map.setStatus({ doubleClickZoom: true }); } catch { /* ignore */ }
+    this.callbacks.onMeasureUpdate?.(null);
+  }
+
+  /** 绑定容器级 DOM 事件（穿透 GLCustomLayer，可点在模型上）
+   *  用 window + 捕获阶段监听，避免被高德内部 stopPropagation 拦截；
+   *  并用 container.contains(target) 过滤掉工具栏等地图外区域的点击。 */
+  private bindMeasureDom(): void {
+    if (!this.container) return;
+    const inMap = (t: EventTarget | null) => t instanceof Node && this.container.contains(t);
+    this.measureDownHandler = (e: PointerEvent) => {
+      if (e.button !== 0 || !inMap(e.target)) return; // 仅地图内左键
+      this.measureDownPos = { x: e.clientX, y: e.clientY, t: Date.now() };
+    };
+    this.measureMoveDomHandler = (e: PointerEvent) => {
+      if (this.measurePts.length === 0 || !inMap(e.target)) return;
+      const ll = this.pixelToGcj(e);
+      if (ll) this.renderMeasure(ll);
+    };
+    this.measureDblDomHandler = (e: MouseEvent) => {
+      if (!inMap(e.target)) return;
+      e.preventDefault();
+      this.finishMeasure();
+    };
+    this.measureClickDomHandler = (e: MouseEvent) => {
+      const down = this.measureDownPos;
+      this.measureDownPos = null;
+      if (!down || !inMap(e.target)) return;
+      // 区分「点击打点」与「拖拽平移地图」：移动过大或按住过久视为地图操作
+      const moved = Math.hypot(e.clientX - down.x, e.clientY - down.y);
+      const held = Date.now() - down.t;
+      if (moved > 5 || held > 600) return;
+      const ll = this.pixelToGcj(e);
+      if (ll) this.addMeasurePoint(ll);
+    };
+    const opt = { capture: true } as AddEventListenerOptions;
+    window.addEventListener('pointerdown', this.measureDownHandler, opt);
+    window.addEventListener('pointermove', this.measureMoveDomHandler, opt);
+    window.addEventListener('dblclick', this.measureDblDomHandler, opt);
+    window.addEventListener('click', this.measureClickDomHandler, opt);
+  }
+
+  private unbindMeasureDom(): void {
+    if (!this.container) return;
+    const opt = { capture: true } as AddEventListenerOptions;
+    if (this.measureDownHandler) window.removeEventListener('pointerdown', this.measureDownHandler, opt);
+    if (this.measureMoveDomHandler) window.removeEventListener('pointermove', this.measureMoveDomHandler, opt);
+    if (this.measureDblDomHandler) window.removeEventListener('dblclick', this.measureDblDomHandler, opt);
+    if (this.measureClickDomHandler) window.removeEventListener('click', this.measureClickDomHandler, opt);
+    this.measureDownHandler = null;
+    this.measureMoveDomHandler = null;
+    this.measureDblDomHandler = null;
+    this.measureClickDomHandler = null;
+    this.measureDownPos = null;
+  }
+
+  /** 屏幕像素（相对容器）→ GCJ-02 经纬度 */
+  private pixelToGcj(e: { clientX: number; clientY: number }): [number, number] | null {
+    if (!this.map || !this.AMap) return null;
+    const rect = this.container.getBoundingClientRect();
+    const px = e.clientX - rect.left;
+    const py = e.clientY - rect.top;
+    try {
+      const pixel = new this.AMap.Pixel(px, py);
+      const converter = this.map.containerToLngLat || this.map.pixelToLngLat;
+      const ll = converter.call(this.map, pixel);
+      return [ll.getLng(), ll.getLat()];
+    } catch {
+      return null;
+    }
+  }
+
+  private addMeasurePoint(pt: [number, number]): void {
+    // 忽略与上一点的重复（双击产生的第二次 click）
+    const n = this.measurePts.length;
+    if (n > 0 && this.map && this.map.getDistance(this.measurePts[n - 1], pt) < 0.3) return;
+    this.measurePts.push(pt);
     this.renderMeasure();
-    this.reportMeasure();
   }
 
-  private clearTemp(): void {
-    this.measureTemp.forEach((o) => this.map?.remove(o));
-    this.measureTemp = [];
-  }
-
-  private renderMeasure(cursor?: [number, number]): void {
-    this.clearTemp();
-    const pts = cursor ? [...this.measurePoints, cursor] : this.measurePoints;
-    if (this.measureMode === 'distance') {
-      if (pts.length >= 1) {
-        const line = new this.AMap.Polyline({
-          path: pts,
-          strokeColor: '#38bdf8',
-          strokeWeight: 3,
-          strokeOpacity: 0.95,
-          showDir: true,
-          zIndex: 200,
-          bubble: true,
-        });
-        this.map.add(line);
-        this.measureTemp.push(line);
-      }
-    } else if (this.measureMode === 'area') {
-      if (pts.length >= 2) {
-        const line = new this.AMap.Polyline({
-          path: pts,
-          strokeColor: '#f59e0b',
-          strokeWeight: 3,
-          zIndex: 200,
-          bubble: true,
-        });
-        this.map.add(line);
-        this.measureTemp.push(line);
-      }
-      if (pts.length >= 3) {
-        const poly = new this.AMap.Polygon({
-          path: pts,
-          strokeColor: '#f59e0b',
-          strokeWeight: 2,
-          fillColor: '#f59e0b',
-          fillOpacity: 0.25,
-          zIndex: 199,
-          bubble: true,
-        });
-        this.map.add(poly);
-        this.measureTemp.push(poly);
-      }
+  private finishMeasure(): void {
+    const minPts = this.measureReportMode === 'area' ? 3 : 2;
+    if (this.measurePts.length < minPts) {
+      // 点数不足，视为取消
+      this.stopMeasure();
+      return;
+    }
+    this.measuring = false;
+    this.measureMode = 'none'; // 通知上层（Vue 工具栏）测量已结束
+    this.unbindMeasureDom();
+    try { this.map?.setStatus({ doubleClickZoom: true }); } catch { /* ignore */ }
+    if (this.measureReportMode === 'area') {
+      this.renderMeasure(); // 闭合多边形（不再追加预览点）
     }
     this.reportMeasure();
   }
 
+  /** GCJ-02 经纬度 → 地图世界坐标（与模型同一坐标系，地面高度 z 略抬以避免被模型遮挡） */
+  private gcjToWorld(pt: [number, number]): THREE.Vector3 {
+    const [x, y] = this.customCoords.lngLatToCoord(pt);
+    return new THREE.Vector3(x, y, 0.5);
+  }
+
+  private clearMeasureGraphics(): void {
+    if (!this.measureGroup) return;
+    for (let i = this.measureGroup.children.length - 1; i >= 0; i--) {
+      const obj = this.measureGroup.children[i] as any;
+      obj.geometry?.dispose?.();
+      const mat = obj.material;
+      if (Array.isArray(mat)) mat.forEach((m: any) => m.dispose?.());
+      else mat?.dispose?.();
+      this.measureGroup.remove(obj);
+    }
+  }
+
+  /** 在 Three.js 场景中重建量算图形（始终绘制在 3D 模型之上） */
+  private renderMeasure(cursor?: [number, number]): void {
+    if (!this.measureGroup || !this.customCoords) return;
+    this.clearMeasureGraphics();
+    const pts = cursor ? [...this.measurePts, cursor] : this.measurePts;
+    if (pts.length === 0) { this.reportMeasure(); return; }
+
+    const worldPts = pts.map((p) => this.gcjToWorld(p));
+    const color = this.measureMode === 'distance' ? 0x38bdf8 : 0xf59e0b;
+
+    // 折线 / 多边形边
+    const lineGeo = new THREE.BufferGeometry().setFromPoints(worldPts);
+    const lineMat = new THREE.LineBasicMaterial({ color, depthTest: false, transparent: true, opacity: 0.95 });
+    lineMat.toneMapped = false;
+    const line = new THREE.Line(lineGeo, lineMat);
+    line.renderOrder = 999;
+    this.measureGroup.add(line);
+
+    // 测面：闭合填充
+    if (this.measureMode === 'area' && worldPts.length >= 3) {
+      const shape = new THREE.Shape();
+      shape.moveTo(worldPts[0].x, worldPts[0].y);
+      for (let i = 1; i < worldPts.length; i++) shape.lineTo(worldPts[i].x, worldPts[i].y);
+      shape.closePath();
+      const fillGeo = new THREE.ShapeGeometry(shape);
+      const fillMat = new THREE.MeshBasicMaterial({
+        color, depthTest: false, transparent: true, opacity: 0.22, side: THREE.DoubleSide,
+      });
+      fillMat.toneMapped = false;
+      const fill = new THREE.Mesh(fillGeo, fillMat);
+      fill.renderOrder = 998;
+      this.measureGroup.add(fill);
+    }
+
+    // 顶点圆点
+    const dotGeo = new THREE.SphereGeometry(1.4, 12, 12);
+    const dotMat = new THREE.MeshBasicMaterial({ color: 0xffffff, depthTest: false });
+    dotMat.toneMapped = false;
+    for (const wp of worldPts) {
+      const dot = new THREE.Mesh(dotGeo, dotMat);
+      dot.position.copy(wp);
+      dot.renderOrder = 1000;
+      this.measureGroup.add(dot);
+    }
+
+    this.reportMeasure();
+  }
+
   private reportMeasure(): void {
-    const mode = this.measureMode !== 'none' ? this.measureMode : this.measureReportMode;
+    const mode = this.measuring ? this.measureMode : this.measureReportMode;
     if (mode === 'distance') {
       const segs: number[] = [];
       let total = 0;
-      for (let i = 1; i < this.measurePoints.length; i++) {
-        const d = this.map.getDistance(this.measurePoints[i - 1], this.measurePoints[i]);
+      for (let i = 1; i < this.measurePts.length; i++) {
+        const d = this.map!.getDistance(this.measurePts[i - 1], this.measurePts[i]);
         segs.push(d);
         total += d;
       }
@@ -828,19 +907,19 @@ export class MapScene {
         mode: 'distance',
         segments: segs,
         value: total,
-        points: this.measurePoints.length,
+        points: this.measurePts.length,
       });
       return;
     }
     let value = 0;
-    if (this.measurePoints.length >= 3) {
-      const ring = [...this.measurePoints, this.measurePoints[0]];
+    if (this.measurePts.length >= 3) {
+      const ring = [...this.measurePts, this.measurePts[0]];
       value = area({ type: 'Polygon', coordinates: [ring] }) as number;
     }
     this.callbacks.onMeasureUpdate?.({
       mode: 'area',
       value,
-      points: this.measurePoints.length,
+      points: this.measurePts.length,
     });
   }
 

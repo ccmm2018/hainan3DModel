@@ -46,6 +46,7 @@
         <span class="toolbar__label">量算</span>
         <button class="toolbar__btn" :class="{ active: measureMode === 'distance' }" @click="startMeasure('distance')">测距</button>
         <button class="toolbar__btn" :class="{ active: measureMode === 'area' }" @click="startMeasure('area')">测面</button>
+        <button v-if="measureMode !== 'none'" class="toolbar__btn toolbar__btn--ok" @click="completeMeasure">完成</button>
         <button v-if="measureResult" class="toolbar__btn toolbar__btn--ghost" @click="stopMeasure">清除</button>
       </div>
       <button class="toolbar__btn" @click="exportOpen = true">打印 / 导出</button>
@@ -69,7 +70,7 @@
         <div class="measure-panel__total">总面积：<b>{{ formatArea(measureResult.value) }}</b></div>
         <div class="measure-panel__meta">顶点数：{{ measureResult.points }}</div>
       </div>
-      <div class="measure-panel__tip">连续点击打点 · 双击结束</div>
+      <div class="measure-panel__tip">在地图或模型上连续点击打点 · 双击或点「完成」结束</div>
     </div>
 
     <!-- 室内视角提示 -->
@@ -690,6 +691,10 @@ function toggleIndoor() {
 function startMeasure(mode: 'distance' | 'area') {
   measureMode.value = mode;
   scene?.startMeasure(mode);
+}
+
+function completeMeasure() {
+  scene?.completeMeasure();
 }
 
 function stopMeasure() {

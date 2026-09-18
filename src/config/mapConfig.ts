@@ -15,9 +15,11 @@ export interface SceneConfig {
   zoom: number;
   /** 初始倾斜角（3D 视角） */
   pitch: number;
-  /** 高德地图样式（内置：normal / dark / light / whitesmoke / grey / fresh 等；
+  /** 高德地图样式（内置：whitesmoke / light / normal / grey / fresh 等；
    *  也可填高德控制台「自定义地图」发布的样式 ID：amap://styles/<styleId>，
-   *  以彻底统一底图色系为项目专属配色） */
+   *  以彻底统一底图色系为项目专属配色）。
+   *  注意：数字孪生展示推荐使用浅色底图（whitesmoke / light），
+   *  浅色底图下高德 3D 建筑会以浅灰「白模」呈现，叠加路网 / 绿地 / 水系更清晰。 */
   mapStyle?: string;
   /**
    * 底图显示要素（底图降噪用）。
@@ -94,7 +96,8 @@ export const DEFAULT_SCENE_CONFIG: SceneConfig = {
   center: [110.280328, 19.75491],
   zoom: 16.5,
   pitch: 55,
-  mapStyle: 'amap://styles/dark',
+  // 数字孪生底色：浅灰白底图，周边建筑以浅灰「白模」呈现，路网/绿地/水系清晰可见
+  mapStyle: 'amap://styles/whitesmoke',
   modelUrl: '/models/hnjcxy.glb',
   dataUrl: '/data/buildings.geojson',
   roomDataUrl: '/data/rooms.geojson',

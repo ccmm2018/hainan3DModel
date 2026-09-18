@@ -681,17 +681,23 @@ export class MapScene {
 
   // -------------------------------------------------------------------------
   // 视图切换（2D / 2.5D / 三维 / 退出室内），切换后保留当前定位
+  // 说明：AMap JSAPI 2.0 没有运行时的 setViewMode（仅构造参数 viewMode 支持），
+  // 因此「2D/3D」通过 setPitch + setRotation 实现：2D = 俯仰 0（正上方平视），
+  // 2.5D/三维 = 不同俯仰角。setViewMode 仅作兼容兜底（部分版本存在）。
   // -------------------------------------------------------------------------
   setMapView(mode: '2d' | '2.5d' | '3d'): void {
     if (!this.map) return;
     if (this.indoorView) this.exitIndoorView(); // 若在室内，先退出并恢复原视角
     const center = this.map.getCenter();
     const zoom = this.map.getZoom();
+    // 兼容兜底：旧版 1.4 才有 setViewMode，2.0 不存在，故先 typeof 判断
+    if (typeof this.map.setViewMode === 'function') {
+      try { this.map.setViewMode(mode === '2d' ? '2D' : '3D'); } catch { /* ignore */ }
+    }
     if (mode === '2d') {
-      this.map.setViewMode('2D');
+      this.map.setPitch(0);
       this.map.setRotation(0);
     } else {
-      this.map.setViewMode('3D');
       this.map.setPitch(mode === '2.5d' ? 35 : this.config.pitch);
     }
     this.map.setZoomAndCenter(zoom, center, true);
@@ -786,9 +792,22 @@ export class MapScene {
     this.measureDownPos = null;
   }
 
+  /** GCJ-02 经纬度间的测地距离（米），自包含 Haversine，避免依赖 AMap 不存在的 map.getDistance */
+  private gcjDistance(a: [number, number], b: [number, number]): number {
+    const R = 6378137; // 地球半径（米）
+    const rad = Math.PI / 180;
+    const lat1 = a[1] * rad;
+    const lat2 = b[1] * rad;
+    const dLat = (b[1] - a[1]) * rad;
+    const dLng = (b[0] - a[0]) * rad;
+    const s =
+      Math.sin(dLat / 2) ** 2 +
+      Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
+    return 2 * R * Math.asin(Math.min(1, Math.sqrt(s)));
+  }
+
   /** 屏幕像素（相对容器）→ GCJ-02 经纬度 */
-  private pixelToGcj(e: { clientX: number; clientY: number }): [number, number] | null {
-    if (!this.map || !this.AMap) return null;
+  private pixelToGcj(e: { clientX: number; clientY: number }): [number, number] | null {    if (!this.map || !this.AMap) return null;
     const rect = this.container.getBoundingClientRect();
     const px = e.clientX - rect.left;
     const py = e.clientY - rect.top;
@@ -805,7 +824,7 @@ export class MapScene {
   private addMeasurePoint(pt: [number, number]): void {
     // 忽略与上一点的重复（双击产生的第二次 click）
     const n = this.measurePts.length;
-    if (n > 0 && this.map && this.map.getDistance(this.measurePts[n - 1], pt) < 0.3) return;
+    if (n > 0 && this.gcjDistance(this.measurePts[n - 1], pt) < 0.3) return;
     this.measurePts.push(pt);
     this.renderMeasure();
   }
@@ -891,6 +910,19 @@ export class MapScene {
     }
 
     this.reportMeasure();
+    // AMap 2.0 GLCustomLayer 空闲时按需渲染：不打这行，新增的线条不会立即重绘
+    this.requestRender();
+  }
+
+  /** 强制地图（含 GLCustomLayer）重绘一帧，确保量算图形即时可见 */
+  private requestRender(): void {
+    if (!this.map) return;
+    try {
+      if (typeof this.map.render === 'function') this.map.render();
+      else if (typeof this.map.resize === 'function') this.map.resize();
+    } catch {
+      /* ignore */
+    }
   }
 
   private reportMeasure(): void {
@@ -899,7 +931,7 @@ export class MapScene {
       const segs: number[] = [];
       let total = 0;
       for (let i = 1; i < this.measurePts.length; i++) {
-        const d = this.map!.getDistance(this.measurePts[i - 1], this.measurePts[i]);
+        const d = this.gcjDistance(this.measurePts[i - 1], this.measurePts[i]);
         segs.push(d);
         total += d;
       }

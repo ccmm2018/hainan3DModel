@@ -46,8 +46,8 @@
         <span class="toolbar__label">量算</span>
         <button class="toolbar__btn" :class="{ active: measureTool === 'distance' }" @click="startMeasure('distance')">测距</button>
         <button class="toolbar__btn" :class="{ active: measureTool === 'area' }" @click="startMeasure('area')">测面</button>
-        <button v-if="measureMode !== 'none'" class="toolbar__btn toolbar__btn--ok" @click="completeMeasure">完成</button>
-        <button v-if="measureTool !== 'none' || measureResult" class="toolbar__btn toolbar__btn--ghost" @click="stopMeasure">清除</button>
+        <button v-if="measureActive" class="toolbar__btn toolbar__btn--ok" @click="completeMeasure">完成</button>
+        <button class="toolbar__btn toolbar__btn--ghost" @click="stopMeasure">清除</button>
       </div>
       <button class="toolbar__btn" @click="exportOpen = true">打印 / 导出</button>
     </div>
@@ -364,7 +364,7 @@ let scene: MapScene | null = null;
 
 // 视图 / 量算 UI 状态
 const currentView = ref<'2d' | '2.5d' | '3d'>('3d');
-const measureMode = ref<'none' | 'distance' | 'area'>('none'); // 是否正在测量中（控制「完成」按钮）
+const measureActive = ref(false); // 是否正在打点测量中（控制「完成」按钮显隐）
 const measureTool = ref<'none' | 'distance' | 'area'>('none'); // 已选中的量算工具（高亮，清除前保持）
 const measureResult = ref<MeasureResult | null>(null);
 
@@ -645,7 +645,7 @@ function handleDoubleClick(result: PickResult | null) {
 
 function handleEscKey(e: KeyboardEvent) {
   if (e.key === 'Escape') {
-    if (measureMode.value !== 'none' || measureResult.value) {
+    if (measureTool.value !== 'none' || measureResult.value) {
       stopMeasure();
       return;
     }
@@ -691,7 +691,6 @@ function toggleIndoor() {
 
 function startMeasure(mode: 'distance' | 'area') {
   measureTool.value = mode; // 高亮保持，直到点击「清除」
-  measureMode.value = mode;
   scene?.startMeasure(mode);
 }
 
@@ -701,7 +700,6 @@ function completeMeasure() {
 
 function stopMeasure() {
   measureTool.value = 'none';
-  measureMode.value = 'none';
   scene?.stopMeasure();
 }
 
@@ -947,8 +945,9 @@ onMounted(async () => {
       // 量算结果回调：null 表示清除；finished（measuringMode==='none'）时仅保留结果、取消按钮高亮
       onMeasureUpdate: (data) => {
         measureResult.value = data;
-        // 测量已结束（measuringMode==='none'）时仅隐藏「完成」按钮，保留工具高亮（measureTool 不变）
-        if (scene?.measuringMode === 'none') measureMode.value = 'none';
+      },
+      onMeasureActive: (active: boolean) => {
+        measureActive.value = active;
       },
       // 地图平移/缩放/旋转/飞行时，让锚定浮层跟随节点
       onViewChange: () => updateAnchors(),

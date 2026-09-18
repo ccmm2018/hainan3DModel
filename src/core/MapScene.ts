@@ -67,6 +67,8 @@ export interface MapSceneCallbacks {
   onViewChange?: () => void;
   /** 测量结果更新回调（测距 / 测面；传 null 表示清除） */
   onMeasureUpdate?: (data: MeasureResult | null) => void;
+  /** 测量进行中状态变化（true=正在打点，false=已完成/已清除），用于「完成」按钮显隐 */
+  onMeasureActive?: (active: boolean) => void;
 }
 
 const R_METERS_PER_DEG = 111319.49; // 墨卡托经度方向 米/度
@@ -723,6 +725,7 @@ export class MapScene {
     this.bindMeasureDom();
     // 测量期间禁用双击放大，避免与「双击结束」冲突（DOM dblclick 仍会触发）
     try { this.map.setStatus({ doubleClickZoom: false }); } catch { /* ignore */ }
+    this.callbacks.onMeasureActive?.(true);
   }
 
   /** 主动结束测量（保留结果图形），与双击结束等效 */
@@ -738,6 +741,9 @@ export class MapScene {
     try { this.map?.setStatus({ doubleClickZoom: true }); } catch { /* ignore */ }
     this.measureMode = 'none';
     this.callbacks.onMeasureUpdate?.(null);
+    this.callbacks.onMeasureActive?.(false);
+    // 立即重绘一帧，确保清除后的画面（无线段）即时反映，不留残影
+    this.requestRender();
   }
 
   /** 绑定容器级 DOM 事件（穿透 GLCustomLayer，可点在模型上）
@@ -745,20 +751,21 @@ export class MapScene {
    *  并用 container.contains(target) 过滤掉工具栏等地图外区域的点击。 */
   private bindMeasureDom(): void {
     if (!this.container) return;
-    const inMap = (t: EventTarget | null) => t instanceof Node && this.container.contains(t);
+    const inMap = (t: EventTarget | null) => t instanceof Node && this.container!.contains(t);
     this.measureDownHandler = (e: PointerEvent) => {
       if (e.button !== 0 || !inMap(e.target)) return; // 仅地图内左键
       this.measureDownPos = { x: e.clientX, y: e.clientY, t: Date.now() };
     };
     this.measureMoveDomHandler = (e: PointerEvent) => {
-      if (this.measurePts.length === 0 || !inMap(e.target)) return;
+      // 仅在测量进行中才显示跟随预览线，避免已完成测量在鼠标移动时出现多余预览
+      if (!this.measuring || this.measurePts.length === 0 || !inMap(e.target)) return;
       const ll = this.pixelToGcj(e);
       if (ll) this.renderMeasure(ll);
     };
     this.measureDblDomHandler = (e: MouseEvent) => {
       if (!inMap(e.target)) return;
       e.preventDefault();
-      this.finishMeasure();
+      if (this.measuring) this.finishMeasure(); // 仅测量进行中才结束（空闲 armed 时不触发）
     };
     this.measureClickDomHandler = (e: MouseEvent) => {
       const down = this.measureDownPos;
@@ -769,7 +776,18 @@ export class MapScene {
       const held = Date.now() - down.t;
       if (moved > 5 || held > 600) return;
       const ll = this.pixelToGcj(e);
-      if (ll) this.addMeasurePoint(ll);
+      if (!ll) return;
+      if (!this.measuring) {
+        // 工具仍选中（armed）但未在测量：视为开始一次新的同类型测量，
+        // 无需再次点击工具栏按钮；点「清除」前可一直连续测量
+        this.measurePts = [];
+        this.measuring = true;
+        this.clearMeasureGraphics();
+        if (this.measureMode !== 'none') this.measureReportMode = this.measureMode;
+        this.callbacks.onMeasureUpdate?.(null); // 清掉上一处测量结果面板
+        this.callbacks.onMeasureActive?.(true);
+      }
+      this.addMeasurePoint(ll);
     };
     const opt = { capture: true } as AddEventListenerOptions;
     window.addEventListener('pointerdown', this.measureDownHandler, opt);
@@ -830,19 +848,26 @@ export class MapScene {
   }
 
   private finishMeasure(): void {
+    if (!this.measuring) return; // 已结束（如双击的第二次触发），避免重复处理
     const minPts = this.measureReportMode === 'area' ? 3 : 2;
     if (this.measurePts.length < minPts) {
-      // 点数不足，视为取消
-      this.stopMeasure();
+      // 点数不足：取消本次打点，但保留工具（armed），不清除已完成的其它结果
+      this.measuring = false;
+      this.measurePts = [];
+      this.clearMeasureGraphics();
+      this.callbacks.onMeasureUpdate?.(null);
+      this.callbacks.onMeasureActive?.(false);
+      this.requestRender();
       return;
     }
     this.measuring = false;
-    this.measureMode = 'none'; // 通知上层（Vue 工具栏）测量已结束
-    this.unbindMeasureDom();
-    try { this.map?.setStatus({ doubleClickZoom: true }); } catch { /* ignore */ }
+    // 注意：保留 measureMode（armed 工具），不置 'none'、不解除 DOM 监听、
+    // 不恢复双击缩放 —— 这样地图处于该工具的 armed 状态，下次在地图上点击即可
+    // 直接开始一次新的同类型测量，无需再次点击工具栏按钮；只有点「清除」才退出。
     if (this.measureReportMode === 'area') {
-      this.renderMeasure(); // 闭合多边形（不再追加预览点）
+      this.renderMeasure(); // 闭合多边形（不再追加预览点，measureMode 仍为 'area' 故填充可见）
     }
+    this.callbacks.onMeasureActive?.(false);
     this.reportMeasure();
   }
 
@@ -874,8 +899,11 @@ export class MapScene {
     const worldPts = pts.map((p) => this.gcjToWorld(p));
     const color = this.measureMode === 'distance' ? 0x38bdf8 : 0xf59e0b;
 
-    // 折线 / 多边形边
-    const lineGeo = new THREE.BufferGeometry().setFromPoints(worldPts);
+    // 折线 / 多边形边：测面时闭合首尾，使轮廓成为封闭环
+    const linePts = this.measureMode === 'area' && worldPts.length >= 3
+      ? [...worldPts, worldPts[0]]
+      : worldPts;
+    const lineGeo = new THREE.BufferGeometry().setFromPoints(linePts);
     const lineMat = new THREE.LineBasicMaterial({ color, depthTest: false, transparent: true, opacity: 0.95 });
     lineMat.toneMapped = false;
     const line = new THREE.Line(lineGeo, lineMat);

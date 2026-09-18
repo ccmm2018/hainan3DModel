@@ -15,6 +15,7 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { wgs84ToGcj02, gcj02ToWgs84 } from '../utils/coordTransform';
 import type { SceneConfig } from '../config/mapConfig';
 import { ROOM_STATUS_CONFIG, type Room } from '../data/roomData';
+import area from '@turf/area';
 
 /** 拾取结果 */
 export interface PickResult {
@@ -37,6 +38,17 @@ export interface PickResult {
   room?: Room;
 }
 
+/** 测量结果（测距 / 测面） */
+export interface MeasureResult {
+  mode: 'distance' | 'area';
+  /** 测距：各分段长度（米） */
+  segments?: number[];
+  /** 测距总长度（米）或测面面积（㎡） */
+  value: number;
+  /** 已打点数 */
+  points: number;
+}
+
 export interface MapSceneCallbacks {
   onModelProgress?: (percent: number) => void;
   onModelReady?: () => void;
@@ -53,6 +65,8 @@ export interface MapSceneCallbacks {
    * 用于让锚定在模型节点上的浮层（属性面板、房间详情）跟随节点移动。
    */
   onViewChange?: () => void;
+  /** 测量结果更新回调（测距 / 测面；传 null 表示清除） */
+  onMeasureUpdate?: (data: MeasureResult | null) => void;
 }
 
 const R_METERS_PER_DEG = 111319.49; // 墨卡托经度方向 米/度
@@ -105,6 +119,17 @@ export class MapScene {
 
   private disposed = false;
 
+  // 量算（测距 / 测面）状态
+  private AMap: any = null;
+  private measureMode: 'none' | 'distance' | 'area' = 'none';
+  private measureReportMode: 'distance' | 'area' = 'distance';
+  private measurePoints: [number, number][] = [];
+  private measureMarkers: any[] = [];
+  private measureTemp: any[] = [];
+  private measureMoveHandler: ((e: any) => void) | null = null;
+  private measureClickHandler: ((e: any) => void) | null = null;
+  private measureDblHandler: ((e: any) => void) | null = null;
+
   constructor(container: HTMLDivElement, config: SceneConfig, callbacks: MapSceneCallbacks = {}) {
     this.container = container;
     this.config = config;
@@ -127,6 +152,7 @@ export class MapScene {
   // 初始化
   // -------------------------------------------------------------------------
   init(AMap: any): void {
+    this.AMap = AMap;
     this.map = new AMap.Map(this.container, {
       center: this.gcjCenter,
       zoom: this.config.zoom,
@@ -275,16 +301,22 @@ export class MapScene {
   // 交互：拾取 / 高亮
   // -------------------------------------------------------------------------
   private handleMouseMove(e: any): void {
+    if (this.measureMode !== 'none') {
+      this.callbacks.onHover?.(null); // 测量时隐藏悬停高亮
+      return;
+    }
     const { x, y } = this.pixelOf(e);
     this.callbacks.onHover?.(this.pick(x, y));
   }
 
   private handleClick(e: any): void {
+    if (this.measureMode !== 'none') return; // 测量时由测量点击处理，不触发拾取
     const { x, y } = this.pixelOf(e);
     this.callbacks.onSelect?.(this.pick(x, y));
   }
 
   private handleDoubleClick(e: any): void {
+    if (this.measureMode !== 'none') return; // 测量结束由测量 dblclick 处理
     const { x, y } = this.pixelOf(e);
     this.callbacks.onDoubleClick?.(this.pick(x, y));
   }
@@ -630,6 +662,186 @@ export class MapScene {
 
   get isIndoorView(): boolean {
     return this.indoorView;
+  }
+
+  /** 当前量算模式（'none' 表示已结束但结果仍保留在地图上） */
+  get measuringMode(): 'none' | 'distance' | 'area' {
+    return this.measureMode;
+  }
+
+  // -------------------------------------------------------------------------
+  // 视图切换（2D / 2.5D / 三维 / 退出室内），切换后保留当前定位
+  // -------------------------------------------------------------------------
+  setMapView(mode: '2d' | '2.5d' | '3d'): void {
+    if (!this.map) return;
+    if (this.indoorView) this.exitIndoorView(); // 若在室内，先退出并恢复原视角
+    const center = this.map.getCenter();
+    const zoom = this.map.getZoom();
+    if (mode === '2d') {
+      this.map.setViewMode('2D');
+      this.map.setRotation(0);
+    } else {
+      this.map.setViewMode('3D');
+      this.map.setPitch(mode === '2.5d' ? 35 : this.config.pitch);
+    }
+    this.map.setZoomAndCenter(zoom, center, true);
+  }
+
+  // -------------------------------------------------------------------------
+  // 量算：测距（连续打点）/ 测面（闭合多边形）
+  // -------------------------------------------------------------------------
+  startMeasure(mode: 'distance' | 'area'): void {
+    if (!this.map) return;
+    this.stopMeasure();
+    this.measureMode = mode;
+    this.measureReportMode = mode;
+    this.measureMoveHandler = (e: any) => this.onMeasureMove(e);
+    this.measureClickHandler = (e: any) => this.onMeasureClick(e);
+    this.measureDblHandler = (e: any) => this.onMeasureDblClick(e);
+    this.map.on('mousemove', this.measureMoveHandler);
+    this.map.on('click', this.measureClickHandler);
+    this.map.on('dblclick', this.measureDblHandler);
+    // 测量期间禁用双击放大，避免与「双击结束」冲突
+    try { this.map.setStatus({ doubleClickZoom: false }); } catch { /* ignore */ }
+  }
+
+  stopMeasure(): void {
+    this.measureMode = 'none';
+    if (this.measureMoveHandler) { this.map?.off('mousemove', this.measureMoveHandler); this.measureMoveHandler = null; }
+    if (this.measureClickHandler) { this.map?.off('click', this.measureClickHandler); this.measureClickHandler = null; }
+    if (this.measureDblHandler) { this.map?.off('dblclick', this.measureDblHandler); this.measureDblHandler = null; }
+    this.clearTemp();
+    this.measureMarkers.forEach((m) => this.map?.remove(m));
+    this.measureMarkers = [];
+    this.measurePoints = [];
+    try { this.map?.setStatus({ doubleClickZoom: true }); } catch { /* ignore */ }
+    this.callbacks.onMeasureUpdate?.(null);
+  }
+
+  private onMeasureClick(e: any): void {
+    if (this.measureMode === 'none') return;
+    const ll = e?.lnglat;
+    if (!ll) return;
+    const pt: [number, number] = [ll.getLng(), ll.getLat()];
+    const n = this.measurePoints.length;
+    if (n > 0 && this.map.getDistance(this.measurePoints[n - 1], pt) < 0.5) return; // 忽略双击产生的重复点
+    this.measurePoints.push(pt);
+    const marker = new this.AMap.CircleMarker({
+      center: pt,
+      radius: 5,
+      strokeColor: this.measureMode === 'distance' ? '#38bdf8' : '#f59e0b',
+      strokeWeight: 2,
+      fillColor: '#ffffff',
+      fillOpacity: 1,
+      zIndex: 210,
+      bubble: true,
+    });
+    this.map.add(marker);
+    this.measureMarkers.push(marker);
+    this.renderMeasure();
+  }
+
+  private onMeasureMove(e: any): void {
+    if (this.measureMode === 'none' || this.measurePoints.length === 0) return;
+    const ll = e?.lnglat;
+    if (!ll) return;
+    this.renderMeasure([ll.getLng(), ll.getLat()]);
+  }
+
+  private onMeasureDblClick(_e: any): void {
+    if (this.measureMode === 'none') return;
+    this.finishMeasure();
+  }
+
+  private finishMeasure(): void {
+    this.measureMode = 'none';
+    if (this.measureMoveHandler) { this.map.off('mousemove', this.measureMoveHandler); this.measureMoveHandler = null; }
+    if (this.measureClickHandler) { this.map.off('click', this.measureClickHandler); this.measureClickHandler = null; }
+    if (this.measureDblHandler) { this.map.off('dblclick', this.measureDblHandler); this.measureDblHandler = null; }
+    try { this.map.setStatus({ doubleClickZoom: true }); } catch { /* ignore */ }
+    this.renderMeasure();
+    this.reportMeasure();
+  }
+
+  private clearTemp(): void {
+    this.measureTemp.forEach((o) => this.map?.remove(o));
+    this.measureTemp = [];
+  }
+
+  private renderMeasure(cursor?: [number, number]): void {
+    this.clearTemp();
+    const pts = cursor ? [...this.measurePoints, cursor] : this.measurePoints;
+    if (this.measureMode === 'distance') {
+      if (pts.length >= 1) {
+        const line = new this.AMap.Polyline({
+          path: pts,
+          strokeColor: '#38bdf8',
+          strokeWeight: 3,
+          strokeOpacity: 0.95,
+          showDir: true,
+          zIndex: 200,
+          bubble: true,
+        });
+        this.map.add(line);
+        this.measureTemp.push(line);
+      }
+    } else if (this.measureMode === 'area') {
+      if (pts.length >= 2) {
+        const line = new this.AMap.Polyline({
+          path: pts,
+          strokeColor: '#f59e0b',
+          strokeWeight: 3,
+          zIndex: 200,
+          bubble: true,
+        });
+        this.map.add(line);
+        this.measureTemp.push(line);
+      }
+      if (pts.length >= 3) {
+        const poly = new this.AMap.Polygon({
+          path: pts,
+          strokeColor: '#f59e0b',
+          strokeWeight: 2,
+          fillColor: '#f59e0b',
+          fillOpacity: 0.25,
+          zIndex: 199,
+          bubble: true,
+        });
+        this.map.add(poly);
+        this.measureTemp.push(poly);
+      }
+    }
+    this.reportMeasure();
+  }
+
+  private reportMeasure(): void {
+    const mode = this.measureMode !== 'none' ? this.measureMode : this.measureReportMode;
+    if (mode === 'distance') {
+      const segs: number[] = [];
+      let total = 0;
+      for (let i = 1; i < this.measurePoints.length; i++) {
+        const d = this.map.getDistance(this.measurePoints[i - 1], this.measurePoints[i]);
+        segs.push(d);
+        total += d;
+      }
+      this.callbacks.onMeasureUpdate?.({
+        mode: 'distance',
+        segments: segs,
+        value: total,
+        points: this.measurePoints.length,
+      });
+      return;
+    }
+    let value = 0;
+    if (this.measurePoints.length >= 3) {
+      const ring = [...this.measurePoints, this.measurePoints[0]];
+      value = area({ type: 'Polygon', coordinates: [ring] }) as number;
+    }
+    this.callbacks.onMeasureUpdate?.({
+      mode: 'area',
+      value,
+      points: this.measurePoints.length,
+    });
   }
 
   /** 建筑半透明切换（克隆材质，可逆） */

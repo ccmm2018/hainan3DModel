@@ -35,7 +35,41 @@
 
     <!-- 工具栏 -->
     <div class="toolbar">
+      <div class="toolbar__group">
+        <span class="toolbar__label">视图</span>
+        <button class="toolbar__btn" :class="{ active: currentView === '2d' }" @click="setView('2d')">2D</button>
+        <button class="toolbar__btn" :class="{ active: currentView === '2.5d' }" @click="setView('2.5d')">2.5D</button>
+        <button class="toolbar__btn" :class="{ active: currentView === '3d' }" @click="setView('3d')">三维</button>
+        <button class="toolbar__btn" :class="{ active: isIndoorView }" @click="toggleIndoor">室内</button>
+      </div>
+      <div class="toolbar__group">
+        <span class="toolbar__label">量算</span>
+        <button class="toolbar__btn" :class="{ active: measureMode === 'distance' }" @click="startMeasure('distance')">测距</button>
+        <button class="toolbar__btn" :class="{ active: measureMode === 'area' }" @click="startMeasure('area')">测面</button>
+        <button v-if="measureResult" class="toolbar__btn toolbar__btn--ghost" @click="stopMeasure">清除</button>
+      </div>
       <button class="toolbar__btn" @click="exportOpen = true">打印 / 导出</button>
+    </div>
+
+    <!-- 量算结果面板 -->
+    <div v-if="measureResult" class="measure-panel" :class="measureResult.mode === 'area' ? 'measure-panel--area' : 'measure-panel--distance'">
+      <div class="measure-panel__head">
+        <strong>{{ measureResult.mode === 'distance' ? '测距结果' : '测面结果' }}</strong>
+        <button class="measure-panel__close" aria-label="清除" @click="stopMeasure">×</button>
+      </div>
+      <div v-if="measureResult.mode === 'distance'" class="measure-panel__body">
+        <div class="measure-panel__total">总长度：<b>{{ formatMeters(measureResult.value) }}</b></div>
+        <ol v-if="measureResult.segments && measureResult.segments.length" class="measure-panel__segs">
+          <li v-for="(s, i) in measureResult.segments" :key="i">
+            <span>第 {{ i + 1 }} 段</span><span>{{ formatMeters(s) }}</span>
+          </li>
+        </ol>
+      </div>
+      <div v-else class="measure-panel__body">
+        <div class="measure-panel__total">总面积：<b>{{ formatArea(measureResult.value) }}</b></div>
+        <div class="measure-panel__meta">顶点数：{{ measureResult.points }}</div>
+      </div>
+      <div class="measure-panel__tip">连续点击打点 · 双击结束</div>
     </div>
 
     <!-- 室内视角提示 -->
@@ -268,7 +302,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, type Ref } from 'vue';
 import * as THREE from 'three';
 import { loadAMap } from '../utils/loadAMap';
-import { MapScene, type PickResult } from '../core/MapScene';
+import { MapScene, type PickResult, type MeasureResult } from '../core/MapScene';
 import { DEFAULT_SCENE_CONFIG, type SceneConfig } from '../config/mapConfig';
 import {
   SAMPLE_BUILDING_DATA,
@@ -326,6 +360,11 @@ const searchFocused = ref(false);
 const objectList = ref<Array<{ name: string; lngLat: [number, number]; object: THREE.Object3D }>>([]);
 
 let scene: MapScene | null = null;
+
+// 视图 / 量算 UI 状态
+const currentView = ref<'2d' | '2.5d' | '3d'>('3d');
+const measureMode = ref<'none' | 'distance' | 'area'>('none');
+const measureResult = ref<MeasureResult | null>(null);
 
 // ---------------------------------------------------------------------------
 // 浮层锚定：弹窗显示在被点击的「模型节点」位置，而不是固定右下角
@@ -604,6 +643,10 @@ function handleDoubleClick(result: PickResult | null) {
 
 function handleEscKey(e: KeyboardEvent) {
   if (e.key === 'Escape') {
+    if (measureMode.value !== 'none' || measureResult.value) {
+      stopMeasure();
+      return;
+    }
     if (isIndoorView.value) {
       scene?.exitIndoorView();
       isIndoorView.value = false;
@@ -615,6 +658,53 @@ function handleEscKey(e: KeyboardEvent) {
       detailOpen.value = false;
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// 视图切换 & 量算
+// ---------------------------------------------------------------------------
+function setView(mode: '2d' | '2.5d' | '3d') {
+  currentView.value = mode;
+  isIndoorView.value = false;
+  scene?.setMapView(mode); // 内部会处理退出室内；中心/缩放保持不变（定位不丢失）
+}
+
+function toggleIndoor() {
+  if (isIndoorView.value) {
+    scene?.exitIndoorView();
+    isIndoorView.value = false;
+    currentView.value = '3d';
+    return;
+  }
+  let target: THREE.Object3D | null =
+    selected.value && !selected.value.isRoom ? (selected.value.target as THREE.Object3D) : null;
+  if (!target && objectList.value.length) target = objectList.value[0].object;
+  if (!target) {
+    window.alert('请先在场景中点击选中一栋建筑，再进入室内视角');
+    return;
+  }
+  scene?.enterIndoorView(target);
+  isIndoorView.value = true;
+}
+
+function startMeasure(mode: 'distance' | 'area') {
+  measureMode.value = mode;
+  scene?.startMeasure(mode);
+}
+
+function stopMeasure() {
+  measureMode.value = 'none';
+  scene?.stopMeasure();
+}
+
+function formatMeters(m: number): string {
+  if (!isFinite(m)) return '0.0 m';
+  return `${m.toLocaleString('zh-CN', { maximumFractionDigits: 1 })} m`;
+}
+
+function formatArea(s: number): string {
+  if (!isFinite(s)) return '0.0 ㎡';
+  return `${s.toLocaleString('zh-CN', { maximumFractionDigits: 1 })} ㎡`;
 }
 
 // ---------------------------------------------------------------------------
@@ -846,6 +936,12 @@ onMounted(async () => {
         }
       },
       onDoubleClick: (result) => handleDoubleClick(result),
+      // 量算结果回调：null 表示清除；finished（measuringMode==='none'）时仅保留结果、取消按钮高亮
+      onMeasureUpdate: (data) => {
+        measureResult.value = data;
+        if (!data) measureMode.value = 'none';
+        else if (scene?.measuringMode === 'none') measureMode.value = 'none';
+      },
       // 地图平移/缩放/旋转/飞行时，让锚定浮层跟随节点
       onViewChange: () => updateAnchors(),
     });
@@ -1455,5 +1551,121 @@ onBeforeUnmount(() => {
   font-size: 11px;
   pointer-events: none;
   backdrop-filter: blur(8px);
+}
+
+/* 工具栏分组 */
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  max-width: calc(100% - 32px);
+  justify-content: flex-end;
+}
+.toolbar__group {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid #24324a;
+  border-radius: 8px;
+  background: rgba(20, 27, 43, 0.9);
+  backdrop-filter: blur(8px);
+}
+.toolbar__label {
+  padding: 0 6px 0 4px;
+  color: #6b7890;
+  font-size: 11px;
+  white-space: nowrap;
+}
+.toolbar__btn {
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid #33415c;
+  border-radius: 6px;
+  color: #c3d0e5;
+  background: transparent;
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.toolbar__btn:hover { border-color: #38bdf8; color: #eaf2ff; }
+.toolbar__btn.active {
+  border-color: #38bdf8;
+  color: #06121f;
+  background: #38bdf8;
+  font-weight: 600;
+}
+.toolbar__btn--ghost { border-style: dashed; color: #f87171; }
+.toolbar__btn--ghost:hover { border-color: #f87171; background: rgba(248, 113, 113, 0.12); color: #fca5a5; }
+
+/* 量算结果面板 */
+.measure-panel {
+  position: absolute;
+  z-index: 150;
+  bottom: 16px;
+  right: 16px;
+  width: 252px;
+  max-width: calc(100% - 32px);
+  border: 1px solid #24324a;
+  border-radius: 10px;
+  background: rgba(20, 27, 43, 0.96);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.4);
+  backdrop-filter: blur(12px);
+  overflow: hidden;
+}
+.measure-panel__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid #24324a;
+  color: #eaf2ff;
+}
+.measure-panel__head strong { flex: 1; font-size: 13px; font-weight: 600; }
+.measure-panel__close {
+  width: 22px;
+  height: 22px;
+  border: 0;
+  border-radius: 4px;
+  color: #8a97ad;
+  background: transparent;
+  font-size: 17px;
+  cursor: pointer;
+}
+.measure-panel__close:hover { color: #f87171; background: #22314a; }
+.measure-panel__body { padding: 10px 12px; }
+.measure-panel__total { font-size: 13px; color: #a7b4c8; }
+.measure-panel__total b {
+  color: #38bdf8;
+  font-size: 16px;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+.measure-panel--area .measure-panel__total b { color: #f59e0b; }
+.measure-panel__segs {
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  max-height: 180px;
+  overflow-y: auto;
+}
+.measure-panel__segs li {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 5px 8px;
+  border-radius: 4px;
+  margin-bottom: 4px;
+  font-size: 12px;
+  color: #c3d0e5;
+  background: rgba(56, 189, 248, 0.08);
+}
+.measure-panel--area .measure-panel__segs li { background: rgba(245, 158, 11, 0.1); }
+.measure-panel__segs li span:last-child { font-family: ui-monospace, monospace; color: #eaf2ff; }
+.measure-panel__meta { margin-top: 6px; font-size: 12px; color: #8a97ad; }
+.measure-panel__tip {
+  padding: 8px 12px;
+  border-top: 1px solid #24324a;
+  color: #6b7890;
+  font-size: 11px;
 }
 </style>

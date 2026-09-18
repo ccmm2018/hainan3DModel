@@ -21,6 +21,20 @@ export interface BuildingProps {
   height?: number | string;
   /** 所属部门/院系 */
   department?: string;
+  /** 所在校区 */
+  campus?: string;
+  /** 管理部门 */
+  managementDept?: string;
+  /** 总层数 */
+  totalFloors?: number;
+  /** 房间数 */
+  roomCount?: number;
+  /** 建筑面积（㎡） */
+  buildingArea?: number;
+  /** 使用面积（㎡） */
+  usableArea?: number;
+  /** 楼宇图片 URL（相对 public 或绝对地址） */
+  image?: string;
   /** 类型：building / road / water / other */
   category?: 'building' | 'road' | 'water' | 'other';
   /** 备注描述 */
@@ -48,6 +62,13 @@ export function loadBuildingDataFromGeoJSON(geoJson: any): BuildingDataMap {
       name,
       height: p.height ?? p['building:height'] ?? p.levels,
       department: p.department ?? p.dept ?? p.building,
+      campus: p.campus ?? p.campus_name,
+      managementDept: p.managementDept ?? p.management_dept ?? p.manage_dept,
+      totalFloors: p.totalFloors ?? p.total_floors ?? p.floors,
+      roomCount: p.roomCount ?? p.room_count,
+      buildingArea: p.buildingArea ?? p.building_area,
+      usableArea: p.usableArea ?? p.usable_area,
+      image: p.image ?? p.img ?? p.photo,
       category: p.category ?? (p.building ? 'building' : p.highway ? 'road' : 'other'),
       description: p.description ?? p.amenity,
       ...p,
@@ -104,6 +125,12 @@ export const SAMPLE_BUILDING_DATA: BuildingDataMap = {
     name: '教学楼',
     height: 24,
     department: '教务处',
+    campus: '主校区',
+    managementDept: '教务处',
+    totalFloors: 6,
+    roomCount: 48,
+    buildingArea: 12800,
+    usableArea: 10240,
     category: 'building',
     description: '本科教学主楼，含多媒体教室与智慧教室。',
   },
@@ -111,6 +138,12 @@ export const SAMPLE_BUILDING_DATA: BuildingDataMap = {
     name: '实验楼',
     height: 20,
     department: '实验实训中心',
+    campus: '主校区',
+    managementDept: '实验实训中心',
+    totalFloors: 5,
+    roomCount: 40,
+    buildingArea: 9600,
+    usableArea: 7680,
     category: 'building',
     description: '承担刑技、网络、电子数据等实验实训教学。',
   },
@@ -118,6 +151,12 @@ export const SAMPLE_BUILDING_DATA: BuildingDataMap = {
     name: '图书馆',
     height: 18,
     department: '图书馆',
+    campus: '主校区',
+    managementDept: '图书馆',
+    totalFloors: 4,
+    roomCount: 32,
+    buildingArea: 8600,
+    usableArea: 6880,
     category: 'building',
     description: '馆藏纸质图书 51.7 万册，电子图书 42 万册。',
   },
@@ -125,6 +164,12 @@ export const SAMPLE_BUILDING_DATA: BuildingDataMap = {
     name: '警体综合训练馆',
     height: 16,
     department: '警体部',
+    campus: '主校区',
+    managementDept: '警体部',
+    totalFloors: 3,
+    roomCount: 24,
+    buildingArea: 15000,
+    usableArea: 12000,
     category: 'building',
     description: '含射击馆、搏击馆、泅渡馆、模拟街区等训练场馆。',
   },
@@ -132,6 +177,12 @@ export const SAMPLE_BUILDING_DATA: BuildingDataMap = {
     name: '学生公寓',
     height: 15,
     department: '后勤保障',
+    campus: '主校区',
+    managementDept: '学生工作处',
+    totalFloors: 5,
+    roomCount: 40,
+    buildingArea: 7200,
+    usableArea: 5760,
     category: 'building',
     description: '4 人一间，独立卫浴，配备空调与热水。',
   },
@@ -139,6 +190,12 @@ export const SAMPLE_BUILDING_DATA: BuildingDataMap = {
     name: '食堂',
     height: 10,
     department: '后勤保障',
+    campus: '主校区',
+    managementDept: '后勤保障处',
+    totalFloors: 2,
+    roomCount: 16,
+    buildingArea: 3200,
+    usableArea: 2560,
     category: 'building',
     description: '学生食堂，提供多样化餐饮服务。',
   },

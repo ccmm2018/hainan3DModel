@@ -92,32 +92,100 @@
       <div class="property-panel__head">
         <span class="dot"></span>
         <strong>{{ selectedProps.name }}</strong>
+        <button class="property-panel__locate" title="定位到该建筑" @click="flyToSelected">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="7"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/>
+          </svg>
+        </button>
         <button class="property-panel__close" aria-label="关闭" @click="closePanel">×</button>
       </div>
+
+      <!-- 楼宇图片（无图片时显示占位） -->
+      <div class="property-panel__image">
+        <img
+          v-if="selectedProps.image && !imageError"
+          :src="selectedProps.image"
+          :alt="selectedProps.name"
+          @error="imageError = true"
+        />
+        <div v-else class="property-panel__image-placeholder">
+          <svg viewBox="0 0 24 24" width="40" height="40" fill="none" stroke="currentColor" stroke-width="1.2">
+            <path d="M3 21h18M5 21V7l7-4 7 4v14M9 21v-6h6v6"/>
+            <path d="M9 10h.01M15 10h.01M9 13h.01M15 13h.01"/>
+          </svg>
+          <span>{{ selectedProps.name }}</span>
+        </div>
+      </div>
+
       <dl>
         <div>
-          <dt>类型</dt>
-          <dd>{{ categoryLabel(selectedProps.category) }}</dd>
+          <dt>所在校区</dt>
+          <dd>{{ selectedProps.campus ?? '—' }}</dd>
         </div>
         <div>
-          <dt>高度</dt>
-          <dd>{{ selectedProps.height ?? '—' }}</dd>
+          <dt>管理部门</dt>
+          <dd>{{ selectedProps.managementDept ?? selectedProps.department ?? '—' }}</dd>
         </div>
         <div>
-          <dt>所属部门</dt>
-          <dd>{{ selectedProps.department ?? '—' }}</dd>
+          <dt>总层数</dt>
+          <dd>{{ selectedProps.totalFloors != null ? `${selectedProps.totalFloors} 层` : '—' }}</dd>
         </div>
         <div>
-          <dt>经纬度</dt>
-          <dd>{{ selected.lngLat[0].toFixed(6) }}, {{ selected.lngLat[1].toFixed(6) }}</dd>
+          <dt>房间数</dt>
+          <dd>{{ selectedProps.roomCount != null ? `${selectedProps.roomCount} 间` : '—' }}</dd>
+        </div>
+        <div>
+          <dt>建筑面积</dt>
+          <dd>{{ selectedProps.buildingArea != null ? `${selectedProps.buildingArea.toLocaleString()} ㎡` : '—' }}</dd>
+        </div>
+        <div>
+          <dt>使用面积</dt>
+          <dd>{{ selectedProps.usableArea != null ? `${selectedProps.usableArea.toLocaleString()} ㎡` : '—' }}</dd>
         </div>
       </dl>
-      <p v-if="selectedProps.description" class="property-panel__desc">
-        {{ selectedProps.description }}
-      </p>
+
       <div class="property-panel__actions">
-        <button class="property-panel__fly" @click="flyToSelected">定位到该建筑</button>
-        <button class="property-panel__rooms" @click="enterRoomMode">查看楼盘表</button>
+        <button class="property-panel__btn" @click="openBuildingDetail">楼宇详情</button>
+        <button class="property-panel__btn property-panel__btn--primary" @click="enterRoomMode">房间管理</button>
+        <button class="property-panel__btn" @click="enterRoomMode">楼宇分层图</button>
+      </div>
+    </div>
+
+    <!-- 楼宇详情弹窗 -->
+    <div v-if="detailOpen && selectedProps.name" class="detail-modal" @click.self="detailOpen = false">
+      <div class="detail-modal__card">
+        <div class="detail-modal__head">
+          <strong>{{ selectedProps.name }} · 楼宇详情</strong>
+          <button class="property-panel__close" aria-label="关闭" @click="detailOpen = false">×</button>
+        </div>
+        <div class="detail-modal__image">
+          <img
+            v-if="selectedProps.image && !imageError"
+            :src="selectedProps.image"
+            :alt="selectedProps.name"
+            @error="imageError = true"
+          />
+          <div v-else class="property-panel__image-placeholder">
+            <svg viewBox="0 0 24 24" width="48" height="48" fill="none" stroke="currentColor" stroke-width="1.2">
+              <path d="M3 21h18M5 21V7l7-4 7 4v14M9 21v-6h6v6"/>
+              <path d="M9 10h.01M15 10h.01M9 13h.01M15 13h.01"/>
+            </svg>
+            <span>{{ selectedProps.name }}</span>
+          </div>
+        </div>
+        <dl class="detail-modal__grid">
+          <div><dt>所在校区</dt><dd>{{ selectedProps.campus ?? '—' }}</dd></div>
+          <div><dt>管理部门</dt><dd>{{ selectedProps.managementDept ?? selectedProps.department ?? '—' }}</dd></div>
+          <div><dt>使用部门</dt><dd>{{ selectedProps.department ?? '—' }}</dd></div>
+          <div><dt>类型</dt><dd>{{ categoryLabel(selectedProps.category) }}</dd></div>
+          <div><dt>总层数</dt><dd>{{ selectedProps.totalFloors != null ? `${selectedProps.totalFloors} 层` : '—' }}</dd></div>
+          <div><dt>房间数</dt><dd>{{ selectedProps.roomCount != null ? `${selectedProps.roomCount} 间` : '—' }}</dd></div>
+          <div><dt>建筑面积</dt><dd>{{ selectedProps.buildingArea != null ? `${selectedProps.buildingArea.toLocaleString()} ㎡` : '—' }}</dd></div>
+          <div><dt>使用面积</dt><dd>{{ selectedProps.usableArea != null ? `${selectedProps.usableArea.toLocaleString()} ㎡` : '—' }}</dd></div>
+          <div><dt>建筑高度</dt><dd>{{ selectedProps.height ?? '—' }}</dd></div>
+          <div v-if="selected"><dt>经纬度</dt><dd>{{ selected.lngLat[0].toFixed(6) }}, {{ selected.lngLat[1].toFixed(6) }}</dd></div>
+        </dl>
+        <p v-if="selectedProps.description" class="detail-modal__desc">{{ selectedProps.description }}</p>
       </div>
     </div>
 
@@ -244,6 +312,8 @@ const selectedRoom = ref<Room | null>(null);
 
 const isIndoorView = ref(false);
 const exportOpen = ref(false);
+const detailOpen = ref(false);
+const imageError = ref(false);
 
 // 分配模式状态
 const selectedRooms = ref<Room[]>([]);
@@ -435,7 +505,11 @@ const selectedProps = computed<BuildingProps>(() => {
   if (!selected.value) return { name: '' };
   const base = buildingData.value[selected.value.name];
   const height = base?.height ?? estimateHeight(selected.value.target);
-  return { ...(base ?? {}), name: selected.value.name, height };
+  // 总层数 / 房间数：优先取属性数据，缺失时从房间数据回推
+  const rooms = roomData.value[selected.value.name] ?? [];
+  const totalFloors = base?.totalFloors ?? (rooms.length ? Math.max(...rooms.map((r) => r.floor)) : undefined);
+  const roomCount = base?.roomCount ?? (rooms.length ? rooms.length : undefined);
+  return { ...(base ?? {}), name: selected.value.name, height, totalFloors, roomCount };
 });
 
 const categoryLabel = (c?: string) =>
@@ -458,11 +532,17 @@ function estimateHeight(obj: THREE.Object3D): string {
 function closePanel() {
   selected.value = null;
   panelAnchor.value = null;
+  detailOpen.value = false;
+  imageError.value = false;
   scene?.clearHighlight();
 }
 
 function flyToSelected() {
   if (selected.value) scene?.flyToObject(selected.value.target);
+}
+
+function openBuildingDetail() {
+  detailOpen.value = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -531,6 +611,8 @@ function handleEscKey(e: KeyboardEvent) {
       exitAllocationMode();
     } else if (exportOpen.value) {
       exportOpen.value = false;
+    } else if (detailOpen.value) {
+      detailOpen.value = false;
     }
   }
 }
@@ -625,6 +707,8 @@ function selectByName(name: string) {
     isRoom: false,
   };
   selected.value = result;
+  detailOpen.value = false;
+  imageError.value = false;
   panelAnchor.value =
     scene?.projectToScreen(wp) ?? {
       x: containerSize.value.w / 2,
@@ -748,6 +832,8 @@ onMounted(async () => {
         // 场景模式：点击建筑 → 属性面板（浮层锚定到点击的节点位置）
         if (result && !result.isRoom) {
           selected.value = result;
+          detailOpen.value = false;
+          imageError.value = false;
           panelAnchor.value =
             scene?.projectToScreen(result.point) ?? { x: result.screenX, y: result.screenY };
           panel.measure();
@@ -1064,30 +1150,145 @@ onBeforeUnmount(() => {
   font-size: 12px;
   line-height: 1.7;
 }
+.property-panel__locate {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: 4px;
+  color: #38bdf8;
+  background: transparent;
+  cursor: pointer;
+}
+.property-panel__locate:hover { background: rgba(56, 189, 248, 0.15); }
+
+/* 楼宇图片 */
+.property-panel__image {
+  position: relative;
+  height: 140px;
+  border-bottom: 1px solid #24324a;
+  background: #141c2e;
+  overflow: hidden;
+}
+.property-panel__image img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.property-panel__image-placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  height: 100%;
+  color: #4a5a74;
+  background: linear-gradient(135deg, #18223a 0%, #101828 100%);
+}
+.property-panel__image-placeholder span { font-size: 13px; color: #6b7890; }
+
 .property-panel__actions {
   display: flex;
   gap: 8px;
-  padding: 0 14px 14px;
+  padding: 12px 14px 14px;
+  border-top: 1px solid #24324a;
 }
-.property-panel__actions button {
+.property-panel__btn {
   flex: 1;
-  height: 34px;
+  height: 32px;
+  border: 1px solid #3a4a66;
   border-radius: 6px;
-  font-size: 13px;
+  color: #c8d5e8;
+  background: rgba(58, 74, 102, 0.18);
+  font-size: 12.5px;
   cursor: pointer;
+  white-space: nowrap;
 }
-.property-panel__fly {
-  border: 1px solid #38bdf8;
+.property-panel__btn:hover { border-color: #38bdf8; color: #d6f0ff; background: rgba(56, 189, 248, 0.14); }
+.property-panel__btn--primary {
+  border-color: #38bdf8;
   color: #d6f0ff;
-  background: rgba(56, 189, 248, 0.12);
+  background: rgba(56, 189, 248, 0.14);
 }
-.property-panel__fly:hover { background: rgba(56, 189, 248, 0.24); }
-.property-panel__rooms {
-  border: 1px solid #34d399;
-  color: #d6ffe9;
-  background: rgba(52, 211, 153, 0.12);
+.property-panel__btn--primary:hover { background: rgba(56, 189, 248, 0.26); }
+
+/* 楼宇详情弹窗 */
+.detail-modal {
+  position: absolute;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(6, 10, 20, 0.55);
+  backdrop-filter: blur(3px);
 }
-.property-panel__rooms:hover { background: rgba(52, 211, 153, 0.24); }
+.detail-modal__card {
+  width: 420px;
+  max-width: calc(100% - 48px);
+  max-height: calc(100% - 64px);
+  overflow-y: auto;
+  border: 1px solid #24324a;
+  border-radius: 10px;
+  background: rgba(20, 27, 43, 0.98);
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.5);
+}
+.detail-modal__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 16px;
+  border-bottom: 1px solid #24324a;
+  color: #eaf2ff;
+}
+.detail-modal__head strong { flex: 1; font-size: 15px; font-weight: 600; }
+.detail-modal__image {
+  height: 200px;
+  border-bottom: 1px solid #24324a;
+  background: #141c2e;
+  overflow: hidden;
+}
+.detail-modal__image img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.detail-modal__grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0 20px;
+  margin: 0;
+  padding: 10px 16px 12px;
+}
+.detail-modal__grid div {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 0;
+  font-size: 13px;
+  border-bottom: 1px dashed #1e2a40;
+}
+.detail-modal__grid dt { color: #8a97ad; white-space: nowrap; }
+.detail-modal__grid dd {
+  margin: 0;
+  color: #eaf2ff;
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.detail-modal__desc {
+  margin: 0;
+  padding: 4px 16px 16px;
+  color: #a7b4c8;
+  font-size: 12px;
+  line-height: 1.7;
+}
 
 /* 楼盘表面板 */
 .room-panel {

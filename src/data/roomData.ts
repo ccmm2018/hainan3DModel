@@ -7,8 +7,8 @@
 
 import { normalizeGeoJSONToGcj02 } from '../utils/coordTransform';
 
-/** 房间状态 */
-export type RoomStatus = 'idle' | 'occupied' | 'maintenance';
+/** 房间状态：使用中 / 无权限 / 空置 */
+export type RoomStatus = 'occupied' | 'noaccess' | 'vacant';
 
 /** 单个房间 */
 export interface Room {
@@ -64,12 +64,12 @@ export const ROOM_LABEL_FIELDS: RoomLabelField[] = [
 
 /** 状态 → 显示配置 */
 export const ROOM_STATUS_CONFIG: Record<RoomStatus, { label: string; color: string }> = {
-  idle: { label: '空闲', color: '#22c55e' },
-  occupied: { label: '占用', color: '#3b82f6' },
-  maintenance: { label: '维修', color: '#f59e0b' },
+  occupied: { label: '使用中', color: '#3b82f6' },
+  noaccess: { label: '无权限', color: '#f59e0b' },
+  vacant: { label: '空置', color: '#22c55e' },
 };
 
-export const ROOM_STATUS_ORDER: RoomStatus[] = ['idle', 'occupied', 'maintenance'];
+export const ROOM_STATUS_ORDER: RoomStatus[] = ['occupied', 'noaccess', 'vacant'];
 
 /** building 名称 → 房间列表 */
 export type RoomDataMap = Record<string, Room[]>;
@@ -130,9 +130,9 @@ export async function fetchRoomData(url: string): Promise<RoomDataMap> {
 
 function normalizeStatus(s: unknown): RoomStatus {
   const v = String(s ?? '').trim();
-  if (['占用', 'occupied', 'in_use', 'used', '1'].includes(v)) return 'occupied';
-  if (['维修', 'maintenance', 'repair', 'fix', '2'].includes(v)) return 'maintenance';
-  return 'idle';
+  if (['使用中', '占用', 'occupied', 'in_use', 'used', '1'].includes(v)) return 'occupied';
+  if (['无权限', 'noaccess', 'no_access', 'no-permission', '2'].includes(v)) return 'noaccess';
+  return 'vacant';
 }
 
 // ---------------------------------------------------------------------------
@@ -161,7 +161,7 @@ function generateSampleRooms(): RoomDataMap {
   const roomNames = ['多媒体教室', '普通教室', '实验室', '办公室', '研讨室', '机房'];
   const purposes = ['教学', '实验实训', '办公', '会议', '科研'];
   const users = ['张老师', '李老师', '王老师', '陈老师', '—'];
-  const statuses: RoomStatus[] = ['idle', 'occupied', 'maintenance'];
+  const statuses: RoomStatus[] = ['occupied', 'noaccess', 'vacant'];
   const map: RoomDataMap = {};
   // 校园中心（WGS84）
   const baseLng = 110.280328;
@@ -191,7 +191,7 @@ function generateSampleRooms(): RoomDataMap {
           managementDept: '后勤管理处',
           purpose: purposes[(f + r) % purposes.length],
           user: users[(f + r) % users.length],
-          remark: status === 'maintenance' ? '设备检修中' : undefined,
+          remark: status === 'noaccess' ? '暂无门禁权限' : undefined,
           geometry: makeSquarePolygon(lng, lat, side),
         });
       }

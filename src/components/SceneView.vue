@@ -181,7 +181,7 @@
 
       <div class="property-panel__actions">
         <button class="property-panel__btn" @click="openBuildingDetail">楼宇详情</button>
-        <button class="property-panel__btn property-panel__btn--primary" @click="enterRoomMode">房间管理</button>
+        <button class="property-panel__btn property-panel__btn--primary" @click="openRoomManagement">房间管理</button>
         <button class="property-panel__btn" @click="enterRoomMode">楼宇分层图</button>
       </div>
     </div>
@@ -193,34 +193,164 @@
           <strong>{{ selectedProps.name }} · 楼宇详情</strong>
           <button class="property-panel__close" aria-label="关闭" @click="detailOpen = false">×</button>
         </div>
-        <div class="detail-modal__image">
-          <img
-            v-if="selectedProps.image && !imageError"
-            :src="selectedProps.image"
-            :alt="selectedProps.name"
-            @error="imageError = true"
-          />
-          <div v-else class="property-panel__image-placeholder">
-            <svg viewBox="0 0 24 24" width="48" height="48" fill="none" stroke="currentColor" stroke-width="1.2">
-              <path d="M3 21h18M5 21V7l7-4 7 4v14M9 21v-6h6v6"/>
-              <path d="M9 10h.01M15 10h.01M9 13h.01M15 13h.01"/>
-            </svg>
-            <span>{{ selectedProps.name }}</span>
+
+        <!-- Tab 导航 -->
+        <div class="detail-modal__tabs">
+          <button
+            v-for="t in detailTabs"
+            :key="t"
+            class="detail-tab"
+            :class="{ active: detailTab === t }"
+            @click="detailTab = t"
+          >{{ t }}</button>
+        </div>
+
+        <div class="detail-modal__body">
+          <!-- 基础信息 -->
+          <div v-if="detailTab === '基础信息'" class="detail-tabpane">
+            <div v-if="selectedProps.image && !imageError" class="detail-modal__image">
+              <img :src="selectedProps.image" :alt="selectedProps.name" @error="imageError = true" />
+            </div>
+            <dl class="detail-modal__grid">
+              <div><dt>所在校区</dt><dd>{{ selectedProps.campus ?? '—' }}</dd></div>
+              <div><dt>管理部门</dt><dd>{{ selectedProps.managementDept ?? selectedProps.department ?? '—' }}</dd></div>
+              <div><dt>使用部门</dt><dd>{{ selectedProps.department ?? '—' }}</dd></div>
+              <div><dt>类型</dt><dd>{{ categoryLabel(selectedProps.category) }}</dd></div>
+              <div><dt>总层数</dt><dd>{{ selectedProps.totalFloors != null ? `${selectedProps.totalFloors} 层` : '—' }}</dd></div>
+              <div><dt>房间数</dt><dd>{{ selectedProps.roomCount != null ? `${selectedProps.roomCount} 间` : '—' }}</dd></div>
+              <div><dt>建筑面积</dt><dd>{{ selectedProps.buildingArea != null ? `${selectedProps.buildingArea.toLocaleString()} ㎡` : '—' }}</dd></div>
+              <div><dt>使用面积</dt><dd>{{ selectedProps.usableArea != null ? `${selectedProps.usableArea.toLocaleString()} ㎡` : '—' }}</dd></div>
+              <div><dt>建筑高度</dt><dd>{{ selectedProps.height ?? '—' }}</dd></div>
+              <div v-if="selected"><dt>经纬度</dt><dd>{{ selected.lngLat[0].toFixed(6) }}, {{ selected.lngLat[1].toFixed(6) }}</dd></div>
+            </dl>
+            <p v-if="selectedProps.description" class="detail-modal__desc">{{ selectedProps.description }}</p>
+          </div>
+
+          <!-- 附件信息 -->
+          <div v-else-if="detailTab === '附件信息'" class="detail-tabpane">
+            <ul class="attach-list">
+              <li v-for="(a, i) in attachmentList" :key="i" class="attach-item">
+                <span class="attach-icon" :class="`attach-icon--${a.type}`">{{ a.type === 'img' ? '图' : '档' }}</span>
+                <div class="attach-meta">
+                  <div class="attach-name">{{ a.name }} <em v-if="a.sample" class="tag-sample">示例</em></div>
+                  <div class="attach-sub">{{ a.typeLabel }} · {{ a.size }} · {{ a.time }}</div>
+                </div>
+                <button class="attach-dl" @click="downloadStub(a)">下载</button>
+              </li>
+            </ul>
+          </div>
+
+          <!-- 资产信息 -->
+          <div v-else-if="detailTab === '资产信息'" class="detail-tabpane">
+            <div class="asset-summary">
+              <div><span>资产编码</span><b>{{ assetSummary.code }}</b></div>
+              <div><span>资产类别</span><b>{{ assetSummary.category }}</b></div>
+              <div><span>建筑原值</span><b>{{ assetSummary.original.toLocaleString() }} 元</b></div>
+              <div><span>当前净值</span><b>{{ assetSummary.net.toLocaleString() }} 元</b></div>
+              <div><span>折旧年限</span><b>{{ assetSummary.life }} 年</b></div>
+              <div><span>使用状态</span><b>{{ assetSummary.status }}</b></div>
+            </div>
+            <p class="tab-note">资产台账对接中，金额为按建筑面积测算的示例值。</p>
+          </div>
+
+          <!-- 楼栋资产 -->
+          <div v-else-if="detailTab === '楼栋资产'" class="detail-tabpane">
+            <table class="asset-table">
+              <thead><tr><th>资产大类</th><th>金额（元）</th><th>占比</th></tr></thead>
+              <tbody>
+                <tr v-for="row in buildingAssetRows" :key="row.name">
+                  <td>{{ row.name }}</td>
+                  <td>{{ row.amount.toLocaleString() }}</td>
+                  <td>{{ row.percent }}%</td>
+                </tr>
+              </tbody>
+            </table>
+            <p class="tab-note">楼栋资产按大类拆分，金额为示例测算值。</p>
+          </div>
+
+          <!-- 楼层信息 -->
+          <div v-else-if="detailTab === '楼层信息'" class="detail-tabpane">
+            <table class="asset-table">
+              <thead><tr><th>楼层</th><th>面积（㎡）</th><th>房间数</th><th>主要用途</th></tr></thead>
+              <tbody>
+                <tr v-for="f in floorRows" :key="f.floor">
+                  <td>{{ f.floor }}F</td>
+                  <td>{{ f.area.toLocaleString() }}</td>
+                  <td>{{ f.rooms }}</td>
+                  <td>{{ f.use }}</td>
+                </tr>
+              </tbody>
+            </table>
+            <p v-if="!floorRows.length" class="tab-empty">暂无楼层数据</p>
+          </div>
+
+          <!-- 变更记录 -->
+          <div v-else-if="detailTab === '变更记录'" class="detail-tabpane">
+            <ul class="change-list">
+              <li v-for="(c, i) in changeRecords" :key="i" class="change-item">
+                <span class="change-dot"></span>
+                <div class="change-body">
+                  <div class="change-top"><b>{{ c.type }}</b><span>{{ c.date }}</span></div>
+                  <div class="change-desc">{{ c.desc }}</div>
+                  <div class="change-by">经办：{{ c.by }}</div>
+                </div>
+              </li>
+            </ul>
+            <p class="tab-note">变更记录为示例数据，正式数据由资产系统同步。</p>
           </div>
         </div>
-        <dl class="detail-modal__grid">
-          <div><dt>所在校区</dt><dd>{{ selectedProps.campus ?? '—' }}</dd></div>
-          <div><dt>管理部门</dt><dd>{{ selectedProps.managementDept ?? selectedProps.department ?? '—' }}</dd></div>
-          <div><dt>使用部门</dt><dd>{{ selectedProps.department ?? '—' }}</dd></div>
-          <div><dt>类型</dt><dd>{{ categoryLabel(selectedProps.category) }}</dd></div>
-          <div><dt>总层数</dt><dd>{{ selectedProps.totalFloors != null ? `${selectedProps.totalFloors} 层` : '—' }}</dd></div>
-          <div><dt>房间数</dt><dd>{{ selectedProps.roomCount != null ? `${selectedProps.roomCount} 间` : '—' }}</dd></div>
-          <div><dt>建筑面积</dt><dd>{{ selectedProps.buildingArea != null ? `${selectedProps.buildingArea.toLocaleString()} ㎡` : '—' }}</dd></div>
-          <div><dt>使用面积</dt><dd>{{ selectedProps.usableArea != null ? `${selectedProps.usableArea.toLocaleString()} ㎡` : '—' }}</dd></div>
-          <div><dt>建筑高度</dt><dd>{{ selectedProps.height ?? '—' }}</dd></div>
-          <div v-if="selected"><dt>经纬度</dt><dd>{{ selected.lngLat[0].toFixed(6) }}, {{ selected.lngLat[1].toFixed(6) }}</dd></div>
-        </dl>
-        <p v-if="selectedProps.description" class="detail-modal__desc">{{ selectedProps.description }}</p>
+      </div>
+    </div>
+
+    <!-- 房间管理弹窗：按楼层展示房间号与状态 -->
+    <div v-if="roomMgmtOpen && selectedProps.name" class="room-mgmt-modal" @click.self="roomMgmtOpen = false">
+      <div class="room-mgmt__card">
+        <div class="room-mgmt__head">
+          <strong>{{ selectedProps.name }} · 房间管理</strong>
+          <button class="property-panel__close" aria-label="关闭" @click="roomMgmtOpen = false">×</button>
+        </div>
+
+        <!-- 状态汇总：使用中 / 无权限 / 空置 数量 -->
+        <div class="room-mgmt__summary">
+          <span
+            v-for="s in ROOM_STATUS_ORDER"
+            :key="s"
+            class="room-mgmt__pill"
+            :style="{ '--c': ROOM_STATUS_CONFIG[s].color }"
+          >
+            <i :style="{ background: ROOM_STATUS_CONFIG[s].color }"></i>
+            {{ ROOM_STATUS_CONFIG[s].label }}
+            <b>{{ roomMgmtCounts[s] }}</b>
+          </span>
+        </div>
+
+        <!-- 楼层切换 -->
+        <div class="room-mgmt__floors">
+          <button
+            v-for="f in roomMgmtFloors"
+            :key="f"
+            class="room-mgmt__floor-btn"
+            :class="{ active: f === roomMgmtFloor }"
+            @click="roomMgmtFloor = f"
+          >
+            {{ f }}F
+          </button>
+        </div>
+
+        <!-- 当前楼层房间网格 -->
+        <div class="room-mgmt__grid">
+          <div
+            v-for="room in roomMgmtCurrentRooms"
+            :key="room.id"
+            class="room-mgmt__cell"
+            :style="{ '--c': ROOM_STATUS_CONFIG[room.status].color }"
+            :title="`${room.roomNo} · ${ROOM_STATUS_CONFIG[room.status].label}${room.roomName ? ' · ' + room.roomName : ''}`"
+          >
+            <span class="room-mgmt__no">{{ room.roomNo }}</span>
+            <span class="room-mgmt__st">{{ ROOM_STATUS_CONFIG[room.status].label }}</span>
+          </div>
+        </div>
+        <p v-if="!roomMgmtCurrentRooms.length" class="tab-empty">该楼层暂无房间数据</p>
       </div>
     </div>
 
@@ -348,7 +478,12 @@ const selectedRoom = ref<Room | null>(null);
 const isIndoorView = ref(false);
 const exportOpen = ref(false);
 const detailOpen = ref(false);
+const detailTab = ref('基础信息'); // 楼宇详情弹窗当前 Tab（默认「基础信息」）
 const imageError = ref(false);
+
+// 房间管理弹窗状态
+const roomMgmtOpen = ref(false);
+const roomMgmtFloor = ref(1);
 
 // 分配模式状态
 const selectedRooms = ref<Room[]>([]);
@@ -583,7 +718,153 @@ function flyToSelected() {
 }
 
 function openBuildingDetail() {
+  detailTab.value = '基础信息'; // 默认展示「基础信息」
   detailOpen.value = true;
+}
+
+// ---------------------------------------------------------------------------
+// 房间管理弹窗：按楼层展示房间号与状态（使用中 / 无权限 / 空置）
+// ---------------------------------------------------------------------------
+/** 当前选中楼栋的全部房间 */
+const roomMgmtAllRooms = computed<Room[]>(() => {
+  if (!selectedProps.value.name) return [];
+  return roomData.value[selectedProps.value.name] ?? [];
+});
+
+/** 该楼栋涉及的所有楼层（升序） */
+const roomMgmtFloors = computed<number[]>(() => {
+  const set = new Set(roomMgmtAllRooms.value.map((r) => r.floor));
+  return [...set].sort((a, b) => a - b);
+});
+
+/** 三种状态的数量汇总 */
+const roomMgmtCounts = computed<Record<string, number>>(() => {
+  const counts: Record<string, number> = { occupied: 0, noaccess: 0, vacant: 0 };
+  for (const r of roomMgmtAllRooms.value) counts[r.status] = (counts[r.status] ?? 0) + 1;
+  return counts;
+});
+
+/** 当前选中楼层的房间（按房间号排序） */
+const roomMgmtCurrentRooms = computed<Room[]>(() => {
+  return roomMgmtAllRooms.value
+    .filter((r) => r.floor === roomMgmtFloor.value)
+    .sort((a, b) => a.roomNo.localeCompare(b.roomNo, undefined, { numeric: true }));
+});
+
+function openRoomManagement() {
+  roomMgmtFloor.value = roomMgmtFloors.value.length ? roomMgmtFloors.value[0] : 1;
+  roomMgmtOpen.value = true;
+}
+
+// ---------------------------------------------------------------------------
+// 楼宇详情 Tab：基础信息 / 附件信息 / 资产信息 / 楼栋资产 / 楼层信息 / 变更记录
+// ---------------------------------------------------------------------------
+const detailTabs = ['基础信息', '附件信息', '资产信息', '楼栋资产', '楼层信息', '变更记录'] as const;
+
+interface AttachmentItem {
+  name: string;
+  type: 'img' | 'doc';
+  typeLabel: string;
+  size: string;
+  time: string;
+  sample: boolean;
+}
+
+/** 附件信息：含楼宇实景图（真实）与若干示例文档 */
+const attachmentList = computed<AttachmentItem[]>(() => {
+  const p = selectedProps.value;
+  const list: AttachmentItem[] = [];
+  if (p.image) {
+    list.push({ name: `${p.name} 实景图.jpg`, type: 'img', typeLabel: '图片', size: '1.2 MB', time: '2025-03-12', sample: false });
+  }
+  list.push(
+    { name: `${p.name} 建筑平面图.dwg`, type: 'doc', typeLabel: 'CAD 图纸', size: '3.4 MB', time: '2024-11-08', sample: true },
+    { name: `${p.name} 竣工验收备案表.pdf`, type: 'doc', typeLabel: '文档', size: '860 KB', time: '2024-09-20', sample: true },
+    { name: `${p.name} 资产清查表.xlsx`, type: 'doc', typeLabel: '表格', size: '210 KB', time: '2025-06-01', sample: true },
+  );
+  return list;
+});
+
+/** 资产信息：按建筑面积测算的示例资产卡片 */
+const assetSummary = computed(() => {
+  const p = selectedProps.value;
+  const area = Number(p.buildingArea) || 0;
+  const unitPrice = 8000; // 元/㎡（示例）
+  const original = area * unitPrice;
+  const codeSeed = p.name ? [...p.name].reduce((s, c) => s + c.charCodeAt(0), 0) : 0;
+  return {
+    code: 'GD-' + String(codeSeed).padStart(6, '0'),
+    category: '房屋构筑物',
+    original,
+    net: Math.round(original * 0.82),
+    life: 50,
+    status: '在用',
+  };
+});
+
+/** 楼栋资产：按大类拆分（示例测算） */
+const buildingAssetRows = computed(() => {
+  const total = assetSummary.value.original || 1;
+  const cats = [
+    { name: '房屋建筑物', ratio: 0.86 },
+    { name: '通用设备', ratio: 0.07 },
+    { name: '专用设备', ratio: 0.05 },
+    { name: '家具用具', ratio: 0.02 },
+  ];
+  return cats.map((c) => ({
+    name: c.name,
+    amount: Math.round(total * c.ratio),
+    percent: Math.round(c.ratio * 100),
+  }));
+});
+
+interface FloorRow {
+  floor: number;
+  area: number;
+  rooms: number;
+  use: string;
+}
+
+/** 楼层信息：优先聚合房间数据，否则按总层数均匀拆分 */
+const floorRows = computed<FloorRow[]>(() => {
+  const p = selectedProps.value;
+  const rooms = roomData.value[p.name] ?? [];
+  if (rooms.length) {
+    const byFloor = new Map<number, Room[]>();
+    for (const r of rooms) {
+      if (!byFloor.has(r.floor)) byFloor.set(r.floor, []);
+      byFloor.get(r.floor)!.push(r);
+    }
+    return [...byFloor.entries()]
+      .sort((a, b) => a[0] - b[0])
+      .map(([floor, rs]) => ({
+        floor,
+        area: Math.round(rs.reduce((s, r) => s + (Number(r.area) || 0), 0)),
+        rooms: rs.length,
+        use: rs[0]?.purpose ?? '—',
+      }));
+  }
+  const total = p.totalFloors;
+  if (!total) return [];
+  const areaPer = Math.round((Number(p.buildingArea) || 0) / total);
+  const roomsPer = Math.round((Number(p.roomCount) || 0) / total);
+  return Array.from({ length: total }, (_, i) => ({ floor: i + 1, area: areaPer, rooms: roomsPer, use: '教学/办公' }));
+});
+
+/** 变更记录（示例） */
+const changeRecords = computed(() => [
+  { date: '2024-09-20', type: '竣工验收', desc: `${selectedProps.value.name} 通过竣工验收并交付使用。`, by: '基建处' },
+  { date: '2024-11-08', type: '资产入账', desc: '完成固定资产入账，建立楼宇资产卡片。', by: '资产处' },
+  { date: '2025-03-12', type: '维修改造', desc: '外立面及屋面防水维修改造。', by: '后勤处' },
+  { date: '2025-06-01', type: '用途调整', desc: '部分楼层用途由办公调整为实训教室。', by: '教务处' },
+]);
+
+function downloadStub(a: AttachmentItem) {
+  if (a.type === 'img') {
+    const img = selectedProps.value.image;
+    if (img) window.open(img, '_blank');
+  }
+  // 示例文档暂无真实文件，仅对真实图片开放预览
 }
 
 // ---------------------------------------------------------------------------
@@ -1331,9 +1612,10 @@ onBeforeUnmount(() => {
   backdrop-filter: blur(3px);
 }
 .detail-modal__card {
-  width: 420px;
-  max-width: calc(100% - 48px);
-  max-height: calc(100% - 64px);
+  width: 50vw;
+  max-width: 50vw;
+  height: 80vh;
+  max-height: 80vh;
   overflow-y: auto;
   border: 1px solid #24324a;
   border-radius: 10px;
@@ -1392,6 +1674,262 @@ onBeforeUnmount(() => {
   font-size: 12px;
   line-height: 1.7;
 }
+
+/* 楼宇详情 Tab */
+.detail-modal__tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 8px 12px 0;
+  border-bottom: 1px solid #24324a;
+  position: sticky;
+  top: 0;
+  background: rgba(20, 27, 43, 0.98);
+  z-index: 2;
+}
+.detail-tab {
+  appearance: none;
+  border: 1px solid transparent;
+  background: transparent;
+  color: #9fb0c9;
+  font-size: 12.5px;
+  padding: 7px 11px;
+  border-radius: 7px 7px 0 0;
+  cursor: pointer;
+  transition: color 0.15s, background 0.15s, border-color 0.15s;
+}
+.detail-tab:hover { color: #eaf2ff; background: rgba(56, 189, 248, 0.08); }
+.detail-tab.active {
+  color: #eaf2ff;
+  background: rgba(56, 189, 248, 0.14);
+  border-color: #24324a;
+  border-bottom-color: transparent;
+  font-weight: 600;
+}
+.detail-modal__body { padding: 0 0 8px; }
+.detail-tabpane { padding-top: 4px; }
+
+/* 房间管理弹窗 */
+.room-mgmt-modal {
+  position: absolute;
+  inset: 0;
+  z-index: 210;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(6, 10, 20, 0.55);
+  backdrop-filter: blur(3px);
+}
+.room-mgmt__card {
+  width: 50vw;
+  max-width: 50vw;
+  height: 80vh;
+  max-height: 80vh;
+  overflow-y: auto;
+  border: 1px solid #24324a;
+  border-radius: 10px;
+  background: rgba(20, 27, 43, 0.98);
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.5);
+}
+.room-mgmt__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 16px;
+  border-bottom: 1px solid #24324a;
+  color: #eaf2ff;
+  position: sticky;
+  top: 0;
+  background: rgba(20, 27, 43, 0.98);
+  z-index: 2;
+}
+.room-mgmt__head strong { flex: 1; font-size: 15px; font-weight: 600; }
+.room-mgmt__summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 12px 16px;
+  border-bottom: 1px solid #24324a;
+}
+.room-mgmt__pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border: 1px solid #24324a;
+  border-radius: 999px;
+  background: rgba(14, 20, 34, 0.5);
+  color: #cdd8ea;
+  font-size: 13px;
+}
+.room-mgmt__pill i { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+.room-mgmt__pill b { color: var(--c); font-size: 14px; }
+.room-mgmt__floors {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 12px 16px;
+  border-bottom: 1px solid #24324a;
+}
+.room-mgmt__floor-btn {
+  appearance: none;
+  border: 1px solid #24324a;
+  background: transparent;
+  color: #9fb0c9;
+  font-size: 13px;
+  padding: 6px 14px;
+  border-radius: 7px;
+  cursor: pointer;
+  transition: color 0.15s, background 0.15s, border-color 0.15s;
+}
+.room-mgmt__floor-btn:hover { color: #eaf2ff; background: rgba(56, 189, 248, 0.08); }
+.room-mgmt__floor-btn.active {
+  color: #eaf2ff;
+  background: rgba(56, 189, 248, 0.16);
+  border-color: #38bdf8;
+  font-weight: 600;
+}
+.room-mgmt__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+  gap: 10px;
+  padding: 14px 16px 18px;
+}
+.room-mgmt__cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 12px 6px;
+  border: 1px solid #24324a;
+  border-left: 3px solid var(--c);
+  border-radius: 8px;
+  background: rgba(14, 20, 34, 0.55);
+  cursor: default;
+  transition: transform 0.12s, background 0.12s;
+}
+.room-mgmt__cell:hover { transform: translateY(-2px); background: rgba(56, 189, 248, 0.08); }
+.room-mgmt__no { font-size: 16px; font-weight: 700; color: #eaf2ff; letter-spacing: 0.5px; }
+.room-mgmt__st { font-size: 12px; color: var(--c); }
+
+
+/* 附件信息 */
+.attach-list { list-style: none; margin: 0; padding: 8px 12px; display: flex; flex-direction: column; gap: 8px; }
+.attach-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 10px;
+  border: 1px solid #24324a;
+  border-radius: 8px;
+  background: rgba(14, 20, 34, 0.5);
+}
+.attach-icon {
+  flex: none;
+  width: 34px;
+  height: 34px;
+  border-radius: 7px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 700;
+  color: #fff;
+  background: #3a4a66;
+}
+.attach-icon--img { background: #1d7a5a; }
+.attach-meta { flex: 1; min-width: 0; }
+.attach-name { color: #eaf2ff; font-size: 13px; display: flex; align-items: center; gap: 6px; }
+.attach-sub { color: #8a97ad; font-size: 11px; margin-top: 2px; }
+.tag-sample {
+  font-style: normal;
+  font-size: 10px;
+  color: #f0b429;
+  border: 1px solid #5a4a1e;
+  background: rgba(240, 180, 41, 0.12);
+  border-radius: 4px;
+  padding: 0 5px;
+}
+.attach-dl {
+  flex: none;
+  appearance: none;
+  border: 1px solid #2c3c58;
+  background: transparent;
+  color: #9fc6ff;
+  font-size: 12px;
+  padding: 5px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.attach-dl:hover { border-color: #38bdf8; color: #38bdf8; }
+
+/* 资产信息卡片 */
+.asset-summary {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0 16px;
+  padding: 12px 16px;
+}
+.asset-summary > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 0;
+  font-size: 13px;
+  border-bottom: 1px dashed #1e2a40;
+}
+.asset-summary span { color: #8a97ad; white-space: nowrap; }
+.asset-summary b { color: #eaf2ff; text-align: right; }
+
+/* 资产 / 楼层表格 */
+.asset-table {
+  width: calc(100% - 24px);
+  margin: 10px 12px;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+.asset-table th, .asset-table td {
+  padding: 8px 10px;
+  text-align: left;
+  border-bottom: 1px solid #1e2a40;
+}
+.asset-table th { color: #8a97ad; font-weight: 600; }
+.asset-table td { color: #eaf2ff; }
+.asset-table tbody tr:hover { background: rgba(56, 189, 248, 0.06); }
+
+.tab-note { margin: 4px 16px 14px; color: #7d8aa3; font-size: 11px; line-height: 1.6; }
+.tab-empty { margin: 18px 16px; color: #7d8aa3; font-size: 13px; text-align: center; }
+
+/* 变更记录时间线 */
+.change-list { list-style: none; margin: 0; padding: 12px 16px; }
+.change-item { display: flex; gap: 12px; padding-bottom: 16px; position: relative; }
+.change-item:not(:last-child)::before {
+  content: '';
+  position: absolute;
+  left: 5px;
+  top: 14px;
+  bottom: 0;
+  width: 1px;
+  background: #24324a;
+}
+.change-dot {
+  flex: none;
+  width: 11px;
+  height: 11px;
+  margin-top: 3px;
+  border-radius: 50%;
+  background: #38bdf8;
+  box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.18);
+  z-index: 1;
+}
+.change-body { flex: 1; min-width: 0; }
+.change-top { display: flex; justify-content: space-between; align-items: baseline; }
+.change-top b { color: #eaf2ff; font-size: 13px; }
+.change-top span { color: #8a97ad; font-size: 11px; }
+.change-desc { color: #a7b4c8; font-size: 12px; line-height: 1.6; margin-top: 3px; }
+.change-by { color: #7d8aa3; font-size: 11px; margin-top: 3px; }
+
 
 /* 楼盘表面板 */
 .room-panel {

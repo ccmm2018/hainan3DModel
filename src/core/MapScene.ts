@@ -272,6 +272,7 @@ export class MapScene {
 
         this.placeModelAtAnchor();
         this.scene!.add(this.modelRoot);
+        this.resolveMeshBuildingNames();
 
         this.callbacks.onModelReady?.();
       },
@@ -307,6 +308,50 @@ export class MapScene {
     this.modelRoot.position.set(this.anchorWorld.x, this.anchorWorld.y, this.anchorWorld.z);
     this.modelRoot.scale.setScalar(this.config.modelScale);
     this.modelRoot.updateMatrixWorld(true);
+  }
+
+  /**
+   * 反推每个 Mesh 所属楼栋 / 道路 / 水系名称。
+   *
+   * 模型里建筑通常由「带中文名的父节点（如 教学楼）+ 若干无名子 Mesh」组成，
+   * three.js 加载时会给无名子 Mesh 自动命名为 mesh_0 / mesh_1 ……，
+   * 而射线拾取命中的正是这些无名子 Mesh，导致拿到的名称是 mesh_N 而非楼栋名，
+   * 既会让属性面板显示 mesh_N，也会让房间数据按 mesh_N 查不到。
+   *
+   * 这里以「所有带名字的节点」为锚点，让每个 Mesh 归属到空间上最近的锚点，
+   * 从而正确还原楼栋名（属性面板 / 房间数据查找都依赖此名称）。
+   */
+  private resolveMeshBuildingNames(): void {
+    if (!this.modelRoot) return;
+    this.modelRoot.updateMatrixWorld(true);
+
+    const anchors: { name: string; pos: THREE.Vector3 }[] = [];
+    this.modelRoot.traverse((o) => {
+      if (o === this.modelRoot) return;
+      if (o.name && o.name.trim()) {
+        const c = new THREE.Box3().setFromObject(o).getCenter(new THREE.Vector3());
+        anchors.push({ name: o.name.trim(), pos: c });
+      }
+    });
+    if (anchors.length === 0) return;
+
+    this.modelRoot.traverse((o) => {
+      const mesh = o as THREE.Mesh;
+      if (!mesh.isMesh) return;
+      const c = new THREE.Box3().setFromObject(mesh).getCenter(new THREE.Vector3());
+      let best = anchors[0];
+      let bestD = Infinity;
+      for (const a of anchors) {
+        const dx = a.pos.x - c.x;
+        const dy = a.pos.y - c.y;
+        const d = dx * dx + dy * dy;
+        if (d < bestD) {
+          bestD = d;
+          best = a;
+        }
+      }
+      mesh.userData.buildingName = best.name;
+    });
   }
 
   // -------------------------------------------------------------------------
@@ -379,10 +424,16 @@ export class MapScene {
 
     // 命中了建筑/道路/水系
     const target = this.selectableTargetOf(mesh);
+    // 优先用模型反推得到的楼栋名（解决 GLB 无名子 mesh 被自动命名为 mesh_N 的问题）
+    const resolvedName =
+      (mesh.userData.buildingName as string | undefined) ||
+      target.name ||
+      mesh.name ||
+      '(未命名)';
     return {
       object: mesh,
       target,
-      name: target.name || mesh.name || '(未命名)',
+      name: resolvedName,
       point: first.point.clone(),
       lngLat: this.worldToWgs84(first.point),
       screenX,

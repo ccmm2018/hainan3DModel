@@ -156,28 +156,52 @@ function makeSquarePolygon(lng: number, lat: number, sideMeters: number): any {
 }
 
 function generateSampleRooms(): RoomDataMap {
-  const buildings = ['教学楼', '实验楼', '图书馆', '学生公寓'];
-  const departments = ['教务处', '侦查系', '边防管理系', '网络安全与执法系', '警体部'];
-  const roomNames = ['多媒体教室', '普通教室', '实验室', '办公室', '研讨室', '机房'];
-  const purposes = ['教学', '实验实训', '办公', '会议', '科研'];
-  const users = ['张老师', '李老师', '王老师', '陈老师', '—'];
+  // 覆盖全部楼栋（与 buildingData 主键一致），避免部分楼栋无房间数据
+  const plan: Record<string, { floors: number; perFloor: number }> = {
+    教学楼: { floors: 6, perFloor: 10 },
+    实验楼: { floors: 5, perFloor: 8 },
+    图书馆: { floors: 7, perFloor: 6 },
+    警体综合训练馆: { floors: 3, perFloor: 5 },
+    学生公寓: { floors: 8, perFloor: 12 },
+    食堂: { floors: 3, perFloor: 4 },
+  };
+  const departments = ['教务处', '侦查系', '边防管理系', '网络安全与执法系', '警体部', '图书馆', '后勤管理处'];
+  const roomNamesByType: Record<string, string[]> = {
+    教学楼: ['多媒体教室', '普通教室', '阶梯教室', '研讨室', '办公室', '机房'],
+    实验楼: ['理化实验室', '电子实验室', '法医实验室', '仪器室', '准备室', '办公室'],
+    图书馆: ['阅览室', '书库', '电子阅览室', '研讨间', '采编室', '办公室'],
+    警体综合训练馆: ['训练馆', '器械室', '更衣室', '裁判室', '储物间'],
+    学生公寓: ['学生宿舍', '洗衣房', '活动室', '宿管室', '储物间'],
+    食堂: ['餐厅', '后厨', '备餐间', '仓库', '办公室'],
+  };
+  const purposesByType: Record<string, string[]> = {
+    教学楼: ['教学', '会议', '办公', '科研'],
+    实验楼: ['实验实训', '教学', '办公'],
+    图书馆: ['阅览', '藏书', '办公'],
+    警体综合训练馆: ['体育训练', '仓储'],
+    学生公寓: ['住宿', '生活服务'],
+    食堂: ['餐饮', '后勤'],
+  };
+  const users = ['张老师', '李老师', '王老师', '陈老师', '刘教官', '—'];
   const statuses: RoomStatus[] = ['occupied', 'noaccess', 'vacant'];
   const map: RoomDataMap = {};
   // 校园中心（WGS84）
   const baseLng = 110.280328;
   const baseLat = 19.75491;
 
-  for (const [bi, building] of buildings.entries()) {
-    const floors = 4;
+  const buildingNames = Object.keys(plan);
+  for (const [bi, building] of buildingNames.entries()) {
+    const { floors, perFloor } = plan[building];
+    const roomNames = roomNamesByType[building];
+    const purposes = purposesByType[building];
     const rooms: Room[] = [];
     for (let f = 1; f <= floors; f++) {
-      const roomsPerFloor = 8;
-      for (let r = 1; r <= roomsPerFloor; r++) {
+      for (let r = 1; r <= perFloor; r++) {
         const status = statuses[(f + r + bi) % statuses.length];
-        const area = 30 + ((f + r) % 5) * 12;
+        const area = 24 + ((f + r * 3 + bi) % 6) * 10;
         const side = Math.sqrt(area);
-        const lng = baseLng + (bi * 0.0004) + ((r - 1) % 4) * 0.00012;
-        const lat = baseLat + Math.floor((r - 1) / 4) * 0.0001;
+        const lng = baseLng + (bi * 0.0004) + ((r - 1) % 5) * 0.00012;
+        const lat = baseLat + Math.floor((r - 1) / 5) * 0.0001 + bi * 0.00018;
         rooms.push({
           id: `${building}-${f}-${r}`,
           roomNo: `${f}${String(r).padStart(2, '0')}`,

@@ -302,8 +302,8 @@
       </div>
     </div>
 
-    <!-- 房间管理弹窗：按楼层展示房间号与状态 -->
-    <div v-if="roomMgmtOpen && selectedProps.name" class="room-mgmt-modal" @click.self="roomMgmtOpen = false">
+    <!-- 房间管理面板：右侧停靠，宽 20%，无遮罩层 -->
+    <div v-if="roomMgmtOpen && selectedProps.name" class="room-mgmt-modal">
       <div class="room-mgmt__card">
         <div class="room-mgmt__head">
           <strong>{{ selectedProps.name }} · 房间管理</strong>
@@ -682,7 +682,7 @@ const selectedProps = computed<BuildingProps>(() => {
   const base = buildingData.value[selected.value.name];
   const height = base?.height ?? estimateHeight(selected.value.target);
   // 总层数 / 房间数：优先取属性数据，缺失时从房间数据回推
-  const rooms = roomData.value[selected.value.name] ?? [];
+  const rooms = roomsOf(selected.value.name);
   const totalFloors = base?.totalFloors ?? (rooms.length ? Math.max(...rooms.map((r) => r.floor)) : undefined);
   const roomCount = base?.roomCount ?? (rooms.length ? rooms.length : undefined);
   return { ...(base ?? {}), name: selected.value.name, height, totalFloors, roomCount };
@@ -690,6 +690,24 @@ const selectedProps = computed<BuildingProps>(() => {
 
 const categoryLabel = (c?: string) =>
   ({ building: '建筑', road: '道路', water: '水系', other: '其他' } as Record<string, string>)[c ?? 'other'] ?? '其他';
+
+/**
+ * 按建筑名查找房间列表（容错版）。
+ * 兼容：精确匹配 → 去空格匹配 → 大小写不敏感匹配 → 包含关系模糊匹配
+ * （例如模型节点名 "一号教学楼" / "教学大楼" / "TeachingBuilding" 也能命中数据主键 "教学楼"）。
+ */
+function roomsOf(name?: string): Room[] {
+  if (!name) return [];
+  const key = String(name).trim();
+  if (roomData.value[key]) return roomData.value[key];
+  const lower = key.toLowerCase();
+  for (const k of Object.keys(roomData.value)) {
+    const kl = k.toLowerCase();
+    if (kl === lower) return roomData.value[k];
+    if (kl.includes(lower) || lower.includes(kl)) return roomData.value[k];
+  }
+  return [];
+}
 
 const roomStatusLabel = (room?: Room): string =>
   room ? (ROOM_STATUS_CONFIG[room.status]?.label ?? '') : '';
@@ -710,6 +728,7 @@ function closePanel() {
   panelAnchor.value = null;
   detailOpen.value = false;
   imageError.value = false;
+  roomMgmtOpen.value = false; // 关闭属性面板时一并关闭房间管理面板
   scene?.clearHighlight();
 }
 
@@ -727,8 +746,7 @@ function openBuildingDetail() {
 // ---------------------------------------------------------------------------
 /** 当前选中楼栋的全部房间 */
 const roomMgmtAllRooms = computed<Room[]>(() => {
-  if (!selectedProps.value.name) return [];
-  return roomData.value[selectedProps.value.name] ?? [];
+  return roomsOf(selectedProps.value.name);
 });
 
 /** 该楼栋涉及的所有楼层（升序） */
@@ -828,7 +846,7 @@ interface FloorRow {
 /** 楼层信息：优先聚合房间数据，否则按总层数均匀拆分 */
 const floorRows = computed<FloorRow[]>(() => {
   const p = selectedProps.value;
-  const rooms = roomData.value[p.name] ?? [];
+  const rooms = roomsOf(p.name);
   if (rooms.length) {
     const byFloor = new Map<number, Room[]>();
     for (const r of rooms) {
@@ -873,7 +891,7 @@ function downloadStub(a: AttachmentItem) {
 function enterRoomMode() {
   if (!selected.value || selected.value.isRoom) return;
   const { name, target } = selected.value;
-  const rooms = roomData.value[name] ?? [];
+  const rooms = roomsOf(name);
   scene?.showRooms(target, rooms);
   roomBuilding.value = { name, object: target };
   roomFloors.value = scene?.getRoomFloors() ?? [];
@@ -1121,9 +1139,12 @@ async function loadRoomData(): Promise<void> {
   const url = config.roomDataUrl;
   if (!url) return;
   try {
-    roomData.value = await fetchRoomData(url);
+    const fetched = await fetchRoomData(url);
+    // 以示例数据为兜底底座，再叠加真实数据：保证任何楼栋都不会因单条数据缺失而空白
+    roomData.value = { ...SAMPLE_ROOM_DATA, ...fetched };
   } catch (err) {
     console.warn('[房间数据] 加载失败，回退示例数据：', err);
+    roomData.value = SAMPLE_ROOM_DATA;
   }
 }
 
@@ -1211,6 +1232,8 @@ onMounted(async () => {
           selected.value = result;
           detailOpen.value = false;
           imageError.value = false;
+          // 切换/点击建筑时，关闭可能残留的房间管理面板（避免与属性面板同时出现）
+          roomMgmtOpen.value = false;
           panelAnchor.value =
             scene?.projectToScreen(result.point) ?? { x: result.screenX, y: result.screenY };
           panel.measure();
@@ -1709,27 +1732,27 @@ onBeforeUnmount(() => {
 .detail-modal__body { padding: 0 0 8px; }
 .detail-tabpane { padding-top: 4px; }
 
-/* 房间管理弹窗 */
+/* 房间管理面板：右侧停靠，宽 20%，无遮罩层 */
 .room-mgmt-modal {
   position: absolute;
-  inset: 0;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 20vw;
   z-index: 210;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: rgba(6, 10, 20, 0.55);
-  backdrop-filter: blur(3px);
+  display: block;
 }
 .room-mgmt__card {
-  width: 50vw;
-  max-width: 50vw;
-  height: 80vh;
-  max-height: 80vh;
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  max-height: none;
   overflow-y: auto;
   border: 1px solid #24324a;
-  border-radius: 10px;
+  border-right: none;
+  border-radius: 0;
   background: rgba(20, 27, 43, 0.98);
-  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.5);
+  box-shadow: -8px 0 30px rgba(0, 0, 0, 0.35);
 }
 .room-mgmt__head {
   display: flex;

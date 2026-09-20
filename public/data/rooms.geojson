@@ -4,48 +4,3679 @@
   "features": [
     {
       "type": "Feature",
-      "geometry": { "type": "Point", "coordinates": [110.280328, 19.75491] },
-      "properties": { "building": "教学楼", "roomNo": "101", "floor": 1, "status": "occupied", "area": 60, "department": "教务处" }
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "教学楼",
+        "roomNo": "101",
+        "floor": 1,
+        "status": "vacant",
+        "area": 64,
+        "department": "边防管理系",
+        "purpose": "阶梯教室"
+      }
     },
     {
       "type": "Feature",
-      "geometry": { "type": "Point", "coordinates": [110.280328, 19.75491] },
-      "properties": { "building": "教学楼", "roomNo": "102", "floor": 1, "status": "idle", "area": 60, "department": "侦查系" }
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "教学楼",
+        "roomNo": "102",
+        "floor": 1,
+        "status": "noaccess",
+        "area": 34,
+        "department": "网络安全与执法系",
+        "purpose": "研讨室",
+        "remark": "暂无门禁权限"
+      }
     },
     {
       "type": "Feature",
-      "geometry": { "type": "Point", "coordinates": [110.280328, 19.75491] },
-      "properties": { "building": "教学楼", "roomNo": "103", "floor": 1, "status": "maintenance", "area": 45, "department": "边防管理系", "remark": "多媒体设备检修中" }
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "教学楼",
+        "roomNo": "103",
+        "floor": 1,
+        "status": "occupied",
+        "area": 64,
+        "department": "教务处",
+        "purpose": "办公室"
+      }
     },
     {
       "type": "Feature",
-      "geometry": { "type": "Point", "coordinates": [110.280328, 19.75491] },
-      "properties": { "building": "教学楼", "roomNo": "201", "floor": 2, "status": "occupied", "area": 60, "department": "网络安全与执法系" }
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "教学楼",
+        "roomNo": "104",
+        "floor": 1,
+        "status": "vacant",
+        "area": 34,
+        "department": "侦查系",
+        "purpose": "机房"
+      }
     },
     {
       "type": "Feature",
-      "geometry": { "type": "Point", "coordinates": [110.280328, 19.75491] },
-      "properties": { "building": "教学楼", "roomNo": "202", "floor": 2, "status": "idle", "area": 60, "department": "教务处" }
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "教学楼",
+        "roomNo": "105",
+        "floor": 1,
+        "status": "noaccess",
+        "area": 64,
+        "department": "边防管理系",
+        "purpose": "实验室",
+        "remark": "暂无门禁权限"
+      }
     },
     {
       "type": "Feature",
-      "geometry": { "type": "Point", "coordinates": [110.280328, 19.75491] },
-      "properties": { "building": "教学楼", "roomNo": "301", "floor": 3, "status": "occupied", "area": 72, "department": "侦查系" }
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "教学楼",
+        "roomNo": "106",
+        "floor": 1,
+        "status": "occupied",
+        "area": 34,
+        "department": "网络安全与执法系",
+        "purpose": "备课室"
+      }
     },
     {
       "type": "Feature",
-      "geometry": { "type": "Point", "coordinates": [110.280328, 19.75491] },
-      "properties": { "building": "实验楼", "roomNo": "101", "floor": 1, "status": "idle", "area": 80, "department": "实验实训中心" }
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "教学楼",
+        "roomNo": "107",
+        "floor": 1,
+        "status": "vacant",
+        "area": 64,
+        "department": "教务处",
+        "purpose": "多媒体教室"
+      }
     },
     {
       "type": "Feature",
-      "geometry": { "type": "Point", "coordinates": [110.280328, 19.75491] },
-      "properties": { "building": "实验楼", "roomNo": "102", "floor": 1, "status": "occupied", "area": 80, "department": "实验实训中心" }
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "教学楼",
+        "roomNo": "108",
+        "floor": 1,
+        "status": "noaccess",
+        "area": 34,
+        "department": "侦查系",
+        "purpose": "普通教室",
+        "remark": "暂无门禁权限"
+      }
     },
     {
       "type": "Feature",
-      "geometry": { "type": "Point", "coordinates": [110.280328, 19.75491] },
-      "properties": { "building": "实验楼", "roomNo": "201", "floor": 2, "status": "maintenance", "area": 65, "department": "实验实训中心", "remark": "通风系统维修" }
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "教学楼",
+        "roomNo": "201",
+        "floor": 2,
+        "status": "vacant",
+        "area": 74,
+        "department": "网络安全与执法系",
+        "purpose": "研讨室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "教学楼",
+        "roomNo": "202",
+        "floor": 2,
+        "status": "noaccess",
+        "area": 44,
+        "department": "教务处",
+        "purpose": "办公室",
+        "remark": "暂无门禁权限"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "教学楼",
+        "roomNo": "203",
+        "floor": 2,
+        "status": "occupied",
+        "area": 74,
+        "department": "侦查系",
+        "purpose": "机房"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "教学楼",
+        "roomNo": "204",
+        "floor": 2,
+        "status": "vacant",
+        "area": 44,
+        "department": "边防管理系",
+        "purpose": "实验室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "教学楼",
+        "roomNo": "205",
+        "floor": 2,
+        "status": "noaccess",
+        "area": 74,
+        "department": "网络安全与执法系",
+        "purpose": "备课室",
+        "remark": "暂无门禁权限"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "教学楼",
+        "roomNo": "206",
+        "floor": 2,
+        "status": "occupied",
+        "area": 44,
+        "department": "教务处",
+        "purpose": "多媒体教室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "教学楼",
+        "roomNo": "207",
+        "floor": 2,
+        "status": "vacant",
+        "area": 74,
+        "department": "侦查系",
+        "purpose": "普通教室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "教学楼",
+        "roomNo": "208",
+        "floor": 2,
+        "status": "noaccess",
+        "area": 44,
+        "department": "边防管理系",
+        "purpose": "阶梯教室",
+        "remark": "暂无门禁权限"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "教学楼",
+        "roomNo": "301",
+        "floor": 3,
+        "status": "vacant",
+        "area": 24,
+        "department": "教务处",
+        "purpose": "办公室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "教学楼",
+        "roomNo": "302",
+        "floor": 3,
+        "status": "noaccess",
+        "area": 54,
+        "department": "侦查系",
+        "purpose": "机房",
+        "remark": "暂无门禁权限"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "教学楼",
+        "roomNo": "303",
+        "floor": 3,
+        "status": "occupied",
+        "area": 24,
+        "department": "边防管理系",
+        "purpose": "实验室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "教学楼",
+        "roomNo": "304",
+        "floor": 3,
+        "status": "vacant",
+        "area": 54,
+        "department": "网络安全与执法系",
+        "purpose": "备课室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "教学楼",
+        "roomNo": "305",
+        "floor": 3,
+        "status": "noaccess",
+        "area": 24,
+        "department": "教务处",
+        "purpose": "多媒体教室",
+        "remark": "暂无门禁权限"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "教学楼",
+        "roomNo": "306",
+        "floor": 3,
+        "status": "occupied",
+        "area": 54,
+        "department": "侦查系",
+        "purpose": "普通教室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "教学楼",
+        "roomNo": "307",
+        "floor": 3,
+        "status": "vacant",
+        "area": 24,
+        "department": "边防管理系",
+        "purpose": "阶梯教室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "教学楼",
+        "roomNo": "308",
+        "floor": 3,
+        "status": "noaccess",
+        "area": 54,
+        "department": "网络安全与执法系",
+        "purpose": "研讨室",
+        "remark": "暂无门禁权限"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "教学楼",
+        "roomNo": "401",
+        "floor": 4,
+        "status": "vacant",
+        "area": 34,
+        "department": "侦查系",
+        "purpose": "机房"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "教学楼",
+        "roomNo": "402",
+        "floor": 4,
+        "status": "noaccess",
+        "area": 64,
+        "department": "边防管理系",
+        "purpose": "实验室",
+        "remark": "暂无门禁权限"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "教学楼",
+        "roomNo": "403",
+        "floor": 4,
+        "status": "occupied",
+        "area": 34,
+        "department": "网络安全与执法系",
+        "purpose": "备课室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "教学楼",
+        "roomNo": "404",
+        "floor": 4,
+        "status": "vacant",
+        "area": 64,
+        "department": "教务处",
+        "purpose": "多媒体教室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "教学楼",
+        "roomNo": "405",
+        "floor": 4,
+        "status": "noaccess",
+        "area": 34,
+        "department": "侦查系",
+        "purpose": "普通教室",
+        "remark": "暂无门禁权限"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "教学楼",
+        "roomNo": "406",
+        "floor": 4,
+        "status": "occupied",
+        "area": 64,
+        "department": "边防管理系",
+        "purpose": "阶梯教室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "教学楼",
+        "roomNo": "407",
+        "floor": 4,
+        "status": "vacant",
+        "area": 34,
+        "department": "网络安全与执法系",
+        "purpose": "研讨室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "教学楼",
+        "roomNo": "408",
+        "floor": 4,
+        "status": "noaccess",
+        "area": 64,
+        "department": "教务处",
+        "purpose": "办公室",
+        "remark": "暂无门禁权限"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "教学楼",
+        "roomNo": "501",
+        "floor": 5,
+        "status": "vacant",
+        "area": 44,
+        "department": "边防管理系",
+        "purpose": "实验室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "教学楼",
+        "roomNo": "502",
+        "floor": 5,
+        "status": "noaccess",
+        "area": 74,
+        "department": "网络安全与执法系",
+        "purpose": "备课室",
+        "remark": "暂无门禁权限"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "教学楼",
+        "roomNo": "503",
+        "floor": 5,
+        "status": "occupied",
+        "area": 44,
+        "department": "教务处",
+        "purpose": "多媒体教室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "教学楼",
+        "roomNo": "504",
+        "floor": 5,
+        "status": "vacant",
+        "area": 74,
+        "department": "侦查系",
+        "purpose": "普通教室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "教学楼",
+        "roomNo": "505",
+        "floor": 5,
+        "status": "noaccess",
+        "area": 44,
+        "department": "边防管理系",
+        "purpose": "阶梯教室",
+        "remark": "暂无门禁权限"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "教学楼",
+        "roomNo": "506",
+        "floor": 5,
+        "status": "occupied",
+        "area": 74,
+        "department": "网络安全与执法系",
+        "purpose": "研讨室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "教学楼",
+        "roomNo": "507",
+        "floor": 5,
+        "status": "vacant",
+        "area": 44,
+        "department": "教务处",
+        "purpose": "办公室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "教学楼",
+        "roomNo": "508",
+        "floor": 5,
+        "status": "noaccess",
+        "area": 74,
+        "department": "侦查系",
+        "purpose": "机房",
+        "remark": "暂无门禁权限"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "教学楼",
+        "roomNo": "601",
+        "floor": 6,
+        "status": "vacant",
+        "area": 54,
+        "department": "网络安全与执法系",
+        "purpose": "备课室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "教学楼",
+        "roomNo": "602",
+        "floor": 6,
+        "status": "noaccess",
+        "area": 24,
+        "department": "教务处",
+        "purpose": "多媒体教室",
+        "remark": "暂无门禁权限"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "教学楼",
+        "roomNo": "603",
+        "floor": 6,
+        "status": "occupied",
+        "area": 54,
+        "department": "侦查系",
+        "purpose": "普通教室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "教学楼",
+        "roomNo": "604",
+        "floor": 6,
+        "status": "vacant",
+        "area": 24,
+        "department": "边防管理系",
+        "purpose": "阶梯教室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "教学楼",
+        "roomNo": "605",
+        "floor": 6,
+        "status": "noaccess",
+        "area": 54,
+        "department": "网络安全与执法系",
+        "purpose": "研讨室",
+        "remark": "暂无门禁权限"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "教学楼",
+        "roomNo": "606",
+        "floor": 6,
+        "status": "occupied",
+        "area": 24,
+        "department": "教务处",
+        "purpose": "办公室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "教学楼",
+        "roomNo": "607",
+        "floor": 6,
+        "status": "vacant",
+        "area": 54,
+        "department": "侦查系",
+        "purpose": "机房"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "教学楼",
+        "roomNo": "608",
+        "floor": 6,
+        "status": "noaccess",
+        "area": 24,
+        "department": "边防管理系",
+        "purpose": "实验室",
+        "remark": "暂无门禁权限"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "实验楼",
+        "roomNo": "101",
+        "floor": 1,
+        "status": "vacant",
+        "area": 64,
+        "department": "实验实训中心",
+        "purpose": "法医实验室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "实验楼",
+        "roomNo": "102",
+        "floor": 1,
+        "status": "noaccess",
+        "area": 34,
+        "department": "刑技系",
+        "purpose": "仪器室",
+        "remark": "暂无门禁权限"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "实验楼",
+        "roomNo": "103",
+        "floor": 1,
+        "status": "occupied",
+        "area": 64,
+        "department": "实验实训中心",
+        "purpose": "准备室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "实验楼",
+        "roomNo": "104",
+        "floor": 1,
+        "status": "vacant",
+        "area": 34,
+        "department": "刑技系",
+        "purpose": "办公室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "实验楼",
+        "roomNo": "105",
+        "floor": 1,
+        "status": "noaccess",
+        "area": 64,
+        "department": "实验实训中心",
+        "purpose": "机房",
+        "remark": "暂无门禁权限"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "实验楼",
+        "roomNo": "106",
+        "floor": 1,
+        "status": "occupied",
+        "area": 34,
+        "department": "刑技系",
+        "purpose": "样本室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "实验楼",
+        "roomNo": "107",
+        "floor": 1,
+        "status": "vacant",
+        "area": 64,
+        "department": "实验实训中心",
+        "purpose": "理化实验室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "实验楼",
+        "roomNo": "108",
+        "floor": 1,
+        "status": "noaccess",
+        "area": 34,
+        "department": "刑技系",
+        "purpose": "电子实验室",
+        "remark": "暂无门禁权限"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "实验楼",
+        "roomNo": "201",
+        "floor": 2,
+        "status": "vacant",
+        "area": 74,
+        "department": "刑技系",
+        "purpose": "仪器室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "实验楼",
+        "roomNo": "202",
+        "floor": 2,
+        "status": "noaccess",
+        "area": 44,
+        "department": "实验实训中心",
+        "purpose": "准备室",
+        "remark": "暂无门禁权限"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "实验楼",
+        "roomNo": "203",
+        "floor": 2,
+        "status": "occupied",
+        "area": 74,
+        "department": "刑技系",
+        "purpose": "办公室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "实验楼",
+        "roomNo": "204",
+        "floor": 2,
+        "status": "vacant",
+        "area": 44,
+        "department": "实验实训中心",
+        "purpose": "机房"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "实验楼",
+        "roomNo": "205",
+        "floor": 2,
+        "status": "noaccess",
+        "area": 74,
+        "department": "刑技系",
+        "purpose": "样本室",
+        "remark": "暂无门禁权限"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "实验楼",
+        "roomNo": "206",
+        "floor": 2,
+        "status": "occupied",
+        "area": 44,
+        "department": "实验实训中心",
+        "purpose": "理化实验室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "实验楼",
+        "roomNo": "207",
+        "floor": 2,
+        "status": "vacant",
+        "area": 74,
+        "department": "刑技系",
+        "purpose": "电子实验室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "实验楼",
+        "roomNo": "208",
+        "floor": 2,
+        "status": "noaccess",
+        "area": 44,
+        "department": "实验实训中心",
+        "purpose": "法医实验室",
+        "remark": "暂无门禁权限"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "实验楼",
+        "roomNo": "301",
+        "floor": 3,
+        "status": "vacant",
+        "area": 24,
+        "department": "实验实训中心",
+        "purpose": "准备室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "实验楼",
+        "roomNo": "302",
+        "floor": 3,
+        "status": "noaccess",
+        "area": 54,
+        "department": "刑技系",
+        "purpose": "办公室",
+        "remark": "暂无门禁权限"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "实验楼",
+        "roomNo": "303",
+        "floor": 3,
+        "status": "occupied",
+        "area": 24,
+        "department": "实验实训中心",
+        "purpose": "机房"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "实验楼",
+        "roomNo": "304",
+        "floor": 3,
+        "status": "vacant",
+        "area": 54,
+        "department": "刑技系",
+        "purpose": "样本室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "实验楼",
+        "roomNo": "305",
+        "floor": 3,
+        "status": "noaccess",
+        "area": 24,
+        "department": "实验实训中心",
+        "purpose": "理化实验室",
+        "remark": "暂无门禁权限"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "实验楼",
+        "roomNo": "306",
+        "floor": 3,
+        "status": "occupied",
+        "area": 54,
+        "department": "刑技系",
+        "purpose": "电子实验室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "实验楼",
+        "roomNo": "307",
+        "floor": 3,
+        "status": "vacant",
+        "area": 24,
+        "department": "实验实训中心",
+        "purpose": "法医实验室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "实验楼",
+        "roomNo": "308",
+        "floor": 3,
+        "status": "noaccess",
+        "area": 54,
+        "department": "刑技系",
+        "purpose": "仪器室",
+        "remark": "暂无门禁权限"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "实验楼",
+        "roomNo": "401",
+        "floor": 4,
+        "status": "vacant",
+        "area": 34,
+        "department": "刑技系",
+        "purpose": "办公室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "实验楼",
+        "roomNo": "402",
+        "floor": 4,
+        "status": "noaccess",
+        "area": 64,
+        "department": "实验实训中心",
+        "purpose": "机房",
+        "remark": "暂无门禁权限"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "实验楼",
+        "roomNo": "403",
+        "floor": 4,
+        "status": "occupied",
+        "area": 34,
+        "department": "刑技系",
+        "purpose": "样本室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "实验楼",
+        "roomNo": "404",
+        "floor": 4,
+        "status": "vacant",
+        "area": 64,
+        "department": "实验实训中心",
+        "purpose": "理化实验室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "实验楼",
+        "roomNo": "405",
+        "floor": 4,
+        "status": "noaccess",
+        "area": 34,
+        "department": "刑技系",
+        "purpose": "电子实验室",
+        "remark": "暂无门禁权限"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "实验楼",
+        "roomNo": "406",
+        "floor": 4,
+        "status": "occupied",
+        "area": 64,
+        "department": "实验实训中心",
+        "purpose": "法医实验室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "实验楼",
+        "roomNo": "407",
+        "floor": 4,
+        "status": "vacant",
+        "area": 34,
+        "department": "刑技系",
+        "purpose": "仪器室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "实验楼",
+        "roomNo": "408",
+        "floor": 4,
+        "status": "noaccess",
+        "area": 64,
+        "department": "实验实训中心",
+        "purpose": "准备室",
+        "remark": "暂无门禁权限"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "实验楼",
+        "roomNo": "501",
+        "floor": 5,
+        "status": "vacant",
+        "area": 44,
+        "department": "实验实训中心",
+        "purpose": "机房"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "实验楼",
+        "roomNo": "502",
+        "floor": 5,
+        "status": "noaccess",
+        "area": 74,
+        "department": "刑技系",
+        "purpose": "样本室",
+        "remark": "暂无门禁权限"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "实验楼",
+        "roomNo": "503",
+        "floor": 5,
+        "status": "occupied",
+        "area": 44,
+        "department": "实验实训中心",
+        "purpose": "理化实验室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "实验楼",
+        "roomNo": "504",
+        "floor": 5,
+        "status": "vacant",
+        "area": 74,
+        "department": "刑技系",
+        "purpose": "电子实验室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "实验楼",
+        "roomNo": "505",
+        "floor": 5,
+        "status": "noaccess",
+        "area": 44,
+        "department": "实验实训中心",
+        "purpose": "法医实验室",
+        "remark": "暂无门禁权限"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "实验楼",
+        "roomNo": "506",
+        "floor": 5,
+        "status": "occupied",
+        "area": 74,
+        "department": "刑技系",
+        "purpose": "仪器室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "实验楼",
+        "roomNo": "507",
+        "floor": 5,
+        "status": "vacant",
+        "area": 44,
+        "department": "实验实训中心",
+        "purpose": "准备室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "实验楼",
+        "roomNo": "508",
+        "floor": 5,
+        "status": "noaccess",
+        "area": 74,
+        "department": "刑技系",
+        "purpose": "办公室",
+        "remark": "暂无门禁权限"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "图书馆",
+        "roomNo": "101",
+        "floor": 1,
+        "status": "occupied",
+        "area": 64,
+        "department": "图书馆",
+        "purpose": "电子阅览室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "图书馆",
+        "roomNo": "102",
+        "floor": 1,
+        "status": "vacant",
+        "area": 34,
+        "department": "图书馆",
+        "purpose": "研讨间"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "图书馆",
+        "roomNo": "103",
+        "floor": 1,
+        "status": "noaccess",
+        "area": 64,
+        "department": "图书馆",
+        "purpose": "采编室",
+        "remark": "暂无门禁权限"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "图书馆",
+        "roomNo": "104",
+        "floor": 1,
+        "status": "occupied",
+        "area": 34,
+        "department": "图书馆",
+        "purpose": "办公室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "图书馆",
+        "roomNo": "105",
+        "floor": 1,
+        "status": "vacant",
+        "area": 64,
+        "department": "图书馆",
+        "purpose": "自习室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "图书馆",
+        "roomNo": "106",
+        "floor": 1,
+        "status": "noaccess",
+        "area": 34,
+        "department": "图书馆",
+        "purpose": "视听室",
+        "remark": "暂无门禁权限"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "图书馆",
+        "roomNo": "107",
+        "floor": 1,
+        "status": "occupied",
+        "area": 64,
+        "department": "图书馆",
+        "purpose": "阅览室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "图书馆",
+        "roomNo": "108",
+        "floor": 1,
+        "status": "vacant",
+        "area": 34,
+        "department": "图书馆",
+        "purpose": "书库"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "图书馆",
+        "roomNo": "201",
+        "floor": 2,
+        "status": "occupied",
+        "area": 74,
+        "department": "图书馆",
+        "purpose": "研讨间"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "图书馆",
+        "roomNo": "202",
+        "floor": 2,
+        "status": "vacant",
+        "area": 44,
+        "department": "图书馆",
+        "purpose": "采编室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "图书馆",
+        "roomNo": "203",
+        "floor": 2,
+        "status": "noaccess",
+        "area": 74,
+        "department": "图书馆",
+        "purpose": "办公室",
+        "remark": "暂无门禁权限"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "图书馆",
+        "roomNo": "204",
+        "floor": 2,
+        "status": "occupied",
+        "area": 44,
+        "department": "图书馆",
+        "purpose": "自习室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "图书馆",
+        "roomNo": "205",
+        "floor": 2,
+        "status": "vacant",
+        "area": 74,
+        "department": "图书馆",
+        "purpose": "视听室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "图书馆",
+        "roomNo": "206",
+        "floor": 2,
+        "status": "noaccess",
+        "area": 44,
+        "department": "图书馆",
+        "purpose": "阅览室",
+        "remark": "暂无门禁权限"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "图书馆",
+        "roomNo": "207",
+        "floor": 2,
+        "status": "occupied",
+        "area": 74,
+        "department": "图书馆",
+        "purpose": "书库"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "图书馆",
+        "roomNo": "208",
+        "floor": 2,
+        "status": "vacant",
+        "area": 44,
+        "department": "图书馆",
+        "purpose": "电子阅览室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "图书馆",
+        "roomNo": "301",
+        "floor": 3,
+        "status": "occupied",
+        "area": 24,
+        "department": "图书馆",
+        "purpose": "采编室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "图书馆",
+        "roomNo": "302",
+        "floor": 3,
+        "status": "vacant",
+        "area": 54,
+        "department": "图书馆",
+        "purpose": "办公室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "图书馆",
+        "roomNo": "303",
+        "floor": 3,
+        "status": "noaccess",
+        "area": 24,
+        "department": "图书馆",
+        "purpose": "自习室",
+        "remark": "暂无门禁权限"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "图书馆",
+        "roomNo": "304",
+        "floor": 3,
+        "status": "occupied",
+        "area": 54,
+        "department": "图书馆",
+        "purpose": "视听室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "图书馆",
+        "roomNo": "305",
+        "floor": 3,
+        "status": "vacant",
+        "area": 24,
+        "department": "图书馆",
+        "purpose": "阅览室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "图书馆",
+        "roomNo": "306",
+        "floor": 3,
+        "status": "noaccess",
+        "area": 54,
+        "department": "图书馆",
+        "purpose": "书库",
+        "remark": "暂无门禁权限"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "图书馆",
+        "roomNo": "307",
+        "floor": 3,
+        "status": "occupied",
+        "area": 24,
+        "department": "图书馆",
+        "purpose": "电子阅览室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "图书馆",
+        "roomNo": "308",
+        "floor": 3,
+        "status": "vacant",
+        "area": 54,
+        "department": "图书馆",
+        "purpose": "研讨间"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "图书馆",
+        "roomNo": "401",
+        "floor": 4,
+        "status": "occupied",
+        "area": 34,
+        "department": "图书馆",
+        "purpose": "办公室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "图书馆",
+        "roomNo": "402",
+        "floor": 4,
+        "status": "vacant",
+        "area": 64,
+        "department": "图书馆",
+        "purpose": "自习室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "图书馆",
+        "roomNo": "403",
+        "floor": 4,
+        "status": "noaccess",
+        "area": 34,
+        "department": "图书馆",
+        "purpose": "视听室",
+        "remark": "暂无门禁权限"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "图书馆",
+        "roomNo": "404",
+        "floor": 4,
+        "status": "occupied",
+        "area": 64,
+        "department": "图书馆",
+        "purpose": "阅览室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "图书馆",
+        "roomNo": "405",
+        "floor": 4,
+        "status": "vacant",
+        "area": 34,
+        "department": "图书馆",
+        "purpose": "书库"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "图书馆",
+        "roomNo": "406",
+        "floor": 4,
+        "status": "noaccess",
+        "area": 64,
+        "department": "图书馆",
+        "purpose": "电子阅览室",
+        "remark": "暂无门禁权限"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "图书馆",
+        "roomNo": "407",
+        "floor": 4,
+        "status": "occupied",
+        "area": 34,
+        "department": "图书馆",
+        "purpose": "研讨间"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "图书馆",
+        "roomNo": "408",
+        "floor": 4,
+        "status": "vacant",
+        "area": 64,
+        "department": "图书馆",
+        "purpose": "采编室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "警体综合训练馆",
+        "roomNo": "101",
+        "floor": 1,
+        "status": "vacant",
+        "area": 64,
+        "department": "警体部",
+        "purpose": "更衣室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "警体综合训练馆",
+        "roomNo": "102",
+        "floor": 1,
+        "status": "noaccess",
+        "area": 34,
+        "department": "警体部",
+        "purpose": "裁判室",
+        "remark": "暂无门禁权限"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "警体综合训练馆",
+        "roomNo": "103",
+        "floor": 1,
+        "status": "occupied",
+        "area": 64,
+        "department": "警体部",
+        "purpose": "储物间"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "警体综合训练馆",
+        "roomNo": "104",
+        "floor": 1,
+        "status": "vacant",
+        "area": 34,
+        "department": "警体部",
+        "purpose": "体能房"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "警体综合训练馆",
+        "roomNo": "105",
+        "floor": 1,
+        "status": "noaccess",
+        "area": 64,
+        "department": "警体部",
+        "purpose": "训练馆",
+        "remark": "暂无门禁权限"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "警体综合训练馆",
+        "roomNo": "106",
+        "floor": 1,
+        "status": "occupied",
+        "area": 34,
+        "department": "警体部",
+        "purpose": "器械室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "警体综合训练馆",
+        "roomNo": "201",
+        "floor": 2,
+        "status": "occupied",
+        "area": 74,
+        "department": "警体部",
+        "purpose": "裁判室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "警体综合训练馆",
+        "roomNo": "202",
+        "floor": 2,
+        "status": "vacant",
+        "area": 44,
+        "department": "警体部",
+        "purpose": "储物间"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "警体综合训练馆",
+        "roomNo": "203",
+        "floor": 2,
+        "status": "noaccess",
+        "area": 74,
+        "department": "警体部",
+        "purpose": "体能房",
+        "remark": "暂无门禁权限"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "警体综合训练馆",
+        "roomNo": "204",
+        "floor": 2,
+        "status": "occupied",
+        "area": 44,
+        "department": "警体部",
+        "purpose": "训练馆"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "警体综合训练馆",
+        "roomNo": "205",
+        "floor": 2,
+        "status": "vacant",
+        "area": 74,
+        "department": "警体部",
+        "purpose": "器械室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "警体综合训练馆",
+        "roomNo": "206",
+        "floor": 2,
+        "status": "noaccess",
+        "area": 44,
+        "department": "警体部",
+        "purpose": "更衣室",
+        "remark": "暂无门禁权限"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "警体综合训练馆",
+        "roomNo": "301",
+        "floor": 3,
+        "status": "noaccess",
+        "area": 24,
+        "department": "警体部",
+        "purpose": "储物间",
+        "remark": "暂无门禁权限"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "警体综合训练馆",
+        "roomNo": "302",
+        "floor": 3,
+        "status": "occupied",
+        "area": 54,
+        "department": "警体部",
+        "purpose": "体能房"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "警体综合训练馆",
+        "roomNo": "303",
+        "floor": 3,
+        "status": "vacant",
+        "area": 24,
+        "department": "警体部",
+        "purpose": "训练馆"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "警体综合训练馆",
+        "roomNo": "304",
+        "floor": 3,
+        "status": "noaccess",
+        "area": 54,
+        "department": "警体部",
+        "purpose": "器械室",
+        "remark": "暂无门禁权限"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "警体综合训练馆",
+        "roomNo": "305",
+        "floor": 3,
+        "status": "occupied",
+        "area": 24,
+        "department": "警体部",
+        "purpose": "更衣室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "警体综合训练馆",
+        "roomNo": "306",
+        "floor": 3,
+        "status": "vacant",
+        "area": 54,
+        "department": "警体部",
+        "purpose": "裁判室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "学生公寓",
+        "roomNo": "101",
+        "floor": 1,
+        "status": "vacant",
+        "area": 64,
+        "department": "学生工作处",
+        "purpose": "活动室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "学生公寓",
+        "roomNo": "102",
+        "floor": 1,
+        "status": "noaccess",
+        "area": 34,
+        "department": "后勤保障",
+        "purpose": "宿管室",
+        "remark": "暂无门禁权限"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "学生公寓",
+        "roomNo": "103",
+        "floor": 1,
+        "status": "occupied",
+        "area": 64,
+        "department": "学生工作处",
+        "purpose": "储物间"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "学生公寓",
+        "roomNo": "104",
+        "floor": 1,
+        "status": "vacant",
+        "area": 34,
+        "department": "后勤保障",
+        "purpose": "自习室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "学生公寓",
+        "roomNo": "105",
+        "floor": 1,
+        "status": "noaccess",
+        "area": 64,
+        "department": "学生工作处",
+        "purpose": "会客室",
+        "remark": "暂无门禁权限"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "学生公寓",
+        "roomNo": "106",
+        "floor": 1,
+        "status": "occupied",
+        "area": 34,
+        "department": "后勤保障",
+        "purpose": "值班室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "学生公寓",
+        "roomNo": "107",
+        "floor": 1,
+        "status": "vacant",
+        "area": 64,
+        "department": "学生工作处",
+        "purpose": "学生宿舍"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "学生公寓",
+        "roomNo": "108",
+        "floor": 1,
+        "status": "noaccess",
+        "area": 34,
+        "department": "后勤保障",
+        "purpose": "洗衣房",
+        "remark": "暂无门禁权限"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "学生公寓",
+        "roomNo": "201",
+        "floor": 2,
+        "status": "vacant",
+        "area": 74,
+        "department": "后勤保障",
+        "purpose": "宿管室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "学生公寓",
+        "roomNo": "202",
+        "floor": 2,
+        "status": "noaccess",
+        "area": 44,
+        "department": "学生工作处",
+        "purpose": "储物间",
+        "remark": "暂无门禁权限"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "学生公寓",
+        "roomNo": "203",
+        "floor": 2,
+        "status": "occupied",
+        "area": 74,
+        "department": "后勤保障",
+        "purpose": "自习室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "学生公寓",
+        "roomNo": "204",
+        "floor": 2,
+        "status": "vacant",
+        "area": 44,
+        "department": "学生工作处",
+        "purpose": "会客室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "学生公寓",
+        "roomNo": "205",
+        "floor": 2,
+        "status": "noaccess",
+        "area": 74,
+        "department": "后勤保障",
+        "purpose": "值班室",
+        "remark": "暂无门禁权限"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "学生公寓",
+        "roomNo": "206",
+        "floor": 2,
+        "status": "occupied",
+        "area": 44,
+        "department": "学生工作处",
+        "purpose": "学生宿舍"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "学生公寓",
+        "roomNo": "207",
+        "floor": 2,
+        "status": "vacant",
+        "area": 74,
+        "department": "后勤保障",
+        "purpose": "洗衣房"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "学生公寓",
+        "roomNo": "208",
+        "floor": 2,
+        "status": "noaccess",
+        "area": 44,
+        "department": "学生工作处",
+        "purpose": "活动室",
+        "remark": "暂无门禁权限"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "学生公寓",
+        "roomNo": "301",
+        "floor": 3,
+        "status": "vacant",
+        "area": 24,
+        "department": "学生工作处",
+        "purpose": "储物间"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "学生公寓",
+        "roomNo": "302",
+        "floor": 3,
+        "status": "noaccess",
+        "area": 54,
+        "department": "后勤保障",
+        "purpose": "自习室",
+        "remark": "暂无门禁权限"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "学生公寓",
+        "roomNo": "303",
+        "floor": 3,
+        "status": "occupied",
+        "area": 24,
+        "department": "学生工作处",
+        "purpose": "会客室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "学生公寓",
+        "roomNo": "304",
+        "floor": 3,
+        "status": "vacant",
+        "area": 54,
+        "department": "后勤保障",
+        "purpose": "值班室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "学生公寓",
+        "roomNo": "305",
+        "floor": 3,
+        "status": "noaccess",
+        "area": 24,
+        "department": "学生工作处",
+        "purpose": "学生宿舍",
+        "remark": "暂无门禁权限"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "学生公寓",
+        "roomNo": "306",
+        "floor": 3,
+        "status": "occupied",
+        "area": 54,
+        "department": "后勤保障",
+        "purpose": "洗衣房"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "学生公寓",
+        "roomNo": "307",
+        "floor": 3,
+        "status": "vacant",
+        "area": 24,
+        "department": "学生工作处",
+        "purpose": "活动室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "学生公寓",
+        "roomNo": "308",
+        "floor": 3,
+        "status": "noaccess",
+        "area": 54,
+        "department": "后勤保障",
+        "purpose": "宿管室",
+        "remark": "暂无门禁权限"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "学生公寓",
+        "roomNo": "401",
+        "floor": 4,
+        "status": "vacant",
+        "area": 34,
+        "department": "后勤保障",
+        "purpose": "自习室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "学生公寓",
+        "roomNo": "402",
+        "floor": 4,
+        "status": "noaccess",
+        "area": 64,
+        "department": "学生工作处",
+        "purpose": "会客室",
+        "remark": "暂无门禁权限"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "学生公寓",
+        "roomNo": "403",
+        "floor": 4,
+        "status": "occupied",
+        "area": 34,
+        "department": "后勤保障",
+        "purpose": "值班室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "学生公寓",
+        "roomNo": "404",
+        "floor": 4,
+        "status": "vacant",
+        "area": 64,
+        "department": "学生工作处",
+        "purpose": "学生宿舍"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "学生公寓",
+        "roomNo": "405",
+        "floor": 4,
+        "status": "noaccess",
+        "area": 34,
+        "department": "后勤保障",
+        "purpose": "洗衣房",
+        "remark": "暂无门禁权限"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "学生公寓",
+        "roomNo": "406",
+        "floor": 4,
+        "status": "occupied",
+        "area": 64,
+        "department": "学生工作处",
+        "purpose": "活动室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "学生公寓",
+        "roomNo": "407",
+        "floor": 4,
+        "status": "vacant",
+        "area": 34,
+        "department": "后勤保障",
+        "purpose": "宿管室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "学生公寓",
+        "roomNo": "408",
+        "floor": 4,
+        "status": "noaccess",
+        "area": 64,
+        "department": "学生工作处",
+        "purpose": "储物间",
+        "remark": "暂无门禁权限"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "学生公寓",
+        "roomNo": "501",
+        "floor": 5,
+        "status": "vacant",
+        "area": 44,
+        "department": "学生工作处",
+        "purpose": "会客室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "学生公寓",
+        "roomNo": "502",
+        "floor": 5,
+        "status": "noaccess",
+        "area": 74,
+        "department": "后勤保障",
+        "purpose": "值班室",
+        "remark": "暂无门禁权限"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "学生公寓",
+        "roomNo": "503",
+        "floor": 5,
+        "status": "occupied",
+        "area": 44,
+        "department": "学生工作处",
+        "purpose": "学生宿舍"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "学生公寓",
+        "roomNo": "504",
+        "floor": 5,
+        "status": "vacant",
+        "area": 74,
+        "department": "后勤保障",
+        "purpose": "洗衣房"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "学生公寓",
+        "roomNo": "505",
+        "floor": 5,
+        "status": "noaccess",
+        "area": 44,
+        "department": "学生工作处",
+        "purpose": "活动室",
+        "remark": "暂无门禁权限"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "学生公寓",
+        "roomNo": "506",
+        "floor": 5,
+        "status": "occupied",
+        "area": 74,
+        "department": "后勤保障",
+        "purpose": "宿管室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "学生公寓",
+        "roomNo": "507",
+        "floor": 5,
+        "status": "vacant",
+        "area": 44,
+        "department": "学生工作处",
+        "purpose": "储物间"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "学生公寓",
+        "roomNo": "508",
+        "floor": 5,
+        "status": "noaccess",
+        "area": 74,
+        "department": "后勤保障",
+        "purpose": "自习室",
+        "remark": "暂无门禁权限"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "食堂",
+        "roomNo": "101",
+        "floor": 1,
+        "status": "occupied",
+        "area": 64,
+        "department": "后勤保障处",
+        "purpose": "备餐间"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "食堂",
+        "roomNo": "102",
+        "floor": 1,
+        "status": "vacant",
+        "area": 34,
+        "department": "后勤保障处",
+        "purpose": "仓库"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "食堂",
+        "roomNo": "103",
+        "floor": 1,
+        "status": "noaccess",
+        "area": 64,
+        "department": "后勤保障处",
+        "purpose": "办公室",
+        "remark": "暂无门禁权限"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "食堂",
+        "roomNo": "104",
+        "floor": 1,
+        "status": "occupied",
+        "area": 34,
+        "department": "后勤保障处",
+        "purpose": "清真窗口"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "食堂",
+        "roomNo": "105",
+        "floor": 1,
+        "status": "vacant",
+        "area": 64,
+        "department": "后勤保障处",
+        "purpose": "餐厅"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "食堂",
+        "roomNo": "106",
+        "floor": 1,
+        "status": "noaccess",
+        "area": 34,
+        "department": "后勤保障处",
+        "purpose": "后厨",
+        "remark": "暂无门禁权限"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "食堂",
+        "roomNo": "201",
+        "floor": 2,
+        "status": "noaccess",
+        "area": 74,
+        "department": "后勤保障处",
+        "purpose": "仓库",
+        "remark": "暂无门禁权限"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "食堂",
+        "roomNo": "202",
+        "floor": 2,
+        "status": "occupied",
+        "area": 44,
+        "department": "后勤保障处",
+        "purpose": "办公室"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "食堂",
+        "roomNo": "203",
+        "floor": 2,
+        "status": "vacant",
+        "area": 74,
+        "department": "后勤保障处",
+        "purpose": "清真窗口"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "食堂",
+        "roomNo": "204",
+        "floor": 2,
+        "status": "noaccess",
+        "area": 44,
+        "department": "后勤保障处",
+        "purpose": "餐厅",
+        "remark": "暂无门禁权限"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "食堂",
+        "roomNo": "205",
+        "floor": 2,
+        "status": "occupied",
+        "area": 74,
+        "department": "后勤保障处",
+        "purpose": "后厨"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
+      "properties": {
+        "building": "食堂",
+        "roomNo": "206",
+        "floor": 2,
+        "status": "vacant",
+        "area": 44,
+        "department": "后勤保障处",
+        "purpose": "备餐间"
+      }
     }
   ]
 }

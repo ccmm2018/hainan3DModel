@@ -324,33 +324,30 @@
           </span>
         </div>
 
-        <!-- 楼层切换 -->
-        <div class="room-mgmt__floors">
-          <button
-            v-for="f in roomMgmtFloors"
-            :key="f"
-            class="room-mgmt__floor-btn"
-            :class="{ active: f === roomMgmtFloor }"
-            @click="roomMgmtFloor = f"
-          >
-            {{ f }}F
-          </button>
+        <!-- 全部楼层 + 对应房间（按楼层分区，分割线划分，整体可滚动） -->
+        <div class="room-mgmt__body">
+          <template v-if="roomMgmtByFloor.length">
+            <section
+              v-for="sec in roomMgmtByFloor"
+              :key="sec.floor"
+              class="room-mgmt__floor-section"
+            >
+              <div class="room-mgmt__floor-title">{{ sec.floor }}F</div>
+              <div class="room-mgmt__grid">
+                <div
+                  v-for="room in sec.rooms"
+                  :key="room.id"
+                  class="room-mgmt__cell"
+                  :style="{ '--c': ROOM_STATUS_CONFIG[room.status].color }"
+                  :title="`${room.roomNo} · ${ROOM_STATUS_CONFIG[room.status].label}${room.roomName ? ' · ' + room.roomName : ''}`"
+                >
+                  <span class="room-mgmt__no">{{ room.roomNo }}</span>
+                </div>
+              </div>
+            </section>
+          </template>
+          <p v-else class="tab-empty">该楼栋暂无房间数据</p>
         </div>
-
-        <!-- 当前楼层房间网格 -->
-        <div class="room-mgmt__grid">
-          <div
-            v-for="room in roomMgmtCurrentRooms"
-            :key="room.id"
-            class="room-mgmt__cell"
-            :style="{ '--c': ROOM_STATUS_CONFIG[room.status].color }"
-            :title="`${room.roomNo} · ${ROOM_STATUS_CONFIG[room.status].label}${room.roomName ? ' · ' + room.roomName : ''}`"
-          >
-            <span class="room-mgmt__no">{{ room.roomNo }}</span>
-            <span class="room-mgmt__st">{{ ROOM_STATUS_CONFIG[room.status].label }}</span>
-          </div>
-        </div>
-        <p v-if="!roomMgmtCurrentRooms.length" class="tab-empty">该楼层暂无房间数据</p>
       </div>
     </div>
 
@@ -483,7 +480,6 @@ const imageError = ref(false);
 
 // 房间管理弹窗状态
 const roomMgmtOpen = ref(false);
-const roomMgmtFloor = ref(1);
 
 // 分配模式状态
 const selectedRooms = ref<Room[]>([]);
@@ -762,15 +758,17 @@ const roomMgmtCounts = computed<Record<string, number>>(() => {
   return counts;
 });
 
-/** 当前选中楼层的房间（按房间号排序） */
-const roomMgmtCurrentRooms = computed<Room[]>(() => {
-  return roomMgmtAllRooms.value
-    .filter((r) => r.floor === roomMgmtFloor.value)
-    .sort((a, b) => a.roomNo.localeCompare(b.roomNo, undefined, { numeric: true }));
+/** 按楼层分组（升序），每层包含按房间号排序的房间，用于一次性展示全部楼层 */
+const roomMgmtByFloor = computed<{ floor: number; rooms: Room[] }[]>(() => {
+  return roomMgmtFloors.value.map((f) => ({
+    floor: f,
+    rooms: roomMgmtAllRooms.value
+      .filter((r) => r.floor === f)
+      .sort((a, b) => a.roomNo.localeCompare(b.roomNo, undefined, { numeric: true })),
+  }));
 });
 
 function openRoomManagement() {
-  roomMgmtFloor.value = roomMgmtFloors.value.length ? roomMgmtFloors.value[0] : 1;
   roomMgmtOpen.value = true;
 }
 
@@ -1505,11 +1503,10 @@ onBeforeUnmount(() => {
   z-index: 130;
   width: 300px;
   max-width: calc(100% - 24px);
-  border: 1px solid #24324a;
+  border: 1px solid #d8dee8;
   border-radius: 8px;
-  background: rgba(20, 27, 43, 0.95);
-  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.35);
-  backdrop-filter: blur(12px);
+  background: #f6f8fb;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.18);
   overflow: hidden;
 }
 .property-panel__head {
@@ -1517,8 +1514,8 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 8px;
   padding: 12px 14px;
-  border-bottom: 1px solid #24324a;
-  color: #eaf2ff;
+  border-bottom: 1px solid #e1e6ee;
+  color: #1f2a3a;
 }
 .property-panel__head strong { flex: 1; font-size: 15px; font-weight: 600; }
 .property-panel__close {
@@ -1532,6 +1529,9 @@ onBeforeUnmount(() => {
   cursor: pointer;
 }
 .property-panel__close:hover { color: #f87171; background: #22314a; }
+/* 浅色面板内的关闭按钮（深色，保证在浅底上可见） */
+.property-panel .property-panel__close { color: #5a6678; }
+.property-panel .property-panel__close:hover { color: #c0392b; background: #e9edf3; }
 
 .property-panel dl { margin: 0; padding: 6px 14px 12px; }
 .property-panel dl div {
@@ -1540,20 +1540,20 @@ onBeforeUnmount(() => {
   gap: 12px;
   padding: 6px 0;
   font-size: 13px;
-  border-bottom: 1px dashed #1e2a40;
+  border-bottom: 1px dashed #e6eaf0;
 }
 .property-panel dl div:last-child { border-bottom: 0; }
-.property-panel dt { color: #8a97ad; }
+.property-panel dt { color: #5a6678; }
 .property-panel dd {
   margin: 0;
-  color: #eaf2ff;
+  color: #1f2a3a;
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
   text-align: right;
 }
 .property-panel__desc {
   margin: 0;
   padding: 0 14px 14px;
-  color: #a7b4c8;
+  color: #3a4456;
   font-size: 12px;
   line-height: 1.7;
 }
@@ -1565,18 +1565,18 @@ onBeforeUnmount(() => {
   height: 24px;
   border: 0;
   border-radius: 4px;
-  color: #38bdf8;
+  color: #0b6fb8;
   background: transparent;
   cursor: pointer;
 }
-.property-panel__locate:hover { background: rgba(56, 189, 248, 0.15); }
+.property-panel__locate:hover { background: rgba(11, 111, 184, 0.12); }
 
 /* 楼宇图片 */
 .property-panel__image {
   position: relative;
   height: 140px;
-  border-bottom: 1px solid #24324a;
-  background: #141c2e;
+  border-bottom: 1px solid #e1e6ee;
+  background: #eef1f5;
   overflow: hidden;
 }
 .property-panel__image img {
@@ -1593,35 +1593,35 @@ onBeforeUnmount(() => {
   gap: 8px;
   width: 100%;
   height: 100%;
-  color: #4a5a74;
-  background: linear-gradient(135deg, #18223a 0%, #101828 100%);
+  color: #8a93a3;
+  background: linear-gradient(135deg, #f0f3f7 0%, #e6eaf0 100%);
 }
-.property-panel__image-placeholder span { font-size: 13px; color: #6b7890; }
+.property-panel__image-placeholder span { font-size: 13px; color: #9aa3b2; }
 
 .property-panel__actions {
   display: flex;
   gap: 8px;
   padding: 12px 14px 14px;
-  border-top: 1px solid #24324a;
+  border-top: 1px solid #e1e6ee;
 }
 .property-panel__btn {
   flex: 1;
   height: 32px;
-  border: 1px solid #3a4a66;
+  border: 1px solid #c3ccda;
   border-radius: 6px;
-  color: #c8d5e8;
-  background: rgba(58, 74, 102, 0.18);
+  color: #2a3445;
+  background: rgba(0, 0, 0, 0.03);
   font-size: 12.5px;
   cursor: pointer;
   white-space: nowrap;
 }
-.property-panel__btn:hover { border-color: #38bdf8; color: #d6f0ff; background: rgba(56, 189, 248, 0.14); }
+.property-panel__btn:hover { border-color: #0b6fb8; color: #0b4f8a; background: rgba(11, 111, 184, 0.08); }
 .property-panel__btn--primary {
-  border-color: #38bdf8;
-  color: #d6f0ff;
-  background: rgba(56, 189, 248, 0.14);
+  border-color: #0b6fb8;
+  color: #0b4f8a;
+  background: rgba(11, 111, 184, 0.12);
 }
-.property-panel__btn--primary:hover { background: rgba(56, 189, 248, 0.26); }
+.property-panel__btn--primary:hover { background: rgba(11, 111, 184, 0.2); }
 
 /* 楼宇详情弹窗 */
 .detail-modal {
@@ -1738,7 +1738,7 @@ onBeforeUnmount(() => {
   top: 0;
   right: 0;
   bottom: 0;
-  width: 20vw;
+  width: 30vw;
   z-index: 210;
   display: block;
 }
@@ -1747,76 +1747,73 @@ onBeforeUnmount(() => {
   height: 100%;
   max-width: none;
   max-height: none;
-  overflow-y: auto;
-  border: 1px solid #24324a;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid #e3d9c4;
   border-right: none;
   border-radius: 0;
-  background: rgba(20, 27, 43, 0.98);
-  box-shadow: -8px 0 30px rgba(0, 0, 0, 0.35);
+  background: #f7f2e7;
+  box-shadow: -8px 0 30px rgba(0, 0, 0, 0.18);
 }
 .room-mgmt__head {
   display: flex;
   align-items: center;
   gap: 8px;
   padding: 14px 16px;
-  border-bottom: 1px solid #24324a;
-  color: #eaf2ff;
+  border-bottom: 1px solid #e3d9c4;
+  color: #2a241a;
   position: sticky;
   top: 0;
-  background: rgba(20, 27, 43, 0.98);
+  background: #f7f2e7;
   z-index: 2;
 }
 .room-mgmt__head strong { flex: 1; font-size: 15px; font-weight: 600; }
+/* 米色面板内的关闭按钮（深色，保证在米底上可见） */
+.room-mgmt__head .property-panel__close { color: #6b5d44; }
+.room-mgmt__head .property-panel__close:hover { color: #c0392b; background: #ece2cf; }
 .room-mgmt__summary {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
   padding: 12px 16px;
-  border-bottom: 1px solid #24324a;
+  border-bottom: 1px solid #e3d9c4;
 }
 .room-mgmt__pill {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   padding: 6px 12px;
-  border: 1px solid #24324a;
+  border: 1px solid #e3d9c4;
   border-radius: 999px;
-  background: rgba(14, 20, 34, 0.5);
-  color: #cdd8ea;
+  background: rgba(0, 0, 0, 0.03);
+  color: #4a4436;
   font-size: 13px;
 }
 .room-mgmt__pill i { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
 .room-mgmt__pill b { color: var(--c); font-size: 14px; }
-.room-mgmt__floors {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  padding: 12px 16px;
-  border-bottom: 1px solid #24324a;
+.room-mgmt__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 4px 0 18px;
 }
-.room-mgmt__floor-btn {
-  appearance: none;
-  border: 1px solid #24324a;
-  background: transparent;
-  color: #9fb0c9;
-  font-size: 13px;
-  padding: 6px 14px;
-  border-radius: 7px;
-  cursor: pointer;
-  transition: color 0.15s, background 0.15s, border-color 0.15s;
+.room-mgmt__floor-section {
+  border-bottom: 1px dashed #a8714a;
+  padding: 12px 16px 14px;
 }
-.room-mgmt__floor-btn:hover { color: #eaf2ff; background: rgba(56, 189, 248, 0.08); }
-.room-mgmt__floor-btn.active {
-  color: #eaf2ff;
-  background: rgba(56, 189, 248, 0.16);
-  border-color: #38bdf8;
-  font-weight: 600;
+.room-mgmt__floor-section:last-child { border-bottom: none; }
+.room-mgmt__floor-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: #8b5a2b;
+  margin-bottom: 10px;
+  letter-spacing: 0.5px;
 }
 .room-mgmt__grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(72px, 1fr));
   gap: 10px;
-  padding: 14px 16px 18px;
+  align-content: start;
 }
 .room-mgmt__cell {
   display: flex;
@@ -1824,17 +1821,20 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: center;
   gap: 4px;
-  padding: 12px 6px;
-  border: 1px solid #24324a;
-  border-left: 3px solid var(--c);
+  padding: 14px 6px;
+  border: 1px solid #e3d9c4;
+  border-left: 5px solid var(--c);
   border-radius: 8px;
-  background: rgba(14, 20, 34, 0.55);
+  background: rgba(0, 0, 0, 0.03);
+  background: color-mix(in srgb, var(--c) 18%, #f3ecdb);
   cursor: default;
-  transition: transform 0.12s, background 0.12s;
+  transition: transform 0.12s, background 0.12s, border-color 0.12s;
 }
-.room-mgmt__cell:hover { transform: translateY(-2px); background: rgba(56, 189, 248, 0.08); }
-.room-mgmt__no { font-size: 16px; font-weight: 700; color: #eaf2ff; letter-spacing: 0.5px; }
-.room-mgmt__st { font-size: 12px; color: var(--c); }
+.room-mgmt__cell:hover {
+  transform: translateY(-2px);
+  background: color-mix(in srgb, var(--c) 28%, #f3ecdb);
+}
+.room-mgmt__no { font-size: 16px; font-weight: 700; color: #2a241a; letter-spacing: 0.5px; }
 
 
 /* 附件信息 */

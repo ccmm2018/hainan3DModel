@@ -51,6 +51,27 @@ const suggestedCenter = computed<[number, number] | null>(() => {
   return fp.centerUtm ?? null;
 });
 
+/** 局部配准用：楼层外轮廓（DXF 局部坐标）；无「楼层外轮廓线」图层时回退到包围盒 */
+const floorOutlineLocal = computed<[number, number][] | null>(() => {
+  const p = preview.value;
+  if (!p) return null;
+  if (p.floorOutline) return p.floorOutline.polygon;
+  const b = p.bbox;
+  return [
+    [b.minX, b.minY],
+    [b.maxX, b.minY],
+    [b.maxX, b.maxY],
+    [b.minX, b.maxY],
+  ];
+});
+/** 局部配准用：房间轮廓（DXF 局部坐标），仅预览绘制 */
+const roomsLocal = computed<[number, number][][]>(() => preview.value?.rooms.map((r) => r.polygon) ?? []);
+/** 楼栋已有 footprint（UTM 米），用于地图绘制与重合度校验 */
+const footprintUtm = computed<[number, number][] | null>(() => {
+  const fp = store.buildingFingerprint(buildingName.value);
+  return (fp.outline as [number, number][] | undefined) ?? null;
+});
+
 /**
  * 楼栋自动匹配：仅当图纸为 UTM 且已识别到「楼层外轮廓线」时，
  * 用外轮廓指纹（中心 / 面积 / 方位）在楼栋库中比对。
@@ -190,6 +211,8 @@ async function onConfirm() {
     ElMessage.warning('请上传 DXF 图纸');
     return;
   }
+  // 取出 DXF 原始字节随入库一起落盘，刷新后可重新下载 / 再导入
+  const dxfBytes = await selectedFile.value.arrayBuffer();
   const payload = {
     buildingName: buildingName.value,
     floorNo: floorNo.value,
@@ -197,6 +220,7 @@ async function onConfirm() {
     parsed: preview.value,
     coordSource: coordSource.value,
     transform: coordSource.value === 'local' ? transform.value : undefined,
+    dxfBytes,
   };
   try {
     const fid = store.importFloor(payload);
@@ -303,11 +327,20 @@ onBeforeUnmount(() => {
           <span class="dxf-tip">默认跳过块参照（家具/洁具/门窗等多为块，是噪音来源）；勾选后保留块属性文字</span>
         </div>
 
+        <el-alert
+          v-if="coordSource === 'local'"
+          class="dxf-preview"
+          type="info"
+          :closable="false"
+          title="局部坐标图纸：不进行指纹自动匹配，请通过下方「2 对同名锚点」完成手动配准后再入库"
+        />
         <AnchorPicker
           v-if="coordSource === 'local'"
           v-model="transform"
           :unit="preview.unit"
-          :suggested-center="suggestedCenter"
+          :floor-outline-local="floorOutlineLocal"
+          :rooms-local="roomsLocal"
+          :footprint-utm="footprintUtm"
         />
 
         <el-alert

@@ -52,6 +52,12 @@ export function gcj02ToWgs84(lng: number, lat: number): [number, number] {
   return [lng * 2 - wlng, lat * 2 - wlat];
 }
 
+/** GCJ-02 经纬度（高德）→ UTM Zone 49N（米）。用于把地图上点选的锚点换算回图纸配准坐标。 */
+export function gcj02ToUtm49n(lng: number, lat: number): [number, number] {
+  const [wlng, wlat] = gcj02ToWgs84(lng, lat);
+  return proj4(WGS84, UTM_49N, [wlng, wlat]);
+}
+
 // ---------------------------------------------------------------------------
 // EPSG:4326 (WGS84) <-> EPSG:3857 (Web Mercator 米)
 // ---------------------------------------------------------------------------

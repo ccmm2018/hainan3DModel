@@ -179,6 +179,63 @@ export function applyTransform(p: Pt, t: FloorTransform): Pt {
 }
 
 // ---------------------------------------------------------------------------
+// local → UTM 二维相似变换求解（最小配置：2 对同名锚点）
+// ---------------------------------------------------------------------------
+
+/**
+ * 由两组同名锚点（各 2 个）求解二维相似变换。
+ *
+ * 约定：UTM_k = scale · R(rotation) · local_k + offset  （与 applyTransform 一致）。
+ * 令 dL = local[1]-local[0]，dU = utm[1]-utm[0]，则：
+ *   scale   = |dU| / |dL|
+ *   rotation = atan2(dU) - atan2(dL)   （按同一旋转角对齐两向量方向）
+ *   offset  = utm[0] - scale·R(local[0])
+ *
+ * 退化处理：若两组 local 点重合（|dL|≈0），无法求旋转/缩放，退化为「仅平移」
+ * （取单点偏移 scale=1 rotation=0）。local/utm 数组不足 2 时抛错。
+ */
+export function solveSimilarityTransform(local: readonly [Pt, Pt], utm: readonly [Pt, Pt]): FloorTransform {
+  if (!local || local.length < 2 || !utm || utm.length < 2) {
+    throw new Error('solveSimilarityTransform 需要两组各 2 个同名锚点');
+  }
+  const [l0, l1] = local;
+  const [u0, u1] = utm;
+  const dl: Pt = [l1[0] - l0[0], l1[1] - l0[1]];
+  const du: Pt = [u1[0] - u0[0], u1[1] - u0[1]];
+  const lenL = Math.hypot(dl[0], dl[1]);
+  const lenU = Math.hypot(du[0], du[1]);
+
+  if (lenL < 1e-9) {
+    // 退化：两组 local 点重合，无法解旋转/缩放，退化为仅平移
+    return { offset: [u0[0] - l0[0], u0[1] - l0[1]], rotation: 0, scale: 1 };
+  }
+
+  const scale = lenU / lenL;
+  const rotation = Math.atan2(du[1], du[0]) - Math.atan2(dl[1], dl[0]);
+  const c = Math.cos(rotation);
+  const s = Math.sin(rotation);
+  const rx = scale * (l0[0] * c - l0[1] * s);
+  const ry = scale * (l0[0] * s + l0[1] * c);
+  return { offset: [u0[0] - rx, u0[1] - ry], rotation, scale };
+}
+
+/**
+ * 两个多边形（同坐标系，如 UTM 米）的面积差异比，用作「重合度」近似指标。
+ * 返回 |A-B| / max(A,B)，0 表示面积完全一致，1 表示完全不一致。
+ * 非凸 / 任意多边形均适用（仅比较面积，不做交集求算，鲁棒且廉价）。
+ * 当两者面积都极小（<1e-6）时返回 0。
+ */
+export function polygonAreaDiffRatio(a: Pt[], b: Pt[]): number {
+  const A = polygonArea(a);
+  const B = polygonArea(b);
+  if (A < 1e-6 && B < 1e-6) return 0;
+  return Math.abs(A - B) / Math.max(A, B);
+}
+
+/** 面积偏差阈值（规范：变换后外轮廓与 footprint 偏差 >20% 给红色警告） */
+export const OVERLAP_DEVIATION_THRESHOLD = 0.2;
+
+// ---------------------------------------------------------------------------
 // WGS84 → GCJ-02（火星坐标，国测局加密偏移）
 // 算法参考 GCJ-02 公开实现（Krasovsky 1940 椭球 + 非线性偏移模型）。
 // 出处：国家测绘局 GCJ-02 坐标加密标准（常见工程实现：

@@ -32,6 +32,7 @@ import {
 import { utm49nToGcj02 } from '../utils/coordTransform';
 import { matchBuildings, type Fingerprint, type MatchResult } from '../utils/matcher';
 import { polygonArea, polygonCentroid, transformPolygon, type Pt } from '../utils/geometry';
+import { persistence, type LoadedState } from '../utils/persist';
 
 function floorKey(buildingName: string, floorNo: number): string {
   return `${buildingName}#${floorNo}`;
@@ -65,6 +66,8 @@ export interface ImportFloorPayload {
   transform?: FloorTransform;
   /** 层高（米），默认 3.2 */
   height?: number;
+  /** DXF 原始文件字节，落盘用（刷新后可重新下载 / 再导入） */
+  dxfBytes?: ArrayBuffer;
 }
 
 export const useBuildingStore = defineStore('building', () => {
@@ -203,6 +206,13 @@ export const useBuildingStore = defineStore('building', () => {
       writeFingerprint(buildingMap.value, buildingName, fp);
     }
 
+    // 落盘：fire-and-forget；浏览器外环境（如单测）IDB 不可用则静默失败，不影响内存态
+    const blob =
+      payload.dxfBytes
+        ? { id: fid, name: fileName ?? `${fid}.dxf`, bytes: payload.dxfBytes, savedAt: Date.now() }
+        : undefined;
+    void persistence.saveFloor(floor, roomList, blob).catch(() => undefined);
+
     return fid;
   }
 
@@ -211,20 +221,44 @@ export const useBuildingStore = defineStore('building', () => {
     const fid = floorId(buildingName, floorNo);
     delete floors.value[key];
     delete rooms.value[fid];
+    void persistence.removeFloor(buildingName, floorNo).catch(() => undefined);
   }
 
   function setRoomUseStatus(fid: string, roomId: string, useStatus: Room['useStatus']): void {
     const list = rooms.value[fid];
     if (!list) return;
     const room = list.find((r) => r.id === roomId);
-    if (room) room.useStatus = useStatus;
+    if (!room) return;
+    room.useStatus = useStatus;
+    void persistence.saveRooms(fid, list).catch(() => undefined);
   }
 
   function setRoomSelected(fid: string, roomId: string, selected: boolean): void {
     const list = rooms.value[fid];
     if (!list) return;
     const room = list.find((r) => r.id === roomId);
-    if (room) room.selected = selected;
+    if (!room) return;
+    room.selected = selected;
+    void persistence.saveRooms(fid, list).catch(() => undefined);
+  }
+
+  /**
+   * 启动恢复：把持久化读出的楼层 / 房间 / 楼栋指纹合并进内存态。
+   * 调用时机在「播种样例数据」之后，故持久化数据会覆盖样例中的同名项。
+   */
+  function applyPersisted(state: LoadedState): void {
+    for (const f of state.floors) {
+      floors.value[floorKey(f.buildingName, f.floorNo)] = f;
+    }
+    for (const [fid, list] of Object.entries(state.roomsByFloor)) {
+      rooms.value[fid] = list;
+    }
+    for (const [bn, fp] of Object.entries(state.fingerprints)) {
+      const has =
+        !!fp &&
+        (!!fp.centerUtm || !!fp.outline || fp.azimuth != null || fp.footprintArea != null || !!fp.centerGcj02);
+      if (has) writeFingerprint(buildingMap.value, bn, fp);
+    }
   }
 
   /**
@@ -251,6 +285,7 @@ export const useBuildingStore = defineStore('building', () => {
     removeFloor,
     setRoomUseStatus,
     setRoomSelected,
+    applyPersisted,
     matchByFingerprint,
   };
 });

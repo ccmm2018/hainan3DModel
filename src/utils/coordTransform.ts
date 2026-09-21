@@ -25,9 +25,15 @@ proj4.defs(
   '+proj=merc +a=6378137 +b=6378137 +lat_ts=0 +lon_0=0 +x_0=0 +y_0=0 +k=1 +units=m +nadgrids=@null +wktext +no_defs',
 );
 proj4.defs('EPSG:4326', '+proj=longlat +datum=WGS84 +no_defs');
+// UTM Zone 49N（WGS84 基准，单位米）—— 本项目 DXF 理想坐标
+proj4.defs(
+  'UTM49N',
+  '+proj=utm +zone=49 +datum=WGS84 +units=m +no_defs',
+);
 
 export const WGS84 = 'EPSG:4326';
 export const WEB_MERCATOR = 'EPSG:3857';
+export const UTM_49N = 'UTM49N';
 
 // ---------------------------------------------------------------------------
 // WGS84 <-> GCJ-02（火星坐标）转换
@@ -184,4 +190,32 @@ export function normalizeGeoJSONToGcj02(geojson: any): any {
 
   walk(clone);
   return clone;
+}
+
+// ---------------------------------------------------------------------------
+// UTM Zone 49N（WGS84，米）→ WGS84 经纬度 → GCJ-02（高德坐标系）
+// 本项目 DXF 理想坐标：GCS_WGS_1984 + UTM Zone 49N，单位米，1:1，真实方位。
+// 渲染定位到高德底图时，需经 WGS84 → GCJ-02 转换。
+// ---------------------------------------------------------------------------
+
+/** UTM Zone 49N 东向 / 北向（米）→ WGS84 经纬度 [lng, lat] */
+export function utm49nToWgs84(easting: number, northing: number): [number, number] {
+  const [lng, lat] = proj4(UTM_49N, WGS84, [easting, northing]);
+  return [lng, lat];
+}
+
+/** UTM Zone 49N（米）→ GCJ-02 经纬度（高德坐标系） */
+export function utm49nToGcj02(easting: number, northing: number): [number, number] {
+  const [lng, lat] = utm49nToWgs84(easting, northing);
+  return wgs84ToGcj02(lng, lat);
+}
+
+/** 由 UTM 包围盒中心点（米）换算 GCJ-02 经纬度 */
+export function bboxUtm49nCenterToGcj02(bbox: {
+  minX: number;
+  minY: number;
+  maxX: number;
+  maxY: number;
+}): [number, number] {
+  return utm49nToGcj02((bbox.minX + bbox.maxX) / 2, (bbox.minY + bbox.maxY) / 2);
 }

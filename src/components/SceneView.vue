@@ -182,8 +182,7 @@
       <div class="property-panel__actions">
         <button class="property-panel__btn" @click="openBuildingDetail">楼宇详情</button>
         <button class="property-panel__btn property-panel__btn--primary" @click="openRoomManagement">房间管理</button>
-        <button class="property-panel__btn" @click="openFloorPlan">楼宇分层图</button>
-        <button class="property-panel__btn" @click="importVisible = true">导入图纸</button>
+        <button class="property-panel__btn property-panel__btn--primary" @click="openIndoorPlan">查看室内图纸</button>
       </div>
     </div>
 
@@ -425,23 +424,29 @@
     <!-- 打印/导出对话框 -->
     <ExportDialog v-if="exportOpen" :scene="scene" :title="exportTitle" @close="exportOpen = false" />
 
-    <!-- 楼栋 2.5D 楼宇分层图 -->
-    <FloorPlanViewer
-      v-model="floorPlanVisible"
+    <!-- 室内图纸：查看室内图纸的唯一对接点 -->
+    <el-dialog v-model="indoorEmptyVisible" title="室内图纸" width="420px">
+      <el-empty description="该楼尚未导入楼层平面图（DXF）" />
+      <template #footer>
+        <el-button type="primary" @click="openImportFromEmpty">导入图纸</el-button>
+      </template>
+    </el-dialog>
+
+    <FloorPlan2D
+      v-model="floorPlan2DVisible"
       :building-name="floorPlanBuilding"
-      @request-import="importVisible = true"
+      @request-import="dxfImportVisible = true"
     />
-    <!-- DXF 图纸导入对话框 -->
-    <FloorPlanImportDialog
-      v-model="importVisible"
-      :buildings="buildingNames"
-      :default-building="selected?.name ?? ''"
+    <DxfImport
+      v-model="dxfImportVisible"
+      :building-names="buildingNames"
+      :default-building="floorPlanBuilding"
     />
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, type Ref } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch, type Ref } from 'vue';
 import * as THREE from 'three';
 import { loadAMap } from '../utils/loadAMap';
 import { MapScene, type PickResult, type MeasureResult } from '../core/MapScene';
@@ -462,9 +467,9 @@ import {
 } from '../data/roomData';
 import ExportDialog from './ExportDialog.vue';
 import AllocationPanel from './AllocationPanel.vue';
-import FloorPlanViewer from './FloorPlanViewer.vue';
-import FloorPlanImportDialog from './FloorPlanImportDialog.vue';
-import { useFloorPlanStore } from '../stores/floorPlanStore';
+import DxfImport from './DxfImport.vue';
+import FloorPlan2D from './FloorPlan2D.vue';
+import { useFloorRoomStore } from '../stores/floorRoom';
 import { computeTotalArea, submitAllocation } from '../utils/allocation';
 
 type Status = 'loading-amap' | 'loading-model' | 'ready' | 'error';
@@ -498,18 +503,35 @@ const imageError = ref(false);
 // 房间管理弹窗状态
 const roomMgmtOpen = ref(false);
 
-// 楼层平面图（DXF 导入 + 2.5D 查看）
-const floorPlanStore = useFloorPlanStore();
-const floorPlanVisible = ref(false);
-const importVisible = ref(false);
+// 楼层平面图（DXF 导入 + 2.5D 查看）——新增 floorRoom store（不动原 building store）
+const floorRoomStore = useFloorRoomStore();
+const floorPlan2DVisible = ref(false);
+const dxfImportVisible = ref(false);
+const indoorEmptyVisible = ref(false);
 const floorPlanBuilding = ref('');
 const buildingNames = computed(() => Object.keys(buildingData.value));
 
-/** 打开该建筑的 2.5D 楼宇分层图 */
-function openFloorPlan() {
+// 把当前生效的楼栋属性表注入 floorRoom store（指纹写回目标）
+watch(buildingData, (m) => floorRoomStore.setBuildingMap(m), { immediate: true });
+
+/** 唯一对接点：点楼弹窗里的【查看室内图纸】
+ *  - 已有 Floor 数据 → 打开 2.5D 查看器
+ *  - 无数据 → 空态引导，点【导入图纸】打开 DxfImport */
+function openIndoorPlan() {
   if (!selected.value?.name) return;
   floorPlanBuilding.value = selected.value.name;
-  floorPlanVisible.value = true;
+  if (floorRoomStore.hasFloors(selected.value.name)) {
+    floorPlan2DVisible.value = true;
+  } else {
+    indoorEmptyVisible.value = true;
+  }
+}
+
+function openImportFromEmpty() {
+  if (!selected.value?.name) return;
+  floorPlanBuilding.value = selected.value.name;
+  indoorEmptyVisible.value = false;
+  dxfImportVisible.value = true;
 }
 
 // 分配模式状态

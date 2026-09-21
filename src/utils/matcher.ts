@@ -129,6 +129,8 @@ export interface BuildingMatch {
   azimuthDiff: number;
   /** 三项指标的判定结果 */
   metrics: { center: boolean; area: boolean; azimuth: boolean };
+  /** 综合相似度（0~100），由中心 / 面积 / 方位三项归一化加权得出，便于 UI 展示「相似度 98%」 */
+  similarity: number;
 }
 
 /** 匹配结果 */
@@ -141,6 +143,8 @@ export interface MatchResult {
   matches: BuildingMatch[];
   /** 诊断原因（none 时按优先级给 1 条；weak 时给出未满足项说明） */
   reasons: string[];
+  /** 最佳候选相似度（0~100），用于 UI 展示「相似度 98%」；无候选时为 undefined */
+  score?: number;
 }
 
 /** 从 BuildingProps 索引签名读取楼栋指纹；字段不齐（缺 centerUtm/footprintArea/azimuth）返回 null */
@@ -225,7 +229,7 @@ function describeWeak(m: BuildingMatch): string[] {
  * 房间闭合轮廓不参与匹配。
  */
 export function matchBuildings(fp: Fingerprint, buildings: BuildingDataMap): MatchResult {
-  const scored: Array<BuildingMatch & { score: number }> = [];
+  const scored: BuildingMatch[] = [];
   for (const b of Object.values(buildings)) {
     const bf = readBuildingFingerprint(b);
     if (!bf) continue; // 未录入指纹的楼栋无法参与几何比对
@@ -235,13 +239,18 @@ export function matchBuildings(fp: Fingerprint, buildings: BuildingDataMap): Mat
     const center = centerDist <= MATCH_CENTER_M;
     const area = areaDiff <= MATCH_AREA_RATIO;
     const azimuth = azimuthDiff <= MATCH_AZIMUTH_DEG;
+    // 三项指标各自归一化到 [0,1]：在阈值内随偏差线性衰减到 0；加权求和得到综合相似度
+    const centerScore = center ? Math.max(0, 1 - centerDist / MATCH_CENTER_M) : 0;
+    const areaScore = area ? Math.max(0, 1 - areaDiff / MATCH_AREA_RATIO) : 0;
+    const azimuthScore = azimuth ? Math.max(0, 1 - azimuthDiff / MATCH_AZIMUTH_DEG) : 0;
+    const similarity = Math.round((centerScore * 0.5 + areaScore * 0.3 + azimuthScore * 0.2) * 100);
     scored.push({
       name: b.name,
       centerDist,
       areaDiff,
       azimuthDiff,
       metrics: { center, area, azimuth },
-      score: (center ? 1 : 0) + (area ? 1 : 0) + (azimuth ? 1 : 0),
+      similarity,
     });
   }
 
@@ -254,9 +263,15 @@ export function matchBuildings(fp: Fingerprint, buildings: BuildingDataMap): Mat
     };
   }
 
-  const full = scored.filter((s) => s.score === 3);
+  // 最佳候选相似度（取分数最高、中心最近者），作为 MatchResult.score 对外展示
+  const top = [...scored].sort((x, y) => {
+    if (y.similarity !== x.similarity) return y.similarity - x.similarity;
+    return x.centerDist - y.centerDist;
+  })[0];
+
+  const full = scored.filter((s) => s.metrics.center && s.metrics.area && s.metrics.azimuth);
   if (full.length === 1) {
-    return { status: 'strong', candidates: [full[0].name], matches: full, reasons: [] };
+    return { status: 'strong', candidates: [full[0].name], matches: full, reasons: [], score: full[0].similarity };
   }
   if (full.length > 1) {
     return {
@@ -264,17 +279,13 @@ export function matchBuildings(fp: Fingerprint, buildings: BuildingDataMap): Mat
       candidates: full.map((s) => s.name),
       matches: full,
       reasons: ['多个楼栋同时满足中心 / 面积 / 方位匹配，请确认归属。'],
+      score: Math.max(...full.map((s) => s.similarity)),
     };
   }
 
-  // 无三项全中：取分数最高、中心最近者
-  const best = [...scored].sort((x, y) => {
-    if (y.score !== x.score) return y.score - x.score;
-    return x.centerDist - y.centerDist;
-  })[0];
-
-  if (best.score === 0) {
-    return { status: 'none', candidates: [], matches: [best], reasons: diagnoseNone(best) };
+  // 无三项全中：best 即 top
+  if (top.similarity === 0) {
+    return { status: 'none', candidates: [], matches: [top], reasons: diagnoseNone(top), score: 0 };
   }
-  return { status: 'weak', candidates: [best.name], matches: [best], reasons: describeWeak(best) };
+  return { status: 'weak', candidates: [top.name], matches: [top], reasons: describeWeak(top), score: top.similarity };
 }

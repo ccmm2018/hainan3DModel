@@ -69,6 +69,30 @@ describe('matcher - 楼栋匹配', () => {
     expect(r.candidates).toEqual(['A']);
   });
 
+  it('strong 命中相似度接近满分（几乎重合）', () => {
+    const buildings: BuildingDataMap = { A: bld('A', [440001, 4100002], 1005, 90.3) };
+    const r = matchBuildings(FP, buildings);
+    expect(r.status).toBe('strong');
+    expect(r.score).toBeGreaterThanOrEqual(95);
+    expect(r.score).toBeLessThanOrEqual(100);
+    expect(r.matches[0].similarity).toBe(r.score);
+  });
+
+  it('weak 相似度介于 0~100 之间且低于强匹配', () => {
+    const buildings: BuildingDataMap = { A: bld('A', [440000, 4100000], 1500, 90) };
+    const r = matchBuildings(FP, buildings);
+    expect(r.status).toBe('weak');
+    expect(r.score).toBeGreaterThanOrEqual(0);
+    expect(r.score).toBeLessThan(95);
+  });
+
+  it('none（中心超 10000m）：相似度为 0', () => {
+    const buildings: BuildingDataMap = { A: bld('A', [460000, 4100000], 5000, 130) };
+    const r = matchBuildings(FP, buildings);
+    expect(r.status).toBe('none');
+    expect(r.score).toBe(0);
+  });
+
   it('weak：仅满足 1~2 项', () => {
     // 中心 OK、方位 OK，但面积差 33%（>10% 不合格）
     const buildings: BuildingDataMap = { A: bld('A', [440000, 4100000], 1500, 90) };

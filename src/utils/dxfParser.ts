@@ -38,7 +38,16 @@ import type {
   ParseWarning,
   ParsedRoom,
 } from '../types/cad';
-import { polygonArea, polygonCentroid, bounds, pointInPolygon, dist2, type Pt } from './geometry';
+import {
+  polygonArea,
+  polygonCentroid,
+  bounds,
+  pointInPolygon,
+  dist2,
+  simplifyDedup,
+  isSelfIntersecting,
+  type Pt,
+} from './geometry';
 import { detectCoordSource, inferUnit, type DxfHeaderVars } from './coordinate';
 import {
   FIELD_PATTERNS,
@@ -292,6 +301,9 @@ export function parseDxf(text: string): ParseDxfOutput {
           pts[pts.length - 1] = [a[0], a[1]];
         }
       }
+      // 吸附后再去重：仅剔除内部相邻重复点，保留闭合首末点（removeClosing=false），
+      // 否则会把刚吸附的闭合点删掉、重新变成开口环。
+      current.points = simplifyDedup(current.points as Pt[], 1e-4, false);
       if (current.points.length >= 3) entities.push(current);
     } else if (t === 'TEXT' || t === 'MTEXT' || t === 'ATTRIB') {
       // 文本实体：保留原始文本与插入点，清洗放到 extractRooms 阶段
@@ -823,6 +835,15 @@ export function parseDxfToResult(
       code: 'CURVE_ENTITY',
       level: 'warn',
       message: `发现曲线实体 ${curveCount} 个，请在 CAD 中将该轮廓转为多段线（LWPOLYLINE / POLYLINE）后重新导出。`,
+    });
+  }
+  // 校验阶段：房间轮廓自交检测（isSelfIntersecting 非相邻边求交），自交轮廓几何不可信
+  const selfIntersectRooms = rooms.filter((r) => isSelfIntersecting(r.polygon as Pt[]));
+  if (selfIntersectRooms.length > 0) {
+    warnings.push({
+      code: 'SELF_INTERSECTING',
+      level: 'warn',
+      message: `有 ${selfIntersectRooms.length} 个房间轮廓存在自交（可能是绘制错误或多段线未闭合），其面积 / 质心可能不准确，请在 CAD 中修正。`,
     });
   }
   if (closed.length === 0) {

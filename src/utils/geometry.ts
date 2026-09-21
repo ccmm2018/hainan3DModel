@@ -1,6 +1,6 @@
 /**
- * 几何工具：面积 / 质心 / 包围盒 / 点在多边形内 / 凸包 /
- * 主轴角（方位角）/ 相似变换 / SVG 拟合变换。
+ * 几何工具：面积 / 质心 / 包围盒 / 点在多边形内 / 自交检测 /
+ * 方位角 / 相似变换 / SVG 拟合变换 / 去重。
  * 纯函数，无副作用，不依赖三方库，不使用 any。
  */
 
@@ -9,8 +9,12 @@ import type { BBox, FloorTransform } from '../types/cad';
 /** 二维点（元组，UTM 米或图纸局部坐标） */
 export type Pt = [number, number];
 
-/** 鞋带公式求多边形面积（绝对值，单位平方） */
-export function polygonArea(pts: Pt[]): number {
+/**
+ * 鞋带公式：有向（带符号）面积。
+ * 逆时针为正、顺时针为负；取绝对值即多边形面积（见 polygonArea）。
+ * 注意：返回值是「2 倍有向面积」（A = ½Σ(xᵢyᵢ₊₁ − xᵢ₊₁yᵢ)），函数内已除以 2。
+ */
+export function shoelace(pts: Pt[]): number {
   const n = pts.length;
   if (n < 3) return 0;
   let a = 0;
@@ -19,31 +23,53 @@ export function polygonArea(pts: Pt[]): number {
     const q = pts[(i + 1) % n];
     a += p[0] * q[1] - q[0] * p[1];
   }
-  return Math.abs(a) / 2;
+  return a / 2;
 }
 
-/** 多边形面积加权质心 */
-export function polygonCentroid(pts: Pt[]): Pt {
+/** 多边形面积（有向面积的绝对值，单位平方） */
+export function polygonArea(pts: Pt[]): number {
+  return Math.abs(shoelace(pts));
+}
+
+/**
+ * 多边形面积加权质心。
+ *
+ * 易错点：分母是 6·|A|（A 为鞋带「有向面积」，已含 ½），不是 3·A。
+ * 推导：Cx = ⅙A · Σ(xᵢ+xᵢ₊₁)(xᵢyᵢ₊₁ − xᵢ₊₁yᵢ)，Cy 同理（y 部分）；
+ * 循环中累加的 cross 之和为「2·有向面积」，因此先 ×½ 得到有向面积 A，
+ * 再以 6·|A| 归一。切勿把 2·A 直接代入写成 6·(2A)=12A，也不要误用 3A。
+ */
+export function centroid(pts: Pt[]): Pt {
   const n = pts.length;
   if (n === 0) return [0, 0];
+  // 退化（<3 点）无面积，退化为算术平均
+  if (n < 3) {
+    const s = pts.reduce<Pt>((acc, p) => [acc[0] + p[0], acc[1] + p[1]], [0, 0]);
+    return [s[0] / n, s[1] / n];
+  }
   let cx = 0;
   let cy = 0;
-  let a = 0;
+  let sumCross = 0; // 累加为 2·有向面积
   for (let i = 0; i < n; i++) {
     const p = pts[i];
     const q = pts[(i + 1) % n];
     const cross = p[0] * q[1] - q[0] * p[1];
-    a += cross;
+    sumCross += cross;
     cx += (p[0] + q[0]) * cross;
     cy += (p[1] + q[1]) * cross;
   }
-  if (Math.abs(a) < 1e-9) {
+  // 有向面积 A = ½·Σcross；分母用 6·|A|（不是 3A）
+  const A = sumCross / 2;
+  const denom = 6 * Math.abs(A);
+  if (denom < 1e-12) {
     const s = pts.reduce<Pt>((acc, p) => [acc[0] + p[0], acc[1] + p[1]], [0, 0]);
     return [s[0] / n, s[1] / n];
   }
-  a *= 0.5;
-  return [cx / (6 * a), cy / (6 * a)];
+  return [cx / denom, cy / denom];
 }
+
+/** polygonCentroid 的兼容别名（面积加权质心，分母 6·|A|） */
+export const polygonCentroid = centroid;
 
 /** 由点集计算包围盒 */
 export function bounds(pts: Pt[]): BBox {
@@ -61,7 +87,7 @@ export function bounds(pts: Pt[]): BBox {
   return { minX, minY, maxX, maxY };
 }
 
-/** 射线法判断点是否在多边形内 */
+/** 射线法判断点是否在多边形内（多边形无需预闭合，函数内部按首尾相连处理） */
 export function pointInPolygon(pt: Pt, poly: Pt[]): boolean {
   let inside = false;
   const n = poly.length;
@@ -84,7 +110,7 @@ export function dist2(a: Pt, b: Pt): number {
 
 /**
  * Andrew 单调链凸包（返回逆时针外轮廓）。
- * 用于由房间顶点估算楼栋外轮廓。
+ * 用于由房间顶点估算楼栋外轮廓（coordinate.ts 的凸包指纹）。
  */
 export function convexHull(points: Pt[]): Pt[] {
   const pts = points
@@ -122,8 +148,102 @@ export function convexHull(points: Pt[]): Pt[] {
 }
 
 /**
+ * 两条线段是否「真相交」（交叉，不含共线端点接触）。
+ * 用于 isSelfIntersecting 的非相邻边判定。
+ * 采用跨立实验：p1p2 跨立 p3p4 且 p3p4 跨立 p1p2。
+ */
+function segProperIntersect(p1: Pt, p2: Pt, p3: Pt, p4: Pt): boolean {
+  const cross = (o: Pt, a: Pt, b: Pt): number =>
+    (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+  const d1 = cross(p3, p4, p1);
+  const d2 = cross(p3, p4, p2);
+  const d3 = cross(p1, p2, p3);
+  const d4 = cross(p1, p2, p4);
+  return (
+    ((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) &&
+    ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0))
+  );
+}
+
+/**
+ * 多边形是否自交（校验阶段使用）。
+ * 检查所有「非相邻」边对是否真相交；相邻边共享顶点、首尾边（第 0 条与第 n-1 条）
+ * 也视为相邻，均跳过。
+ */
+export function isSelfIntersecting(pts: Pt[]): boolean {
+  const n = pts.length;
+  if (n < 4) return false;
+  for (let i = 0; i < n; i++) {
+    const a1 = pts[i];
+    const a2 = pts[(i + 1) % n];
+    for (let j = i + 1; j < n; j++) {
+      // 跳过相邻边（共享顶点 i+1）以及环绕的首尾边（第 0 与第 n-1 条）
+      if (j === i + 1) continue;
+      if (i === 0 && j === n - 1) continue;
+      const b1 = pts[j];
+      const b2 = pts[(j + 1) % n];
+      if (segProperIntersect(a1, a2, b1, b2)) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * 顶点去重：相邻重复点（双向坐标差 < eps）剔除。
+ * removeClosing=true（默认）时，额外剔除「首末闭合重复点」；
+ * 解析器在端点软闭合吸附之后调用时应传 false，否则会破坏已闭合的环。
+ */
+export function simplifyDedup(pts: Pt[], eps = 1e-4, removeClosing = true): Pt[] {
+  const out: Pt[] = [];
+  for (const p of pts) {
+    const last = out[out.length - 1];
+    if (!last) {
+      out.push(p);
+      continue;
+    }
+    if (Math.abs(p[0] - last[0]) < eps && Math.abs(p[1] - last[1]) < eps) continue;
+    out.push(p);
+  }
+  // 闭合环常见：末点与首点重合，去掉末点
+  if (removeClosing && out.length > 1) {
+    const f = out[0];
+    const l = out[out.length - 1];
+    if (Math.abs(f[0] - l[0]) < eps && Math.abs(f[1] - l[1]) < eps) out.pop();
+  }
+  return out;
+}
+
+/**
+ * 方位角（度，[0,360)）。
+ * 取「最长边」方向，atan2(dx, dy)（注意参数顺序是 dx 在前、dy 在后）：
+ *   正北(0,1) → 0°，正东(1,0) → 90°，正南(0,-1) → 180°，正西(-1,0) → 270°，
+ *   即「以正北为 0、顺时针」。结果归一化到 [0,360)。
+ */
+export function azimuth(pts: Pt[]): number {
+  const n = pts.length;
+  if (n < 2) return 0;
+  let best = 0;
+  let bestLen2 = -1;
+  for (let i = 0; i < n; i++) {
+    const p = pts[i];
+    const q = pts[(i + 1) % n];
+    const dx = q[0] - p[0];
+    const dy = q[1] - p[1];
+    const len2 = dx * dx + dy * dy;
+    if (len2 > bestLen2) {
+      bestLen2 = len2;
+      best = Math.atan2(dx, dy); // atan2(dx, dy)：正北为 0，顺时针
+    }
+  }
+  let deg = (best * 180) / Math.PI;
+  deg %= 360;
+  if (deg < 0) deg += 360;
+  return deg;
+}
+
+/**
  * 主轴方位角（度，正北顺时针）。
- * 基于点集协方差矩阵的主特征方向估算楼栋朝向。
+ * 基于点集协方差矩阵的主特征方向估算楼栋朝向（与 azimuth 的最长边法互为补充）。
  */
 export function principalAxisAngle(points: Pt[]): number {
   const n = points.length;

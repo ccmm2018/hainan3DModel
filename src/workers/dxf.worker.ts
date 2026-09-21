@@ -2,6 +2,9 @@
  * DXF 解析 Web Worker：在后台线程解析 DXF，避免阻塞主线程 UI。
  * 接收原始 ArrayBuffer + 编码，先按编码解码为文本，再调用解析器。
  * 通过 new Worker(new URL('./dxf.worker.ts', import.meta.url), { type: 'module' }) 使用。
+ *
+ * 进度相位：收到字节后先发 `decoding`（解码中），解码完成发 `parsing`（解析中），
+ * 最终发 `result` / `error`。主线程据此驱动「已接收→解码中→解析中→完成」进度条。
  */
 
 import { parseDxfToResult } from '../utils/dxfParser';
@@ -12,13 +15,16 @@ interface RequestMsg {
   id: number;
   buffer: ArrayBuffer;
   encoding?: string;
-  buildingName: string;
-  floorNo: number;
+  /** 批量上传时归属未定，允许为空（最终入库时按楼栋/楼层重算 ID） */
+  buildingName?: string;
+  floorNo?: number;
   expandBlocks?: boolean;
 }
 
 interface ResponseMsg {
   id: number;
+  /** 进度相位（解码中 / 解析中），与 result/error 互斥 */
+  phase?: 'decoding' | 'parsing';
   result?: DxfParseResult;
   error?: string;
 }
@@ -42,9 +48,13 @@ async function decodeBuffer(buffer: ArrayBuffer, encoding: string | undefined): 
 
 ctx.onmessage = async (ev: MessageEvent<RequestMsg>) => {
   const { id, buffer, encoding, buildingName, floorNo, expandBlocks } = ev.data;
+  // 已收到字节，进入「解码中」
+  ctx.postMessage({ id, phase: 'decoding' });
   try {
     const text = await decodeBuffer(buffer, encoding);
-    const result = parseDxfToResult(text, buildingName, floorNo, { expandBlocks });
+    // 解码完成，进入「解析中」
+    ctx.postMessage({ id, phase: 'parsing' });
+    const result = parseDxfToResult(text, buildingName ?? '', floorNo ?? 0, { expandBlocks });
     ctx.postMessage({ id, result });
   } catch (err) {
     ctx.postMessage({

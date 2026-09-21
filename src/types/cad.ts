@@ -94,6 +94,8 @@ export interface Floor {
   status: 'pending' | 'parsed' | 'partial' | 'failed';
   /** failed / partial 时的可读原因，必须持久化可查看 */
   errorReason?: string;
+  /** 解析告警（partial / failed 时一并持久化，便于事后排查）；parsed 时也保留解析阶段告警 */
+  warnings?: ParseWarning[];
   /** 来源 DXF 文件名 */
   dxfFile?: string;
   /** 图纸原始坐标来源 */

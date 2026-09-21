@@ -19,6 +19,7 @@ import type {
   DxfParseResult,
   Floor,
   FloorTransform,
+  ParseWarning,
   Room,
 } from '../types/cad';
 import { SAMPLE_BUILDING_DATA, type BuildingDataMap } from '../data/buildingData';
@@ -34,12 +35,34 @@ import { matchBuildings, type Fingerprint, type MatchResult } from '../utils/mat
 import { polygonArea, polygonCentroid, transformPolygon, type Pt } from '../utils/geometry';
 import { persistence, type LoadedState } from '../utils/persist';
 
-function floorKey(buildingName: string, floorNo: number): string {
-  return `${buildingName}#${floorNo}`;
+function floorKey(buildingName: string, floorNo: number, version = 1): string {
+  return version > 1 ? `${buildingName}#${floorNo}#${version}` : `${buildingName}#${floorNo}`;
 }
 
-function floorId(buildingName: string, floorNo: number): string {
-  return `${buildingName}-F${floorNo}`;
+function floorId(buildingName: string, floorNo: number, version = 1): string {
+  return version > 1 ? `${buildingName}-F${floorNo}-v${version}` : `${buildingName}-F${floorNo}`;
+}
+
+/**
+ * 计算同楼同层的下一个可用版本号。
+ * 扫描 floors 主键，识别 `${buildingName}#${floorNo}`（v1）与
+ * `${buildingName}#${floorNo}#${n}`（v≥2），返回最大版本 + 1。
+ */
+function computeNextVersion(
+  floorsMap: Record<string, Floor>,
+  buildingName: string,
+  floorNo: number,
+): number {
+  let max = 1;
+  const base = `${buildingName}#${floorNo}`;
+  for (const k of Object.keys(floorsMap)) {
+    if (k === base) max = Math.max(max, 1);
+    else if (k.startsWith(base + '#')) {
+      const v = Number(k.slice(base.length + 1));
+      if (Number.isFinite(v) && v > max) max = v;
+    }
+  }
+  return max + 1;
 }
 
 /** 把指纹字段写回 buildingMap（通过索引签名挂载，不修改 BuildingProps 接口） */
@@ -68,12 +91,14 @@ export interface ImportFloorPayload {
   height?: number;
   /** DXF 原始文件字节，落盘用（刷新后可重新下载 / 再导入） */
   dxfBytes?: ArrayBuffer;
+  /** 版本号：同楼同层重复导入时 >=2 表示「另存为新版本」，floor id 追加 -v{n} */
+  version?: number;
 }
 
 export const useBuildingStore = defineStore('building', () => {
   /** 当前生效的楼栋属性表（由 App 在加载数据后 setBuildingMap 注入） */
   const buildingMap = ref<BuildingDataMap>(SAMPLE_BUILDING_DATA);
-  /** buildingName#floorNo → Floor */
+  /** floorKey（${buildingName}#${floorNo}[#${version}]）→ Floor */
   const floors = ref<Record<string, Floor>>({});
   /** Floor.id → Room[] */
   const rooms = ref<Record<string, Room[]>>({});
@@ -119,10 +144,12 @@ export const useBuildingStore = defineStore('building', () => {
 
   function importFloor(payload: ImportFloorPayload): string {
     const { buildingName, floorNo, fileName, parsed } = payload;
+    const version = payload.version ?? 1;
     const cs: CoordSource = payload.coordSource ?? parsed.coordSource;
     const unit = parsed.unit;
     const tr: FloorTransform = payload.transform ?? buildDefaultTransform(cs, unit);
-    const fid = floorId(buildingName, floorNo);
+    const fid = floorId(buildingName, floorNo, version);
+    const key = floorKey(buildingName, floorNo, version);
 
     const selectedRooms = parsed.rooms.filter((r) => r.selected);
     const selectedPolys = selectedRooms.map((r) => r.polygon);
@@ -176,19 +203,21 @@ export const useBuildingStore = defineStore('building', () => {
       id: fid,
       buildingName,
       floorNo,
-      name: `${floorNo}F`,
+      name: `${floorNo}F${version > 1 ? ` v${version}` : ''}`,
       height: payload.height ?? 3.2,
       elevation: (floorNo - 1) * (payload.height ?? 3.2),
       outline,
       roomCount,
       status,
       errorReason,
+      // 解析告警（partial / failed 时一并持久化；parsed 时也保留，便于事后排查）
+      warnings: parsed.warnings.length ? (parsed.warnings as ParseWarning[]) : undefined,
       dxfFile: fileName,
       coordSource: cs,
       transform: cs === 'local' ? tr : undefined,
     };
 
-    floors.value[floorKey(buildingName, floorNo)] = floor;
+    floors.value[key] = floor;
     rooms.value[fid] = roomList;
 
     // 仅在坐标确为 UTM（或提供了 local→UTM 变换）时写回楼栋指纹。
@@ -216,12 +245,12 @@ export const useBuildingStore = defineStore('building', () => {
     return fid;
   }
 
-  function removeFloor(buildingName: string, floorNo: number): void {
-    const key = floorKey(buildingName, floorNo);
-    const fid = floorId(buildingName, floorNo);
+  function removeFloor(buildingName: string, floorNo: number, version = 1): void {
+    const key = floorKey(buildingName, floorNo, version);
+    const fid = floorId(buildingName, floorNo, version);
     delete floors.value[key];
     delete rooms.value[fid];
-    void persistence.removeFloor(buildingName, floorNo).catch(() => undefined);
+    void persistence.removeFloor(buildingName, floorNo, version).catch(() => undefined);
   }
 
   function setRoomUseStatus(fid: string, roomId: string, useStatus: Room['useStatus']): void {
@@ -248,7 +277,8 @@ export const useBuildingStore = defineStore('building', () => {
    */
   function applyPersisted(state: LoadedState): void {
     for (const f of state.floors) {
-      floors.value[floorKey(f.buildingName, f.floorNo)] = f;
+      // 用持久化记录里的真实 id 作为主键（可能含 -v{n} 版本后缀）
+      floors.value[f.id] = f;
     }
     for (const [fid, list] of Object.entries(state.roomsByFloor)) {
       rooms.value[fid] = list;
@@ -283,6 +313,9 @@ export const useBuildingStore = defineStore('building', () => {
     setBuildingMap,
     importFloor,
     removeFloor,
+    /** 计算同楼同层下一个可用版本号（同楼同层已存在时用于「另存为新版本」） */
+    nextVersion: (buildingName: string, floorNo: number) =>
+      computeNextVersion(floors.value, buildingName, floorNo),
     setRoomUseStatus,
     setRoomSelected,
     applyPersisted,

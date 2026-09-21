@@ -11,7 +11,8 @@
  *
  * 步骤 1 上传 / 2 校验(C1-C6) / 3 解析 / 4 预览确认 / 5 坐标配准 已按规范实现；
  * 步骤 6 确认归属（强/弱/无匹配 + 手动指定 + 新建二次确认 + 批量沿用/楼层递增）已按规范实现；
- * 步骤 7 完成 为通用汇总确认。
+ * 步骤 7 入库：楼层号冲突三选一（覆盖 / 另存新版本 / 跳过）+ parsed/partial/failed 三态落库
+ *   + 指纹回写 buildingDataMap + emit('imported', { buildingName, floorIds })，已按规范实现。
  */
 import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import { ElMessage, ElMessageBox, type UploadFile, type UploadRawFile } from 'element-plus';
@@ -28,7 +29,7 @@ import {
 } from '../utils/coordinate';
 import { polygonCentroid, type Pt } from '../utils/geometry';
 import { validateDxf, type DxfValidation } from '../utils/dxfValidate';
-import type { BuildingFingerprint, CoordSource, DxfParseResult, FloorTransform, ParsedRoom } from '../types/cad';
+import type { BuildingFingerprint, CoordSource, DxfParseResult, Floor, FloorTransform, ParsedRoom } from '../types/cad';
 import type { MatchResult } from '../utils/matcher';
 
 const props = withDefaults(
@@ -42,7 +43,7 @@ const props = withDefaults(
 
 const emit = defineEmits<{
   (e: 'update:modelValue', v: boolean): void;
-  (e: 'imported', floorId: string): void;
+  (e: 'imported', payload: { buildingName: string; floorIds: string[] }): void;
 }>();
 
 const store = useBuildingStore();
@@ -70,6 +71,17 @@ const prefillFloor = ref(1);
  */
 const attributionConfirmed = ref(false);
 const manualPick = ref(false); // none 状态下是否展开「手动指定已有楼栋」选择框
+
+// ---- 步骤 7（入库）楼层号冲突处理 ----
+/**
+ * 同楼已存在该楼层时弹框三选一：覆盖原图纸 / 另存为新版本 / 跳过。
+ * - conflictVisible：冲突弹框是否打开
+ * - conflictItem：触发冲突的当前激活文件
+ * - conflictExisting：已存在的楼层（用于展示信息）
+ */
+const conflictVisible = ref(false);
+const conflictItem = ref<UploadItem | null>(null);
+const conflictExisting = ref<Floor | null>(null);
 
 /** 上传队列中的单个文件（含解析进度与结果） */
 interface UploadItem {
@@ -141,6 +153,14 @@ const attributionStatus = computed<'strong' | 'weak' | 'none' | 'manual'>(() => 
 });
 
 const importedFloors = computed(() => store.floorsOf(effectiveBuildingName.value));
+
+/** 步骤 7 预览：当前所选（楼栋, 楼层）是否已存在（用于冲突提示） */
+const conflictFloor = computed<Floor | null>(() => {
+  const bld = effectiveBuildingName.value;
+  const flr = effectiveFloorNo.value;
+  if (!bld) return null;
+  return store.getFloor(bld, flr) ?? null;
+});
 
 // ---- 步骤 2 校验（C1–C6）：区分 error / warn / info，仅 error 阻断 ----
 const validation = computed<DxfValidation | null>(() => {
@@ -601,6 +621,51 @@ async function createNewBuilding(): Promise<void> {
   }
 }
 
+/**
+ * 真正执行入库：构建 payload、调 store.importFloor、写回指纹、emit('imported')、
+ * 从队列移除已处理文件并推进向导。version=1 为覆盖/新建；>=2 为「另存为新版本」。
+ */
+function doImport(it: UploadItem, bld: string, flr: number, version: number): void {
+  if (!it.result || !it.buffer) return;
+  const fid = version > 1 ? `${bld}-F${flr}-v${version}` : `${bld}-F${flr}`;
+  const payload = {
+    buildingName: bld,
+    floorNo: flr,
+    fileName: it.name,
+    parsed: it.result,
+    coordSource: it.coordSource ?? it.result.coordSource,
+    transform: it.coordSource === 'local' ? it.transform : undefined,
+    dxfBytes: it.buffer,
+    version,
+  };
+  try {
+    const gotFid = store.importFloor(payload);
+    // 批量沿用偏好：记录本次归属，供第二个文件起默认沿用、楼层自动递增
+    prefillBuilding.value = bld;
+    prefillFloor.value = flr;
+    const fp = store.buildingFingerprint(bld);
+    const verTag = version > 1 ? `（新版本 v${version}）` : '';
+    if (fp.centerUtm) {
+      ElMessage.success(`已导入 ${bld} ${flr}F${verTag}（${selectedCount.value} 间），并写回楼栋指纹`);
+    } else {
+      ElMessage.success(`已导入 ${bld} ${flr}F${verTag}（${selectedCount.value} 间）`);
+    }
+    // 成功后上报：buildingName + 本次入库的楼层 id 列表（parsed / partial / failed 均已落库）
+    emit('imported', { buildingName: bld, floorIds: [gotFid] });
+    finishItem(it);
+  } catch (err) {
+    ElMessage.error(`导入失败：${(err as Error).message ?? '未知错误'}`);
+  }
+}
+
+/** 入库成功后把该文件移出队列，并推进到下一个待处理文件 / 关闭向导 */
+function finishItem(it: UploadItem): void {
+  items.value = items.value.filter((i) => i.id !== it.id);
+  activeId.value = doneItems.value[0]?.id ?? null;
+  step.value = 0;
+  if (items.value.length === 0) visible.value = false;
+}
+
 async function onConfirm(): Promise<void> {
   const it = activeItem.value;
   if (!it?.result || !it.buffer) {
@@ -616,35 +681,38 @@ async function onConfirm(): Promise<void> {
   // 把归属选择落进 item（覆盖默认值），确保后续持久化/展示一致
   it.buildingName = bld;
   it.floorNo = flr;
-  const payload = {
-    buildingName: bld,
-    floorNo: flr,
-    fileName: it.name,
-    parsed: it.result,
-    coordSource: it.coordSource ?? it.result.coordSource,
-    transform: it.coordSource === 'local' ? it.transform : undefined,
-    dxfBytes: it.buffer,
-  };
-  try {
-    const fid = store.importFloor(payload);
-    // 批量沿用偏好：记录本次归属，供第二个文件起默认沿用、楼层自动递增
-    prefillBuilding.value = bld;
-    prefillFloor.value = flr;
-    const fp = store.buildingFingerprint(bld);
-    if (fp.centerUtm) {
-      ElMessage.success(`已导入 ${bld} ${flr}F（${selectedCount.value} 间），并写回楼栋指纹`);
-    } else {
-      ElMessage.success(`已导入 ${bld} ${flr}F（${selectedCount.value} 间）`);
-    }
-    emit('imported', fid);
-    // 该文件已入库，移出队列；若还有未处理文件可继续
-    items.value = items.value.filter((i) => i.id !== it.id);
-    activeId.value = doneItems.value[0]?.id ?? null;
-    step.value = 0;
-    if (items.value.length === 0) visible.value = false;
-  } catch (err) {
-    ElMessage.error(`导入失败：${(err as Error).message ?? '未知错误'}`);
+  // 楼层号冲突：同楼已存在该楼层（v1）→ 弹框三选一
+  const existing = store.getFloor(bld, flr);
+  if (existing) {
+    conflictItem.value = it;
+    conflictExisting.value = existing;
+    conflictVisible.value = true;
+    return;
   }
+  doImport(it, bld, flr, 1);
+}
+
+/** 冲突弹框三选一：覆盖原图纸 / 另存为新版本 / 跳过 */
+async function resolveConflict(choice: 'overwrite' | 'newversion' | 'skip'): Promise<void> {
+  const it = conflictItem.value;
+  const existing = conflictExisting.value;
+  conflictVisible.value = false;
+  if (!it || !existing) return;
+  const bld = existing.buildingName;
+  const flr = existing.floorNo;
+  if (choice === 'skip') {
+    ElMessage.info(`已跳过 ${bld} ${flr}F（与现有图纸冲突）`);
+    finishItem(it);
+  } else if (choice === 'overwrite') {
+    // 覆盖原图纸：以 version 1 覆盖现有 v1（floors 主键相同，直接覆盖）
+    doImport(it, bld, flr, 1);
+  } else {
+    // 另存为新版本：计算下一个未占用版本号，floor id 追加 -v{n}
+    const v = store.nextVersion(bld, flr);
+    doImport(it, bld, flr, v);
+  }
+  conflictItem.value = null;
+  conflictExisting.value = null;
 }
 
 function onRemoveFloor(f: number): void {
@@ -1150,18 +1218,32 @@ onBeforeUnmount(() => {
         </div>
       </section>
 
-      <!-- 步骤 7 完成 -->
+      <!-- 步骤 7 入库（确认归属 + 落库） -->
       <section v-else-if="step === 6 && activeItem?.result" class="dxf-panel">
-        <el-result icon="success" title="待入库确认" sub-title="点击下方「确认入库」完成本次导入">
+        <el-result
+          icon="success"
+          title="待入库确认"
+          :sub-title="conflictFloor ? '该楼层已存在，点击「确认入库」将提示冲突处理' : '点击下方「确认入库」完成本次导入'"
+        >
           <template #extra>
             <div class="dxf-final">
               <div>文件：{{ activeItem.name }}</div>
               <div>归属：{{ effectiveBuildingName }} {{ effectiveFloorNo }}F</div>
               <div>房间：{{ selectedCount }} / {{ activeItem.result.rooms.length }} 间</div>
               <div>坐标来源：{{ activeItem.coordSource === 'utm' ? 'UTM 49N' : '局部坐标' }}</div>
+              <div v-if="activeItem.result.warnings.length" class="is-warn">
+                解析告警 {{ activeItem.result.warnings.length }} 条（将随楼层一并持久化）
+              </div>
             </div>
           </template>
         </el-result>
+        <el-alert
+          v-if="conflictFloor"
+          class="dxf-preview"
+          type="warning"
+          :closable="false"
+          :title="`楼栋「${effectiveBuildingName}」已存在 ${effectiveFloorNo}F（${conflictFloor.status}，${conflictFloor.roomCount} 间），确认入库时会弹出「覆盖 / 另存新版本 / 跳过」选择`"
+        />
       </section>
     </div>
 
@@ -1175,6 +1257,38 @@ onBeforeUnmount(() => {
         @click="next"
       >下一步</el-button>
       <el-button v-else type="primary" @click="onConfirm">确认入库</el-button>
+    </template>
+  </el-dialog>
+
+  <!-- 步骤 7 楼层号冲突弹框：覆盖原图纸 / 另存为新版本 / 跳过，三选一 -->
+  <el-dialog
+    v-model="conflictVisible"
+    title="楼层号冲突"
+    width="460px"
+    append-to-body
+    :close-on-click-modal="false"
+  >
+    <div v-if="conflictExisting" class="dxf-conflict">
+      <p>
+        楼栋 <b>{{ conflictExisting.buildingName }}</b> 已存在
+        <b>{{ conflictExisting.floorNo }}F</b>（状态：{{ conflictExisting.status }}，{{ conflictExisting.roomCount }} 间）。
+        请选择本次导入的处理方式：
+      </p>
+      <el-alert
+        v-if="conflictExisting.status !== 'parsed'"
+        class="dxf-preview"
+        type="warning"
+        :closable="false"
+        :title="`现有楼层为 ${conflictExisting.status} 状态：${conflictExisting.errorReason ?? '无附加说明'}`"
+      />
+      <p class="dxf-conflict__hint">
+        覆盖原图纸 → 用新图纸替换现有楼层；另存为新版本 → 保留现有楼层，新增 -v{n} 版本；跳过 → 不导入本文件。
+      </p>
+    </div>
+    <template #footer>
+      <el-button @click="resolveConflict('skip')">跳过</el-button>
+      <el-button @click="resolveConflict('newversion')">另存为新版本</el-button>
+      <el-button type="danger" @click="resolveConflict('overwrite')">覆盖原图纸</el-button>
     </template>
   </el-dialog>
 </template>
@@ -1443,4 +1557,9 @@ onBeforeUnmount(() => {
 .dxf-bind { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .dxf-bind__ok { font-size: 13px; color: #16a34a; font-weight: 600; }
 .dxf-bind__tip { font-size: 12px; color: #d97706; }
+
+/* 步骤 7 楼层号冲突弹框 */
+.dxf-conflict p { font-size: 14px; color: #303133; line-height: 1.7; margin: 0 0 12px; }
+.dxf-conflict b { color: #111827; }
+.dxf-conflict__hint { font-size: 12px; color: #909399; margin: 12px 0 0; }
 </style>

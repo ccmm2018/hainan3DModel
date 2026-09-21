@@ -85,4 +85,47 @@ describe('building store', () => {
     expect(room.useArea).toBeCloseTo(12.5, 5);
     expect(room.buildArea).toBeCloseTo(15.2, 5);
   });
+
+  it('同楼同层重复导入：version 产生 -v{n} 楼层 id 且不覆盖 v1', () => {
+    const store = useBuildingStore();
+    const parsed = parseDxfToResult(SAMPLE_DXF, '教学楼', 3);
+    const fid1 = store.importFloor({ buildingName: '教学楼', floorNo: 3, parsed, coordSource: 'local', transform });
+    expect(fid1).toBe('教学楼-F3');
+    expect(store.getFloor('教学楼', 3)?.id).toBe('教学楼-F3');
+
+    const v = store.nextVersion('教学楼', 3);
+    expect(v).toBe(2);
+    const fid2 = store.importFloor({ buildingName: '教学楼', floorNo: 3, parsed, coordSource: 'local', transform, version: v });
+    expect(fid2).toBe('教学楼-F3-v2');
+    // 两个版本并存，互不影响
+    expect(store.getFloor('教学楼', 3)?.id).toBe('教学楼-F3');
+    expect(store.roomsOfFloor('教学楼-F3-v2').length).toBe(2);
+    expect(store.nextVersion('教学楼', 3)).toBe(3);
+  });
+
+  it('partial 楼层：status=partial，errorReason 与 warnings 一并随楼层持久化', () => {
+    const store = useBuildingStore();
+    const parsed = parseDxfToResult(SAMPLE_DXF, '图书馆', 1);
+    // 一个房间未匹配到文字标签 → inspectStatus=highlight → partial
+    parsed.rooms[0].inspectStatus = 'highlight';
+    parsed.warnings.push({ code: 'W-TEST', level: 'warn', message: '测试告警' });
+    const fid = store.importFloor({ buildingName: '图书馆', floorNo: 1, parsed, coordSource: 'local', transform });
+    const f = store.getFloor('图书馆', 1)!;
+    expect(f.status).toBe('partial');
+    expect(f.errorReason).toBeTruthy();
+    expect(f.warnings?.some((w) => w.code === 'W-TEST')).toBe(true);
+  });
+
+  it('failed 楼层（无选中房间）：仍落库且带 errorReason 与 warnings', () => {
+    const store = useBuildingStore();
+    const parsed = parseDxfToResult(SAMPLE_DXF, '图书馆', 2);
+    parsed.rooms.forEach((r) => (r.selected = false));
+    parsed.warnings.push({ code: 'W-FAIL', level: 'warn', message: '无房间' });
+    const fid = store.importFloor({ buildingName: '图书馆', floorNo: 2, parsed, coordSource: 'local', transform });
+    const f = store.getFloor('图书馆', 2)!;
+    expect(f.status).toBe('failed');
+    expect(f.errorReason).toBeTruthy();
+    expect(f.warnings?.some((w) => w.code === 'W-FAIL')).toBe(true);
+    expect(store.roomsOfFloor(fid).length).toBe(0);
+  });
 });

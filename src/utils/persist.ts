@@ -139,8 +139,8 @@ export interface Persistence {
   saveFloor(floor: Floor, rooms: Room[], blob?: DxfBlob): Promise<void>;
   /** 单独更新某层房间（占用状态 / 显隐切换后调用） */
   saveRooms(floorId: string, rooms: Room[]): Promise<void>;
-  /** 删除某层（连带清掉 DXF blob） */
-  removeFloor(buildingName: string, floorNo: number): Promise<void>;
+  /** 删除某层（连带清掉 DXF blob）；version 默认 1，>=2 时删除对应 -v{n} 版本 */
+  removeFloor(buildingName: string, floorNo: number, version?: number): Promise<void>;
   /** 写回楼栋指纹 */
   saveFingerprint(buildingName: string, fp: BuildingFingerprint): Promise<void>;
   /** 取回 DXF 原文件（用于重新下载 / 再导入） */
@@ -178,8 +178,8 @@ export function createPersistence(backend: KvBackend): Persistence {
       await backend.put(STORE_ROOMS, floorId, rooms);
     },
 
-    async removeFloor(buildingName, floorNo) {
-      const floorId = floorIdOf(buildingName, floorNo);
+    async removeFloor(buildingName, floorNo, version = 1) {
+      const floorId = version > 1 ? `${buildingName}-F${floorNo}-v${version}` : floorIdOf(buildingName, floorNo);
       const rec = await backend.get<PersistedFloorRecord>(STORE_FLOORS, floorId);
       if (rec?.dxfBlobId) await backend.delete(STORE_BLOBS, rec.dxfBlobId);
       await backend.delete(STORE_FLOORS, floorId);

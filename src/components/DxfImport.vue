@@ -9,8 +9,8 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import { ElMessage, type UploadFile, type UploadRawFile } from 'element-plus';
 import { useBuildingStore } from '../stores/building';
 import AnchorPicker from './AnchorPicker.vue';
+import { decodeDxf } from '../utils/coordinate';
 import type { CoordSource, DxfParseResult, FloorTransform } from '../types/cad';
-import type { DxfEncoding } from '../utils/dxfDecode';
 
 const props = withDefaults(
   defineProps<{
@@ -35,7 +35,7 @@ const preview = ref<DxfParseResult | null>(null);
 const parsing = ref<boolean>(false);
 const coordSource = ref<CoordSource>('local');
 const transform = ref<FloorTransform | undefined>(undefined);
-const encoding = ref<DxfEncoding>('auto');
+const encoding = ref<string>('auto');
 
 const visible = computed({
   get: () => props.modelValue,
@@ -78,12 +78,23 @@ function ensureWorker(): Worker | null {
   return worker;
 }
 
-async function parseDxf(buffer: ArrayBuffer, enc: DxfEncoding, bn: string, fn: number): Promise<DxfParseResult> {
+async function decodeBuffer(buf: ArrayBuffer, enc: string): Promise<string> {
+  if (enc && enc !== 'auto') {
+    try {
+      return new TextDecoder(enc).decode(buf);
+    } catch {
+      // 编码不支持，回退自动探测
+    }
+  }
+  return decodeDxf(buf);
+}
+
+async function parseDxf(buffer: ArrayBuffer, enc: string, bn: string, fn: number): Promise<DxfParseResult> {
   const w = ensureWorker();
   if (!w) {
     const mod = await import('../utils/dxfParser');
-    const { decodeDxf } = await import('../utils/dxfDecode');
-    return mod.parseDxfToResult(decodeDxf(buffer, enc), bn, fn);
+    const text = await decodeBuffer(buffer, enc);
+    return mod.parseDxfToResult(text, bn, fn);
   }
   return new Promise<DxfParseResult>((resolve, reject) => {
     const id = ++reqId;
@@ -94,8 +105,8 @@ async function parseDxf(buffer: ArrayBuffer, enc: DxfEncoding, bn: string, fn: n
         pending.delete(id);
         import('../utils/dxfParser')
           .then(async (m) => {
-            const { decodeDxf } = await import('../utils/dxfDecode');
-            resolve(m.parseDxfToResult(decodeDxf(buffer, enc), bn, fn));
+            const text = await decodeBuffer(buffer, enc);
+            resolve(m.parseDxfToResult(text, bn, fn));
           })
           .catch(reject);
       }

@@ -5,13 +5,13 @@
  */
 
 import { parseDxfToResult } from '../utils/dxfParser';
-import { decodeDxf, type DxfEncoding } from '../utils/dxfDecode';
+import { decodeDxf } from '../utils/coordinate';
 import type { DxfParseResult } from '../types/cad';
 
 interface RequestMsg {
   id: number;
   buffer: ArrayBuffer;
-  encoding?: DxfEncoding | string;
+  encoding?: string;
   buildingName: string;
   floorNo: number;
 }
@@ -27,10 +27,22 @@ const ctx = self as unknown as {
   postMessage: (msg: ResponseMsg) => void;
 };
 
-ctx.onmessage = (ev: MessageEvent<RequestMsg>) => {
+/** 解码 DXF 字节流：手动指定编码时优先使用，否则自动探测（见 coordinate.decodeDxf） */
+async function decodeBuffer(buffer: ArrayBuffer, encoding: string | undefined): Promise<string> {
+  if (encoding && encoding !== 'auto') {
+    try {
+      return new TextDecoder(encoding).decode(buffer);
+    } catch {
+      // 编码不支持，回退自动探测
+    }
+  }
+  return decodeDxf(buffer);
+}
+
+ctx.onmessage = async (ev: MessageEvent<RequestMsg>) => {
   const { id, buffer, encoding, buildingName, floorNo } = ev.data;
   try {
-    const text = decodeDxf(buffer, encoding);
+    const text = await decodeBuffer(buffer, encoding);
     const result = parseDxfToResult(text, buildingName, floorNo);
     ctx.postMessage({ id, result });
   } catch (err) {

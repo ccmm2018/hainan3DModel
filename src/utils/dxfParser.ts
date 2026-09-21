@@ -11,8 +11,9 @@
  *   1. 按图层名归一层角色（别名表 + 模糊匹配，兼容真实图纸千奇百怪的层名）；
  *   2. 楼层外轮廓线 → floorOutline（指纹来源）；内墙线闭合多边形 → 房间；
  *      外墙线 → outerWalls；柱窗线 → columns / windows；
- *   3. 每个房间质心与最近的「落在房间内部」文字标签匹配，得到房间号 / 名称 / 用途；
+ *   3. 每个房间质心与最近的「落在房间内部」文字标签行匹配，得到 6 个房间字段；
  *   4. 自动推断坐标来源（utm / local）与单位（m / mm / cm）；
+ *      单位优先按 DXF 头 $INSUNITS，缺失时按图面跨度推断；
  *   5. 闭合兼容：端点几乎重合的多段线视为闭合（对付未显式闭合的图纸）。
  *
  * 「楼栋外轮廓线」不在楼层平面图里（它在单独的楼栋外轮廓图中，一栋楼一张），
@@ -32,7 +33,7 @@ import type {
   ParsedRoom,
 } from '../types/cad';
 import { polygonArea, polygonCentroid, bounds, type Pt } from './geometry';
-import { detectCoordSource, detectUnit } from './coordinate';
+import { detectCoordSource, inferUnit, type DxfHeaderVars } from './coordinate';
 import { parseRoomFields, inferRoomPurpose, normalizeLabel } from './textClean';
 import { matchFieldLines } from './matcher';
 
@@ -176,7 +177,8 @@ export function parseDxfToResult(
   let expectSectionName = false;
   let expectTableName = false;
   let headerVar = '';
-  let insUnits: number | undefined;
+  // DXF 头变量表（如 { '$INSUNITS': '6' }），供 inferUnit 推断单位
+  const header: DxfHeaderVars = {};
 
   const layerMap = new Map<string, number>();
   const layerOrder: string[] = [];
@@ -204,11 +206,11 @@ export function parseDxfToResult(
     } else if (current.type === 'MTEXT') {
       if (current.pos && current.text) {
         // MTEXT 按 \P（或换行）拆成多行，每行视为一个候选字段（共享同一插入点）
-        const lines = current.text
+        const multi = current.text
           .split(/\\P|\r?\n/i)
           .map((s) => normalizeLabel(s))
           .filter((s) => s.length > 0);
-        for (const line of lines) labels.push({ pos: current.pos, text: line, layer: current.layer });
+        for (const line of multi) labels.push({ pos: current.pos, text: line, layer: current.layer });
       }
     }
     current = null;
@@ -270,28 +272,26 @@ export function parseDxfToResult(
       continue;
     }
 
-    if (!current && section !== 'HEADER') {
-      if (code === '2') {
+    // HEADER / TABLES 等非实体段落的头部处理（无 current 实体）
+    if (!current) {
+      if (section === 'HEADER') {
+        // DXF 头变量：9 后跟变量名，随后一对为值
+        if (code === '9') headerVar = value;
+        else if (headerVar) header[headerVar] = value;
+      } else if (code === '2') {
         if (expectSectionName) {
           section = value;
           expectSectionName = false;
         } else if (expectTableName) {
           expectTableName = false;
         }
-      } else if (code === '9' && section === 'HEADER') {
-        headerVar = value;
       }
       continue;
     }
 
     switch (code) {
       case '2':
-        if (expectSectionName) {
-          section = value;
-          expectSectionName = false;
-        } else if (expectTableName) {
-          expectTableName = false;
-        } else if (current && current.type === 'LAYER') {
+        if (current.type === 'LAYER') {
           current.name = value;
         }
         break;
@@ -301,13 +301,8 @@ export function parseDxfToResult(
       case '62':
         if (current) current.color = Number(value);
         break;
-      case '9':
-        if (section === 'HEADER') headerVar = value;
-        break;
       case '70':
-        if (section === 'HEADER' && headerVar === '$INSUNITS') {
-          insUnits = Number(value);
-        } else if (current && (current.type === 'LWPOLYLINE' || current.type === 'POLYLINE')) {
+        if (current && (current.type === 'LWPOLYLINE' || current.type === 'POLYLINE')) {
           current.closed = (Number(value) & 1) === 1;
         }
         break;
@@ -431,8 +426,8 @@ export function parseDxfToResult(
   // ---- 坐标来源 / 单位推断 ----
   const allPts: Pt[] = closedEntities.flatMap((e) => e.points as Pt[]);
   const bboxRaw = bounds(allPts.length ? allPts : (floorOutline ? floorOutline.polygon : []));
-  const span = Math.max(bboxRaw.maxX - bboxRaw.minX, bboxRaw.maxY - bboxRaw.minY);
-  const unit: LengthUnit = detectUnit(insUnits, span);
+  // 单位优先 $INSUNITS，缺失按图面跨度推断（见 inferUnit）
+  const unit: LengthUnit = inferUnit(header, bboxRaw);
   const coordSource: CoordSource = detectCoordSource(allPts, unit);
 
   // ---- 图层 ----
@@ -460,6 +455,14 @@ export function parseDxfToResult(
       code: 'NO_LABEL',
       level: 'warn',
       message: '图纸中未发现文字标签，房间已按序号自动编号（房间1、房间2…）。',
+    });
+  }
+  if (unit === 'unknown') {
+    warnings.push({
+      code: 'UNIT_UNKNOWN',
+      level: 'warn',
+      message:
+        '无法推断图纸单位（坐标跨度不在 10~2000m 或 10000~200000mm 区间，且未设 $INSUNITS）。请手动指定坐标来源 / 单位，否则面积与变换可能错误。',
     });
   }
   if (unmatched.length > 0) {

@@ -13,6 +13,12 @@
  * 步骤 6 确认归属（强/弱/无匹配 + 手动指定 + 新建二次确认 + 批量沿用/楼层递增）已按规范实现；
  * 步骤 7 入库：楼层号冲突三选一（覆盖 / 另存新版本 / 跳过）+ parsed/partial/failed 三态落库
  *   + 指纹回写 buildingDataMap + emit('imported', { buildingName, floorIds })，已按规范实现。
+ *
+ * 本向导严格执行 README「注意事项（必须遵守）」的 9 条硬约束，关键落点：
+ *   [约束1] 步骤6 禁止自动绑定楼栋，必须人工点【确认绑定】；匹配"对不上"优先怀疑坐标系，不自动新建楼栋；
+ *   [约束5] 步骤5 局部图纸必须经 AnchorPicker 配准（解出 transform）才可放行入库，禁止未配准局部坐标入库；
+ *   [约束8] 步骤2/3 的编码/单位/坐标/字段自动推断结果均在界面明示并支持人工纠正；
+ *   解析（步骤1→3）全部在 dxf.worker.ts 执行 [约束7]，主线程无 >100ms 同步解析。
  */
 import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import { ElMessage, ElMessageBox, type UploadFile, type UploadRawFile } from 'element-plus';

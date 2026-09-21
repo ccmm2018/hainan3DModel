@@ -71,7 +71,7 @@ export function inferUnit(header: DxfHeaderVars, bbox: BBox): LengthUnit {
   return 'unknown';
 }
 
-/** 把单位换算为「米」的缩放系数 */
+/** 把单位换算为「米」的缩放系数（mm→0.001 / cm→0.01 / m→1）；入库面积统一换算到 ㎡。[约束4] */
 export function unitToScale(unit: LengthUnit): number {
   switch (unit) {
     case 'mm':
@@ -240,6 +240,8 @@ export const OVERLAP_DEVIATION_THRESHOLD = 0.2;
 // 算法参考 GCJ-02 公开实现（Krasovsky 1940 椭球 + 非线性偏移模型）。
 // 出处：国家测绘局 GCJ-02 坐标加密标准（常见工程实现：
 //   https://en.wikipedia.org/wiki/Restrictions_on_geographic_data_in_China）。
+// [约束6] 本转换仅在「渲染定位」时调用；数据库 / 内部存储统一存 UTM/WGS84，
+//         禁止把 GCJ-02 写入持久化数据。
 // ---------------------------------------------------------------------------
 const GCJ_PI = Math.PI;
 const GCJ_A = 6378245.0; // 长半轴

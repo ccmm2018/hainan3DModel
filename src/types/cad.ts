@@ -3,10 +3,12 @@
  *
  * 四层树：Building（已有）→ Floor（新增）→ Room（新增）
  *
- * - 楼栋外键统一使用 buildingName（= BuildingProps.name，即 GLB 节点名）。
+ * - 楼栋外键统一使用 buildingName（= BuildingProps.name，即 GLB 节点名）。[约束3]
  * - Building 上的指纹字段（centerUtm / outline / azimuth / footprintArea）通过
  *   BuildingProps 的 `[key: string]: unknown` 索引签名挂载，本文件只给出类型，
- *   不修改 BuildingProps 接口定义。
+ *   不修改 BuildingProps 接口定义。[约束9]
+ * - 面积（Room.useArea / buildArea / Floor 指纹 footprintArea）统一以 ㎡ 存储，
+ *   入库前由局部坐标按单位换算（mm×0.001 / cm×0.01），见 coordinate.unitToScale。[约束4]
  * - Room 同时保留两类状态：
  *     · inspectStatus：审图 / 质检标记（导入向导预览阶段用，入库后留作质检记录）
  *     · useStatus：正式业务占用状态（使用中 / 无权限 / 空置），导入时可空，后续手工分配

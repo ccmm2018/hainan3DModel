@@ -19,6 +19,8 @@
  * / TEXT·MTEXT / GBK·UTF-8·UTF-16 / 单文件 ≤20MB。命中不支持项（天正未转 T3 的私有实体、
  * SPLINE·ELLIPSE 曲线房间、深层嵌套块、>20MB 图纸、带洞多边形）时，前端应拒解析并改走
  * 后端兜底（预留接口 POST /api/cad/parse，客户端封装见 src/utils/cadParseApi.ts）。
+ *
+ * 本文件同时落实[约束7]：所有 DXF 解析在 Web Worker 执行，主线程不出现 >100ms 的同步解析。
  */
 
 import { parseDxfToResult } from '../utils/dxfParser';

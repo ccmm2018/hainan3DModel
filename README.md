@@ -199,6 +199,37 @@ src/
 - **Response**：与前端 `DxfParseResult` 对齐的 `{ result: DxfParseResult, engine?: string }`
 - 客户端封装：`src/utils/cadParseApi.ts` 的 `parseCadViaBackend()`
 
+## 注意事项（必须遵守）
+
+以下 9 条为架构级硬约束，任何涉及 CAD 导入 / 解析 / 入库 / 配准 / 渲染的代码都必须遵守；
+违反会导致「静默错配楼栋」「坐标偏移」「面积单位混乱」等难排查问题。代码关键位置已用 `[约束N]` 标注。
+
+1. **禁止自动绑定楼栋，必须人工确认**。相似度再高也只给建议，最终归属需用户点【确认绑定】；
+   匹配「对不上」时优先怀疑坐标系（UTM / 局部未配准），**不等于**「这是新楼栋」——不要因匹配失败就自动新建楼栋。
+   （落点：`src/components/DxfImport.vue` 步骤6，[约束1]）
+2. **房间闭合轮廓是业务内容，不参与楼栋匹配**。匹配只用「楼层外轮廓线」那条闭合线的
+   中心 / 面积 / 方位三维指纹，房间多边形永不进入 matcher。
+   （落点：`src/utils/matcher.ts`，[约束2]）
+3. **楼栋外键用 `buildingName`**（= `BuildingProps.name` = GLB 节点名），`Floor` 只引用不复制楼栋属性；
+   **不新建 Building 接口**，直接复用项目已有的 `BuildingProps` / `BuildingDataMap`。
+   （落点：`src/types/cad.ts`、`src/stores/building.ts`，[约束3]）
+4. **质心分母用 6·|A|**；**面积一律先换算成 ㎡ 再比较与入库**（毫米图 ×0.001、厘米图 ×0.01）。
+   （落点：`src/utils/geometry.ts` centroid / `src/utils/coordinate.ts` unitToScale / `src/stores/building.ts` importFloor，[约束4]）
+5. **UTM 图纸可直接用；局部图纸必须经 AnchorPicker 配准**，禁止把未配准的局部坐标写入数据库；
+   步骤5 未完成配准（local 未解出 transform）时不得放行入库。
+   （落点：`src/components/DxfImport.vue` 步骤5/6 / `src/stores/building.ts` importFloor，[约束5]）
+6. **WGS84/UTM ↔ 高德 GCJ-02 的转换只在渲染定位时做**；数据库与内部存储统一存 UTM/WGS84，
+   禁止把 GCJ-02 写入持久化数据。
+   （落点：`src/utils/coordinate.ts` wgs84ToGcj02，[约束6]）
+7. **解析全部在 Web Worker 执行**，主线程不得出现 >100ms 的同步解析。
+   （落点：`src/workers/dxf.worker.ts` + `src/utils/dxfParser.ts`，[约束7]）
+8. **所有「自动推断」（编码 / 单位 / 坐标 / 字段）结果都要在界面上明示，并允许人工纠正**；
+   推断值不是最终结果。
+   （落点：`src/components/DxfImport.vue` 步骤2/3 的 coordSource / unit 展示与可编辑项，[约束8]）
+9. **楼栋指纹字段（centerUtm / outline / azimuth / footprintArea）通过 `BuildingProps` 的
+   `[key: string]: unknown` 索引签名挂载**，**不得修改 `BuildingProps` 接口定义**。
+   （落点：`src/types/cad.ts` 文件头注释 / `src/stores/building.ts` 的 importFloor 写回逻辑，[约束9]）
+
 ## 打印 / 导出
 
 点击右上角「打印 / 导出」打开对话框，可配置：

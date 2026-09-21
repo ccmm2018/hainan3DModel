@@ -26,7 +26,11 @@ export function shoelace(pts: Pt[]): number {
   return a / 2;
 }
 
-/** 多边形面积（有向面积的绝对值，单位平方） */
+/**
+ * 多边形面积（有向面积的绝对值，单位平方）。
+ * 注意：返回值为「输入坐标系下的平方单位」（毫米图即 mm²）；入库前须按单位换算成 ㎡，
+ * 见 coordinate.unitToScale 与 stores/building.ts 的 importFloor。[约束4]
+ */
 export function polygonArea(pts: Pt[]): number {
   return Math.abs(shoelace(pts));
 }
@@ -38,6 +42,7 @@ export function polygonArea(pts: Pt[]): number {
  * 推导：Cx = ⅙A · Σ(xᵢ+xᵢ₊₁)(xᵢyᵢ₊₁ − xᵢ₊₁yᵢ)，Cy 同理（y 部分）；
  * 循环中累加的 cross 之和为「2·有向面积」，因此先 ×½ 得到有向面积 A，
  * 再以 6·|A| 归一。切勿把 2·A 直接代入写成 6·(2A)=12A，也不要误用 3A。
+ * [约束4] 质心分母固定为 6·|A|（A 为鞋带有向面积）；与下方 polygonArea 配套。
  */
 export function centroid(pts: Pt[]): Pt {
   const n = pts.length;

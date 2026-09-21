@@ -182,7 +182,8 @@
       <div class="property-panel__actions">
         <button class="property-panel__btn" @click="openBuildingDetail">楼宇详情</button>
         <button class="property-panel__btn property-panel__btn--primary" @click="openRoomManagement">房间管理</button>
-        <button class="property-panel__btn" @click="enterRoomMode">楼宇分层图</button>
+        <button class="property-panel__btn" @click="openFloorPlan">楼宇分层图</button>
+        <button class="property-panel__btn" @click="importVisible = true">导入图纸</button>
       </div>
     </div>
 
@@ -423,6 +424,19 @@
 
     <!-- 打印/导出对话框 -->
     <ExportDialog v-if="exportOpen" :scene="scene" :title="exportTitle" @close="exportOpen = false" />
+
+    <!-- 楼栋 2.5D 楼宇分层图 -->
+    <FloorPlanViewer
+      v-model="floorPlanVisible"
+      :building-name="floorPlanBuilding"
+      @request-import="importVisible = true"
+    />
+    <!-- DXF 图纸导入对话框 -->
+    <FloorPlanImportDialog
+      v-model="importVisible"
+      :buildings="buildingNames"
+      :default-building="selected?.name ?? ''"
+    />
   </div>
 </template>
 
@@ -448,6 +462,9 @@ import {
 } from '../data/roomData';
 import ExportDialog from './ExportDialog.vue';
 import AllocationPanel from './AllocationPanel.vue';
+import FloorPlanViewer from './FloorPlanViewer.vue';
+import FloorPlanImportDialog from './FloorPlanImportDialog.vue';
+import { useFloorPlanStore } from '../stores/floorPlanStore';
 import { computeTotalArea, submitAllocation } from '../utils/allocation';
 
 type Status = 'loading-amap' | 'loading-model' | 'ready' | 'error';
@@ -480,6 +497,20 @@ const imageError = ref(false);
 
 // 房间管理弹窗状态
 const roomMgmtOpen = ref(false);
+
+// 楼层平面图（DXF 导入 + 2.5D 查看）
+const floorPlanStore = useFloorPlanStore();
+const floorPlanVisible = ref(false);
+const importVisible = ref(false);
+const floorPlanBuilding = ref('');
+const buildingNames = computed(() => Object.keys(buildingData.value));
+
+/** 打开该建筑的 2.5D 楼宇分层图 */
+function openFloorPlan() {
+  if (!selected.value?.name) return;
+  floorPlanBuilding.value = selected.value.name;
+  floorPlanVisible.value = true;
+}
 
 // 分配模式状态
 const selectedRooms = ref<Room[]>([]);

@@ -272,6 +272,49 @@ export const useBuildingStore = defineStore('building', () => {
   }
 
   /**
+   * 补填 / 修订房间字段（查看器「继续补填」调用）。
+   * 落盘后，若本层此前为 partial，且全部房间现已字段完整且无需复核，则自动升级为 parsed。
+   */
+  function updateRoom(
+    fid: string,
+    roomId: string,
+    patch: Partial<
+      Pick<Room, 'code' | 'number' | 'name' | 'dept' | 'usePurpose' | 'useArea' | 'buildArea' | 'inspectStatus'>
+    >,
+  ): void {
+    const list = rooms.value[fid];
+    if (!list) return;
+    const room = list.find((r) => r.id === roomId);
+    if (!room) return;
+    Object.assign(room, patch);
+    // 补填完整后，若该房间此前因字段缺失被标记为 partial，则恢复 normal
+    if (patch.code !== undefined || patch.name !== undefined) {
+      if (room.code.trim() !== '' && room.name.trim() !== '' && room.inspectStatus === 'partial') {
+        room.inspectStatus = 'normal';
+      }
+    }
+    void persistence.saveRooms(fid, list).catch(() => undefined);
+
+    // partial 楼层：检查是否仍有待补填 / 待复核房间，已全部补全则升级为 parsed
+    const f = Object.values(floors.value).find((x) => x.id === fid);
+    if (f && f.status === 'partial') {
+      const stillPartial = list.some(
+        (r) =>
+          r.inspectStatus === 'highlight' ||
+          r.inspectStatus === 'warning' ||
+          r.inspectStatus === 'partial' ||
+          r.code.trim() === '' ||
+          r.name.trim() === '',
+      );
+      if (!stillPartial) {
+        f.status = 'parsed';
+        f.errorReason = undefined;
+        void persistence.saveFloor(f, list).catch(() => undefined);
+      }
+    }
+  }
+
+  /**
    * 启动恢复：把持久化读出的楼层 / 房间 / 楼栋指纹合并进内存态。
    * 调用时机在「播种样例数据」之后，故持久化数据会覆盖样例中的同名项。
    */
@@ -318,6 +361,7 @@ export const useBuildingStore = defineStore('building', () => {
       computeNextVersion(floors.value, buildingName, floorNo),
     setRoomUseStatus,
     setRoomSelected,
+    updateRoom,
     applyPersisted,
     matchByFingerprint,
   };

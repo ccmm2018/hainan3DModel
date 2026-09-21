@@ -19,9 +19,12 @@
  * - 预览嵌入模式（embedded + preview）：不渲染 el-dialog，仅渲染 SVG stage，
  *   数据源为入库前候选（ParsedRoom[]），点击房间 emit('room-click') 交由导入向导编辑。
  */
-import { computed, ref, watch } from 'vue';
+import { computed, reactive, ref, watch } from 'vue';
+import { ElMessage } from 'element-plus';
+import { CircleCloseFilled, WarningFilled } from '@element-plus/icons-vue';
 import { useBuildingStore } from '../stores/building';
 import { polygonArea } from '../utils/geometry';
+import { isRoomFieldComplete } from '../utils/roomFields';
 import type { InspectStatus, ParsedRoom, Room, UseStatus } from '../types/cad';
 
 const props = withDefaults(
@@ -82,6 +85,25 @@ const displayedRooms = computed<RoomLike[]>(() => {
   const f = currentFloor.value;
   if (!f) return [];
   return store.roomsOfFloor(f.id);
+});
+
+// ---- 空状态 / 错误状态 / 部分成功状态（store 模式，针对当前选中楼层）----
+const isFailed = computed(() => props.embedded ? false : currentFloor.value?.status === 'failed');
+const isPartial = computed(() => props.embedded ? false : currentFloor.value?.status === 'partial');
+
+/** partial 楼层的待补填项文案（缺字段房间数 + 待复核房间数） */
+const missingText = computed(() => {
+  const f = currentFloor.value;
+  if (!f) return '';
+  const list = store.roomsOfFloor(f.id);
+  const incomplete = list.filter((r) => !isRoomFieldComplete(r as unknown as ParsedRoom)).length;
+  const review =
+    list.filter((r) => r.inspectStatus === 'highlight' || r.inspectStatus === 'warning').length;
+  const parts: string[] = [];
+  if (incomplete) parts.push(`字段待补填 ${incomplete} 间`);
+  if (review) parts.push(`待复核 ${review} 间`);
+  if (!parts.length) parts.push('仍有房间未完成质检');
+  return `本层导入部分成功，${parts.join('、')}。`;
 });
 
 // ---- 着色 ----
@@ -369,6 +391,68 @@ function requestImport(): void {
   emit('request-import');
 }
 
+// ---- 继续补填（partial 楼层）：编辑并保存房间字段 ----
+const fillMode = ref(false);
+const editRoom = reactive({
+  code: '',
+  number: '',
+  name: '',
+  dept: '',
+  usePurpose: '',
+  useArea: '',
+  buildArea: '',
+});
+
+/** 进入补填模式：切到审图着色、自动选中第一个待补填房间 */
+function startFill(): void {
+  fillMode.value = true;
+  colorMode.value = 'inspect';
+  const f = currentFloor.value;
+  if (!f) return;
+  const list = store.roomsOfFloor(f.id);
+  const first =
+    list.find(
+      (r) =>
+        !isRoomFieldComplete(r as unknown as ParsedRoom) ||
+        r.inspectStatus === 'highlight' ||
+        r.inspectStatus === 'partial' ||
+        r.inspectStatus === 'warning',
+    ) ?? list[0];
+  if (first) selectedId.value = first.id;
+}
+
+/** 选中房间变化时，把字段载入编辑表单 */
+watch(
+  selectedRoom,
+  (r) => {
+    if (!r) return;
+    editRoom.code = r.code;
+    editRoom.number = r.number;
+    editRoom.name = r.name;
+    editRoom.dept = r.dept;
+    editRoom.usePurpose = r.usePurpose;
+    editRoom.useArea = String(r.useArea);
+    editRoom.buildArea = String(r.buildArea);
+  },
+  { immediate: true },
+);
+
+function saveEdit(): void {
+  const f = currentFloor.value;
+  const r = selectedRoom.value;
+  if (!f || !r) return;
+  store.updateRoom(f.id, r.id, {
+    code: editRoom.code.trim(),
+    number: editRoom.number.trim() || editRoom.code.trim(),
+    name: editRoom.name.trim(),
+    dept: editRoom.dept.trim(),
+    usePurpose: editRoom.usePurpose.trim(),
+    useArea: Number(editRoom.useArea) || 0,
+    buildArea: Number(editRoom.buildArea) || 0,
+  });
+  ElMessage.success('已保存房间信息');
+}
+
 // ---- 缩放 / 平移（楼层切换保留）----
 const zoom = ref(1);
 const panX = ref(0);
@@ -423,11 +507,9 @@ const svgStyle = computed(() => ({
     top="5vh"
     class="fpv-dialog"
   >
-    <div v-if="!floors.length" class="fpv-empty">
-      <div class="fpv-empty__icon">🗂️</div>
-      <p>该楼尚未导入楼层平面图。</p>
-      <el-button type="primary" @click="requestImport">导入 DXF 图纸</el-button>
-    </div>
+    <el-empty v-if="!floors.length" description="暂无室内图纸，请先导入">
+      <el-button type="primary" @click="requestImport">导入图纸</el-button>
+    </el-empty>
 
     <div v-else class="fpv">
       <div class="fpv__top">
@@ -461,8 +543,26 @@ const svgStyle = computed(() => ({
         <el-button link type="primary" class="fpv__import" @click="requestImport">+ 导入图纸</el-button>
       </div>
 
-      <div class="fpv-main">
-        <div class="fpv-stage" ref="stageRef" @wheel.prevent="onWheel">
+      <div v-if="isFailed" class="fpv-state fpv-state--failed">
+        <el-icon class="fpv-state__icon"><CircleCloseFilled /></el-icon>
+        <div class="fpv-state__body">
+          <div class="fpv-state__title">该楼层导入失败</div>
+          <div class="fpv-state__desc">{{ currentFloor?.errorReason || '未知错误' }}</div>
+        </div>
+        <el-button type="primary" @click="requestImport">重新上传</el-button>
+      </div>
+      <template v-else>
+        <div v-if="isPartial" class="fpv-state fpv-state--partial">
+          <el-icon class="fpv-state__icon"><WarningFilled /></el-icon>
+          <div class="fpv-state__body">
+            <div class="fpv-state__title">导入部分完成</div>
+            <div class="fpv-state__desc">{{ missingText }}</div>
+          </div>
+          <el-button type="warning" plain @click="startFill">继续补填</el-button>
+        </div>
+
+        <div class="fpv-main">
+          <div class="fpv-stage" ref="stageRef" @wheel.prevent="onWheel">
           <svg
             :viewBox="`0 0 ${VIEW_W} ${VIEW_H}`"
             class="fpv-svg"
@@ -557,7 +657,21 @@ const svgStyle = computed(() => ({
           <div class="fpv-info">
             <template v-if="selectedRoom">
               <div class="fpv-info__title">{{ selectedRoom.code || selectedRoom.name }} · {{ selectedRoom.name }}</div>
-              <dl>
+
+              <div v-if="fillMode" class="fpv-edit">
+                <div class="fpv-edit__row"><label>房间号</label><el-input v-model="editRoom.code" size="small" /></div>
+                <div class="fpv-edit__row"><label>名称</label><el-input v-model="editRoom.name" size="small" /></div>
+                <div class="fpv-edit__row"><label>部门</label><el-input v-model="editRoom.dept" size="small" /></div>
+                <div class="fpv-edit__row"><label>用途</label><el-input v-model="editRoom.usePurpose" size="small" /></div>
+                <div class="fpv-edit__row"><label>使用面积</label><el-input v-model="editRoom.useArea" size="small" type="number" /></div>
+                <div class="fpv-edit__row"><label>建筑面积</label><el-input v-model="editRoom.buildArea" size="small" type="number" /></div>
+                <div class="fpv-info__actions">
+                  <el-button type="primary" size="small" @click="saveEdit">保存</el-button>
+                  <el-button size="small" @click="fillMode = false">取消</el-button>
+                </div>
+              </div>
+
+              <dl v-else>
                 <div><dt>房间号</dt><dd>{{ selectedRoom.code || '—' }}</dd></div>
                 <div><dt>名称</dt><dd>{{ selectedRoom.name || '—' }}</dd></div>
                 <div><dt>部门</dt><dd>{{ selectedRoom.dept || '—' }}</dd></div>
@@ -570,6 +684,7 @@ const svgStyle = computed(() => ({
                 <el-button size="small" @click="setUseStatus('noaccess')">无权限</el-button>
                 <el-button size="small" @click="setUseStatus('vacant')">空置</el-button>
                 <el-button size="small" text @click="setUseStatus('')">清空</el-button>
+                <el-button v-if="isPartial" size="small" type="warning" plain @click="startFill">补填信息</el-button>
               </div>
               <div class="fpv-info__actions">
                 <el-button size="small" type="danger" plain @click="hideRoom">隐藏此房间</el-button>
@@ -580,7 +695,8 @@ const svgStyle = computed(() => ({
           </div>
           <p class="fpv-note">* 面积为图纸坐标变换后的估算值（㎡）。</p>
         </div>
-      </div>
+        </div>
+      </template>
     </div>
   </el-dialog>
 
@@ -690,9 +806,26 @@ const svgStyle = computed(() => ({
 
 <style scoped>
 .fpv-dialog :deep(.el-dialog__body) { padding-top: 8px; }
-.fpv-empty { text-align: center; padding: 40px 0; color: #6b7280; }
-.fpv-empty__icon { font-size: 40px; margin-bottom: 8px; }
 .fpv { display: flex; flex-direction: column; gap: 12px; }
+
+/* 空 / 失败 / 部分成功 状态卡片 */
+.fpv-state { display: flex; align-items: center; gap: 14px; padding: 18px 20px; border-radius: 10px; border: 1px solid transparent; }
+.fpv-state__icon { font-size: 30px; flex-shrink: 0; }
+.fpv-state__body { flex: 1; min-width: 0; }
+.fpv-state__title { font-size: 15px; font-weight: 700; }
+.fpv-state__desc { font-size: 13px; color: #6b7280; margin-top: 2px; line-height: 1.5; }
+.fpv-state--failed { background: #fef2f2; border-color: #fecaca; }
+.fpv-state--failed .fpv-state__icon { color: #dc2626; }
+.fpv-state--failed .fpv-state__title { color: #b91c1c; }
+.fpv-state--partial { background: #fffbeb; border-color: #fde68a; }
+.fpv-state--partial .fpv-state__icon { color: #d97706; }
+.fpv-state--partial .fpv-state__title { color: #b45309; }
+
+/* 补填表单 */
+.fpv-edit { display: flex; flex-direction: column; gap: 8px; margin: 4px 0 8px; }
+.fpv-edit__row { display: flex; align-items: center; gap: 8px; }
+.fpv-edit__row label { width: 56px; font-size: 13px; color: #6b7280; flex-shrink: 0; }
+.fpv-edit__row :deep(.el-input) { flex: 1; }
 .fpv__top { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
 .fpv__top--embed { justify-content: space-between; }
 .fpv__floors { display: flex; flex-wrap: wrap; gap: 8px; }

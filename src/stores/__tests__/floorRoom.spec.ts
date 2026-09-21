@@ -128,4 +128,32 @@ describe('building store', () => {
     expect(f.warnings?.some((w) => w.code === 'W-FAIL')).toBe(true);
     expect(store.roomsOfFloor(fid).length).toBe(0);
   });
+
+  it('updateRoom 补填字段并自动将 partial 楼层升级为 parsed', () => {
+    const store = useBuildingStore();
+    const parsed = parseDxfToResult(SAMPLE_DXF, '图书馆', 1);
+    // 一个房间未匹配到文字标签 → 整层 partial
+    parsed.rooms[0].inspectStatus = 'highlight';
+    const fid = store.importFloor({ buildingName: '图书馆', floorNo: 1, parsed, coordSource: 'local', transform });
+    expect(store.getFloor('图书馆', 1)!.status).toBe('partial');
+
+    const room = store.roomsOfFloor(fid)[0];
+    store.updateRoom(fid, room.id, {
+      code: '101',
+      name: '控制室',
+      useArea: 18.5,
+      buildArea: 20.1,
+      inspectStatus: 'normal',
+    });
+
+    const updated = store.roomsOfFloor(fid)[0];
+    expect(updated.code).toBe('101');
+    expect(updated.name).toBe('控制室');
+    expect(updated.useArea).toBeCloseTo(18.5, 5);
+    expect(updated.buildArea).toBeCloseTo(20.1, 5);
+    expect(updated.inspectStatus).toBe('normal');
+    // 全部房间均已字段完整且无需复核 → 自动升级为 parsed
+    expect(store.getFloor('图书馆', 1)!.status).toBe('parsed');
+    expect(store.getFloor('图书馆', 1)!.errorReason).toBeUndefined();
+  });
 });

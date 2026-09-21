@@ -66,7 +66,7 @@ export interface ImportFloorPayload {
   height?: number;
 }
 
-export const useFloorRoomStore = defineStore('floorRoom', () => {
+export const useBuildingStore = defineStore('building', () => {
   /** 当前生效的楼栋属性表（由 App 在加载数据后 setBuildingMap 注入） */
   const buildingMap = ref<BuildingDataMap>(SAMPLE_BUILDING_DATA);
   /** buildingName#floorNo → Floor */

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { parseDxfToResult } from '../dxfParser';
-import { SAMPLE_DXF } from '../../mock/sampleDxf';
+import { SAMPLE_DXF } from '../../mock/mockData';
 
 describe('dxfParser', () => {
   const result = parseDxfToResult(SAMPLE_DXF, '教学楼', 1);

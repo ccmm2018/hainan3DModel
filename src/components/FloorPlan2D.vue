@@ -7,7 +7,7 @@
  * - 悬停 tooltip、点击选中、可隐藏误识别房间（写回 store）。
  */
 import { computed, ref, watch } from 'vue';
-import { useFloorRoomStore } from '../stores/floorRoom';
+import { useBuildingStore } from '../stores/building';
 import { fitTransform, projectPoint, type Pt } from '../utils/geometry';
 import type { InspectStatus, Room, UseStatus } from '../types/cad';
 
@@ -21,7 +21,7 @@ const emit = defineEmits<{
   (e: 'request-import'): void;
 }>();
 
-const store = useFloorRoomStore();
+const store = useBuildingStore();
 
 const VIEW_W = 920;
 const VIEW_H = 640;

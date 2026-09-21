@@ -3,11 +3,11 @@
  * DxfImport：DXF 楼层平面图导入对话框。
  * 流程：选楼栋 / 楼层 → 拖入 .dxf → Web Worker 后台解析（失败回退主线程）→
  * 预览房间（可勾选剔除误识别）→ 确认坐标来源 / 局部变换 → 确认入库。
- * 确认入库那一刻，floorRoom store 会把楼栋指纹写回 BuildingProps（索引签名挂载）。
+ * 确认入库那一刻，building store 会把楼栋指纹写回 BuildingProps（索引签名挂载）。
  */
 import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import { ElMessage, type UploadFile, type UploadRawFile } from 'element-plus';
-import { useFloorRoomStore } from '../stores/floorRoom';
+import { useBuildingStore } from '../stores/building';
 import AnchorPicker from './AnchorPicker.vue';
 import type { CoordSource, DxfParseResult, FloorTransform } from '../types/cad';
 import type { DxfEncoding } from '../utils/dxfDecode';
@@ -26,7 +26,7 @@ const emit = defineEmits<{
   (e: 'imported', floorId: string): void;
 }>();
 
-const store = useFloorRoomStore();
+const store = useBuildingStore();
 
 const buildingName = ref<string>(props.defaultBuilding || props.buildingNames[0] || '');
 const floorNo = ref<number>(1);

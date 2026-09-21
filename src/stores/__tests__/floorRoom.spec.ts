@@ -1,16 +1,16 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { createPinia, setActivePinia } from 'pinia';
-import { useFloorRoomStore } from '../floorRoom';
+import { useBuildingStore } from '../building';
 import { parseDxfToResult } from '../../utils/dxfParser';
-import { SAMPLE_DXF } from '../../mock/sampleDxf';
+import { SAMPLE_DXF } from '../../mock/mockData';
 
 beforeEach(() => setActivePinia(createPinia()));
 
 const transform = { offset: [440000, 4100000] as [number, number], rotation: 0, scale: 0.001 };
 
-describe('floorRoom store', () => {
+describe('building store', () => {
   it('importFloor 构建楼层与房间并写回楼栋指纹', () => {
-    const store = useFloorRoomStore();
+    const store = useBuildingStore();
     const parsed = parseDxfToResult(SAMPLE_DXF, '教学楼', 1);
     const fid = store.importFloor({
       buildingName: '教学楼',
@@ -32,7 +32,7 @@ describe('floorRoom store', () => {
   });
 
   it('selected=false 的房间在入库时被剔除', () => {
-    const store = useFloorRoomStore();
+    const store = useBuildingStore();
     const parsed = parseDxfToResult(SAMPLE_DXF, '教学楼', 1);
     parsed.rooms[0].selected = false;
     const fid = store.importFloor({
@@ -46,7 +46,7 @@ describe('floorRoom store', () => {
   });
 
   it('removeFloor 删除楼层与房间', () => {
-    const store = useFloorRoomStore();
+    const store = useBuildingStore();
     const parsed = parseDxfToResult(SAMPLE_DXF, '教学楼', 1);
     store.importFloor({ buildingName: '教学楼', floorNo: 1, parsed, coordSource: 'local', transform });
     store.removeFloor('教学楼', 1);
@@ -54,7 +54,7 @@ describe('floorRoom store', () => {
   });
 
   it('UTM 图纸确认入库时直接写回指纹', () => {
-    const store = useFloorRoomStore();
+    const store = useBuildingStore();
     const parsed = parseDxfToResult(SAMPLE_DXF, '图书馆', 1);
     store.importFloor({ buildingName: '图书馆', floorNo: 1, parsed, coordSource: 'utm' });
     expect(store.buildingFingerprint('图书馆').centerUtm).toBeDefined();

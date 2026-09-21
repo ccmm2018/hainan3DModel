@@ -1,9 +1,20 @@
 /**
- * 样例 ASCII DXF：两个闭合房间（101 / 102），单位为毫米（局部坐标）。
- * 用于单元测试与离线联调，无需真实图纸文件。
+ * Mock 数据总入口（离线联调 / 单元测试使用）。
  *
- * 坐标来源应为 local（跨度 > 1000 → 毫米），解析后两个房间各匹配到文字标签。
+ * 合并原 sampleDxf.ts（样例 DXF 字符串）与 floorPlanMock.ts（演示数据注入），
+ * 统一由本文件对外导出，避免散落多文件。生产环境不应依赖本文件。
+ *
+ * 样例 DXF 含：
+ * - SAMPLE_DXF           两个闭合房间（101/102），毫米局部坐标
+ * - SAMPLE_DXF_4LAYER    4 图层结构（外轮廓/外墙/内墙/柱窗），毫米局部坐标
+ * - SAMPLE_DXF_ROOM_FIELDS 单房间 + MTEXT 6 行字段，验证 6 字段解析
  */
+
+// ---------------------------------------------------------------------------
+// 样例 DXF 字符串
+// ---------------------------------------------------------------------------
+
+/** 两个闭合房间（101 / 102），单位毫米（局部坐标）。 */
 export const SAMPLE_DXF = `0
 SECTION
 2
@@ -109,13 +120,13 @@ EOF
 `;
 
 /**
- * 样例 ASCII DXF（4 图层结构）：
+ * 4 图层结构：
  *   - 楼层外轮廓线（楼栋指纹唯一来源，1 条闭合多段线）
  *   - 内部结构外墙线（双线外墙，1 条闭合多段线）
  *   - 内部结构内墙线（2 个房间闭合轮廓 + 文字标签 101 / 102）
  *   - 柱子及窗户线（1 个柱）
  *   - 窗（1 个窗，测试用：明确只含「窗」的图层）
- * 单位毫米（局部坐标），用于单元测试与离线联调。
+ * 单位毫米（局部坐标）。
  */
 export const SAMPLE_DXF_4LAYER = `0
 SECTION
@@ -342,9 +353,9 @@ EOF
 `;
 
 /**
- * 样例 ASCII DXF：单房间 + 楼层外轮廓线，房间文本用 MTEXT 以 \P 拆成 6 行字段
- * （房间编码 / 房间号码 / 房间名称 / 部门名称 / 使用面积 / 建筑面积），用于验证
- * 6 字段解析。单位毫米（局部坐标）。
+ * 单房间 + 楼层外轮廓线，房间文本用 MTEXT 以 \P 拆成 6 行字段
+ * （房间编码 / 房间号码 / 房间名称 / 部门名称 / 使用面积 / 建筑面积）。
+ * 单位毫米（局部坐标）。
  */
 export const SAMPLE_DXF_ROOM_FIELDS = `0
 SECTION
@@ -447,3 +458,37 @@ ENDSEC
 0
 EOF
 `;
+
+// ---------------------------------------------------------------------------
+// 演示数据注入
+// ---------------------------------------------------------------------------
+
+import { parseDxfToResult } from '../utils/dxfParser';
+import { useBuildingStore } from '../stores/building';
+
+type BuildingStore = ReturnType<typeof useBuildingStore>;
+
+const MOCK_BUILDING = '教学楼';
+const MOCK_TRANSFORM = {
+  offset: [440000, 4100000] as [number, number],
+  rotation: 0,
+  scale: 0.001,
+};
+
+/**
+ * 用样例 DXF 在「教学楼」植入 1F / 2F 两层演示数据（含 local→UTM 变换，
+ * 因此会写回楼栋指纹），便于离线联调 FloorPlan2D 与指纹逻辑。生产环境不应调用。
+ */
+export function seedMockFloorPlans(store: BuildingStore): void {
+  for (const floorNo of [1, 2]) {
+    const parsed = parseDxfToResult(SAMPLE_DXF, MOCK_BUILDING, floorNo);
+    store.importFloor({
+      buildingName: MOCK_BUILDING,
+      floorNo,
+      fileName: 'mock.floorplan.dxf',
+      parsed,
+      coordSource: 'local',
+      transform: MOCK_TRANSFORM,
+    });
+  }
+}

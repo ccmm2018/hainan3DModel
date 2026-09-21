@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { parseDxfToResult, resolveLayerRole } from '../dxfParser';
-import { SAMPLE_DXF_4LAYER, SAMPLE_DXF, SAMPLE_DXF_ROOM_FIELDS } from '../../mock/sampleDxf';
+import { SAMPLE_DXF_4LAYER, SAMPLE_DXF, SAMPLE_DXF_ROOM_FIELDS } from '../../mock/mockData';
 
 describe('dxfParser 4 图层结构', () => {
   const r = parseDxfToResult(SAMPLE_DXF_4LAYER, '教学楼', 1);

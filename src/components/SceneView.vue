@@ -469,7 +469,7 @@ import ExportDialog from './ExportDialog.vue';
 import AllocationPanel from './AllocationPanel.vue';
 import DxfImport from './DxfImport.vue';
 import FloorPlan2D from './FloorPlan2D.vue';
-import { useFloorRoomStore } from '../stores/floorRoom';
+import { useBuildingStore } from '../stores/building';
 import { computeTotalArea, submitAllocation } from '../utils/allocation';
 
 type Status = 'loading-amap' | 'loading-model' | 'ready' | 'error';
@@ -503,16 +503,16 @@ const imageError = ref(false);
 // 房间管理弹窗状态
 const roomMgmtOpen = ref(false);
 
-// 楼层平面图（DXF 导入 + 2.5D 查看）——新增 floorRoom store（不动原 building store）
-const floorRoomStore = useFloorRoomStore();
+// 楼层平面图（DXF 导入 + 2.5D 查看）——新增 building store（不动原 building store）
+const buildingStore = useBuildingStore();
 const floorPlan2DVisible = ref(false);
 const dxfImportVisible = ref(false);
 const indoorEmptyVisible = ref(false);
 const floorPlanBuilding = ref('');
 const buildingNames = computed(() => Object.keys(buildingData.value));
 
-// 把当前生效的楼栋属性表注入 floorRoom store（指纹写回目标）
-watch(buildingData, (m) => floorRoomStore.setBuildingMap(m), { immediate: true });
+// 把当前生效的楼栋属性表注入 building store（指纹写回目标）
+watch(buildingData, (m) => buildingStore.setBuildingMap(m), { immediate: true });
 
 /** 唯一对接点：点楼弹窗里的【查看室内图纸】
  *  - 已有 Floor 数据 → 打开 2.5D 查看器
@@ -520,7 +520,7 @@ watch(buildingData, (m) => floorRoomStore.setBuildingMap(m), { immediate: true }
 function openIndoorPlan() {
   if (!selected.value?.name) return;
   floorPlanBuilding.value = selected.value.name;
-  if (floorRoomStore.hasFloors(selected.value.name)) {
+  if (buildingStore.hasFloors(selected.value.name)) {
     floorPlan2DVisible.value = true;
   } else {
     indoorEmptyVisible.value = true;

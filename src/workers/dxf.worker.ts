@@ -14,6 +14,7 @@ interface RequestMsg {
   encoding?: string;
   buildingName: string;
   floorNo: number;
+  expandBlocks?: boolean;
 }
 
 interface ResponseMsg {
@@ -40,10 +41,10 @@ async function decodeBuffer(buffer: ArrayBuffer, encoding: string | undefined): 
 }
 
 ctx.onmessage = async (ev: MessageEvent<RequestMsg>) => {
-  const { id, buffer, encoding, buildingName, floorNo } = ev.data;
+  const { id, buffer, encoding, buildingName, floorNo, expandBlocks } = ev.data;
   try {
     const text = await decodeBuffer(buffer, encoding);
-    const result = parseDxfToResult(text, buildingName, floorNo);
+    const result = parseDxfToResult(text, buildingName, floorNo, { expandBlocks });
     ctx.postMessage({ id, result });
   } catch (err) {
     ctx.postMessage({

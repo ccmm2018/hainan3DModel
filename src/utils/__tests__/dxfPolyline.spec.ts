@@ -1,0 +1,382 @@
+import { describe, expect, it } from 'vitest';
+import { parseDxfToResult } from '../dxfParser';
+
+// 老式 POLYLINE + VERTEX + SEQEND：顶点在 VERTEX 子实体中，必须被收集
+const SAMPLE_POLYLINE = `0
+SECTION
+2
+HEADER
+9
+$INSUNITS
+70
+4
+0
+ENDSEC
+0
+SECTION
+2
+TABLES
+0
+TABLE
+2
+LAYER
+0
+LAYER
+2
+内部结构内墙线
+70
+0
+62
+3
+0
+ENDTAB
+0
+ENDSEC
+0
+SECTION
+2
+ENTITIES
+0
+POLYLINE
+8
+内部结构内墙线
+70
+1
+66
+1
+0
+VERTEX
+8
+内部结构内墙线
+10
+500
+20
+500
+0
+VERTEX
+8
+内部结构内墙线
+10
+5000
+20
+500
+0
+VERTEX
+8
+内部结构内墙线
+10
+5000
+20
+4000
+0
+VERTEX
+8
+内部结构内墙线
+10
+500
+20
+4000
+0
+SEQEND
+0
+TEXT
+8
+内部结构内墙线
+10
+2750
+20
+2250
+1
+101
+0
+ENDSEC
+0
+EOF
+`;
+
+// 闭合判定走 bit512（flags & 512），bit0=0 且首尾不重合
+const SAMPLE_CLOSED_BIT512 = `0
+SECTION
+2
+HEADER
+9
+$INSUNITS
+70
+4
+0
+ENDSEC
+0
+SECTION
+2
+TABLES
+0
+TABLE
+2
+LAYER
+0
+LAYER
+2
+内部结构内墙线
+70
+0
+0
+ENDTAB
+0
+ENDSEC
+0
+SECTION
+2
+ENTITIES
+0
+LWPOLYLINE
+8
+内部结构内墙线
+70
+512
+10
+0
+20
+0
+10
+5000
+20
+0
+10
+5000
+20
+4000
+10
+0
+20
+4000
+0
+TEXT
+8
+内部结构内墙线
+10
+2750
+20
+2250
+1
+101
+0
+ENDSEC
+0
+EOF
+`;
+
+// 闭合判定走「首尾点距离 < 1e-4」，flags=0
+const SAMPLE_CLOSED_ENDPOINT = `0
+SECTION
+2
+HEADER
+9
+$INSUNITS
+70
+4
+0
+ENDSEC
+0
+SECTION
+2
+TABLES
+0
+TABLE
+2
+LAYER
+0
+LAYER
+2
+内部结构内墙线
+70
+0
+0
+ENDTAB
+0
+ENDSEC
+0
+SECTION
+2
+ENTITIES
+0
+LWPOLYLINE
+8
+内部结构内墙线
+70
+0
+10
+0
+20
+0
+10
+5000
+20
+0
+10
+5000
+20
+4000
+10
+0
+20
+4000
+10
+0.00001
+20
+0.00001
+0
+TEXT
+8
+内部结构内墙线
+10
+2750
+20
+2250
+1
+101
+0
+ENDSEC
+0
+EOF
+`;
+
+// 冻结图层（bit0=1）上的实体应被跳过
+const SAMPLE_FROZEN_LAYER = `0
+SECTION
+2
+HEADER
+9
+$INSUNITS
+70
+4
+0
+ENDSEC
+0
+SECTION
+2
+TABLES
+0
+TABLE
+2
+LAYER
+0
+LAYER
+2
+内部结构内墙线
+70
+1
+0
+ENDTAB
+0
+ENDSEC
+0
+SECTION
+2
+ENTITIES
+0
+LWPOLYLINE
+8
+内部结构内墙线
+70
+1
+10
+0
+20
+0
+10
+5000
+20
+0
+10
+5000
+20
+4000
+10
+0
+20
+4000
+0
+TEXT
+8
+内部结构内墙线
+10
+2750
+20
+2250
+1
+101
+0
+ENDSEC
+0
+EOF
+`;
+
+// 仅有 HEADER $EXTMIN/$EXTMAX、无实体：包围盒应由头段范围回退得到
+const SAMPLE_EXTENTS_ONLY = `0
+SECTION
+2
+HEADER
+9
+$INSUNITS
+70
+4
+9
+$EXTMIN
+10
+0
+20
+0
+9
+$EXTMAX
+10
+15000
+20
+9000
+0
+ENDSEC
+0
+SECTION
+2
+ENTITIES
+0
+ENDSEC
+0
+EOF
+`;
+
+describe('dxfParser 老式 POLYLINE / 闭合三选一 / 头段 / 冻结图层', () => {
+  it('POLYLINE + VERTEX + SEQEND 收集到闭合房间', () => {
+    const r = parseDxfToResult(SAMPLE_POLYLINE, '教学楼', 1);
+    expect(r.rooms.length).toBe(1);
+    expect(r.rooms[0].code).toBe('101');
+    // 4 个顶点
+    expect(r.rooms[0].polygon.length).toBe(4);
+  });
+
+  it('闭合判定走 flags & 512（bit0=0 且首尾不重合）', () => {
+    const r = parseDxfToResult(SAMPLE_CLOSED_BIT512, '教学楼', 1);
+    expect(r.rooms.length).toBe(1);
+    expect(r.rooms[0].code).toBe('101');
+  });
+
+  it('闭合判定走首尾点距离 < 1e-4（flags=0）', () => {
+    const r = parseDxfToResult(SAMPLE_CLOSED_ENDPOINT, '教学楼', 1);
+    expect(r.rooms.length).toBe(1);
+    expect(r.rooms[0].code).toBe('101');
+  });
+
+  it('冻结图层（bit0=1）上的实体被跳过', () => {
+    const r = parseDxfToResult(SAMPLE_FROZEN_LAYER, '教学楼', 1);
+    expect(r.rooms.length).toBe(0);
+    expect(r.warnings.some((w) => w.code === 'NO_ROOM')).toBe(true);
+  });
+
+  it('无实体时包围盒回退到 HEADER $EXTMIN/$EXTMAX', () => {
+    const r = parseDxfToResult(SAMPLE_EXTENTS_ONLY, '教学楼', 1);
+    expect(r.bbox.minX).toBe(0);
+    expect(r.bbox.minY).toBe(0);
+    expect(r.bbox.maxX).toBe(15000);
+    expect(r.bbox.maxY).toBe(9000);
+    expect(r.unit).toBe('mm');
+  });
+});

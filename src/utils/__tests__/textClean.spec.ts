@@ -4,12 +4,37 @@ import {
   normalizeLabel,
   parseRoomFields,
   inferRoomPurpose,
+  splitMtext,
 } from '../textClean';
 
 describe('textClean', () => {
   it('cleanMtext 去除格式控制符', () => {
     expect(cleanMtext('{\\fSimSun|b0|i0;101}')).toBe('101');
     expect(cleanMtext('机房\\P面积 30')).toBe('机房 面积 30');
+  });
+
+  describe('splitMtext（MTEXT 多行字段候选）', () => {
+    it('去除各类格式码：字体/字高/对齐/字宽/颜色/下划线/花括号', () => {
+      const raw = '{\\f宋体|b0|i0;房间编码: A101}\\H2.5x;\\P\\A1;\\W1.0;\\C1;\\L正文\\l';
+      const lines = splitMtext(raw);
+      expect(lines).toEqual(['房间编码: A101', '正文']);
+    });
+
+    it('\\P 视为换行，每行一个独立字段候选', () => {
+      const raw = '房间编码: A101\\P房间号码：101\\P房间名称 教室';
+      const lines = splitMtext(raw);
+      expect(lines).toEqual(['房间编码: A101', '房间号码：101', '房间名称 教室']);
+    });
+
+    it('裸 {} 与混合换行被清理，空行被过滤', () => {
+      const raw = '{\\fSimSun;101}\n\n\\P\\P   \n房间名称 教室';
+      const lines = splitMtext(raw);
+      expect(lines).toEqual(['101', '房间名称 教室']);
+    });
+
+    it('单行 MTEXT 返回单元素数组', () => {
+      expect(splitMtext('房间 101')).toEqual(['房间 101']);
+    });
   });
 
   it('normalizeLabel 取首行', () => {

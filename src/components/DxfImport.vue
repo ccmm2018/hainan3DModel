@@ -36,6 +36,8 @@ const parsing = ref<boolean>(false);
 const coordSource = ref<CoordSource>('local');
 const transform = ref<FloorTransform | undefined>(undefined);
 const encoding = ref<string>('auto');
+/** 是否展开块参照（INSERT/ATTRIB）。默认 false：整体跳过块参照（家具/洁具/门窗等多为块，是噪音来源） */
+const expandBlocks = ref<boolean>(false);
 
 const visible = computed({
   get: () => props.modelValue,
@@ -89,24 +91,30 @@ async function decodeBuffer(buf: ArrayBuffer, enc: string): Promise<string> {
   return decodeDxf(buf);
 }
 
-async function parseDxf(buffer: ArrayBuffer, enc: string, bn: string, fn: number): Promise<DxfParseResult> {
+async function parseDxf(
+  buffer: ArrayBuffer,
+  enc: string,
+  bn: string,
+  fn: number,
+  expand: boolean,
+): Promise<DxfParseResult> {
   const w = ensureWorker();
   if (!w) {
     const mod = await import('../utils/dxfParser');
     const text = await decodeBuffer(buffer, enc);
-    return mod.parseDxfToResult(text, bn, fn);
+    return mod.parseDxfToResult(text, bn, fn, { expandBlocks: expand });
   }
   return new Promise<DxfParseResult>((resolve, reject) => {
     const id = ++reqId;
     pending.set(id, (r, e) => (r ? resolve(r) : reject(new Error(e ?? '解析失败'))));
-    w.postMessage({ id, buffer, encoding: enc, buildingName: bn, floorNo: fn });
+    w.postMessage({ id, buffer, encoding: enc, buildingName: bn, floorNo: fn, expandBlocks: expand });
     window.setTimeout(() => {
       if (pending.has(id)) {
         pending.delete(id);
         import('../utils/dxfParser')
           .then(async (m) => {
             const text = await decodeBuffer(buffer, enc);
-            resolve(m.parseDxfToResult(text, bn, fn));
+            resolve(m.parseDxfToResult(text, bn, fn, { expandBlocks: expand }));
           })
           .catch(reject);
       }
@@ -127,7 +135,7 @@ function onFileChange(uploadFile: UploadFile) {
   preview.value = null;
   raw
     .arrayBuffer()
-    .then((buf) => parseDxf(buf, encoding.value, buildingName.value, floorNo.value))
+    .then((buf) => parseDxf(buf, encoding.value, buildingName.value, floorNo.value, expandBlocks.value))
     .then((res) => {
       preview.value = res;
       coordSource.value = res.coordSource;
@@ -262,6 +270,12 @@ onBeforeUnmount(() => {
             <el-option label="GB2312" value="gb2312" />
           </el-select>
           <span class="dxf-tip">非 UTF-8 图纸（如 AutoCAD 中文环境导出）请手动指定</span>
+        </div>
+
+        <div class="dxf-row dxf-row--wrap">
+          <label class="dxf-label">块参照</label>
+          <el-checkbox v-model="expandBlocks">展开块参照（INSERT/ATTRIB）</el-checkbox>
+          <span class="dxf-tip">默认跳过块参照（家具/洁具/门窗等多为块，是噪音来源）；勾选后保留块属性文字</span>
         </div>
 
         <AnchorPicker

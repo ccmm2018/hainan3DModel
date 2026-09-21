@@ -7,15 +7,41 @@
  * 不使用 any。
  */
 
-/** 去除 MTEXT 常见格式控制符（字体/字高/字宽/颜色控制串、段落、花括号等） */
+/**
+ * 去除 MTEXT 格式控制符，但保留 \P 段落符（后续再决定转为空格或换行）。
+ * 覆盖规则 4 所列全部格式码：
+ *   {\f字体;...}  \H..x;  \A..;  \W..;  \C..;  （以 ; 结尾的控制串）
+ *   \L..\l        下划线开/关（无分号）
+ *   裸 {}         分组花括号
+ *
+ * 注意：必须先处理 \P 段落符，否则通用控制串正则会把相邻的「\P\A1;」整段吞掉，
+ * 导致 \P 丢失、无法正确换行。
+ */
+function stripMtextCodes(raw: string): string {
+  const withBreaks = raw.replace(/\\P/gi, '\n'); // 先固化段落符为换行
+  return withBreaks
+    .replace(/\\[A-Za-z][^;{}]*;/g, '') // \f \H \W \A \C ... 以 ; 结尾的控制串
+    .replace(/\\[LlOo]/g, '') // 下划线 / 上划线 开关 \L \l \O \o（无分号）
+    .replace(/[{}]/g, ''); // 花括号分组
+}
+
+/** 单行清洗：去格式码后，\P 视作空格、空白折叠（TEXT / 单条标签用） */
 export function cleanMtext(raw: string): string {
-  return raw
-    .replace(/\\[fFHWC][^;\\]*;/g, '') // \f 字体 / \H 字高 / \W 字宽 / \C 颜色 控制串
-    .replace(/\\P/gi, ' ') // 段落
-    .replace(/[{}]/g, '') // 花括号
-    .replace(/\\[A-Za-z]/g, '') // 其余单字母控制符
+  return stripMtextCodes(raw)
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+/**
+ * 把一段 MTEXT 拆成多行候选字段：去格式码后按 \P（或 \n / \r\n）切成多行，
+ * 每行视为一个独立字段候选。
+ * 现实兼容：一个 MTEXT 块常以 \P 分隔房间 6 字段，需逐行解析。
+ */
+export function splitMtext(raw: string): string[] {
+  return stripMtextCodes(raw)
+    .split(/\r\n|\r|\n/)
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
 }
 
 /** 归一化为单行可读标签（先取首行，再清洗，避免空白折叠吞掉换行） */
@@ -70,13 +96,13 @@ const PURPOSE_KEYWORDS: ReadonlyArray<readonly [RegExp, string]> = [
 ];
 
 /** 从文本中提取首个浮点数（剥离 ㎡/m²/m2/平方米 等单位后缀） */
-function parseArea(raw: string): number {
+export function parseArea(raw: string): number {
   const m = raw.match(/-?\d+(?:\.\d+)?/);
   return m ? Number(m[0]) : 0;
 }
 
 /** 字段标签 → 正则（捕获标签后的取值部分） */
-const FIELD_PATTERNS: ReadonlyArray<readonly [keyof RoomFields, RegExp]> = [
+export const FIELD_PATTERNS: ReadonlyArray<readonly [keyof RoomFields, RegExp]> = [
   [
     'code',
     /^(?:房间编码|编码|房号编码|room[-\s_]?code|code)\s*[:：]?\s*(.*)$/i,

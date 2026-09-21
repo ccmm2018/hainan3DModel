@@ -9,8 +9,9 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import { ElMessage, type UploadFile, type UploadRawFile } from 'element-plus';
 import { useBuildingStore } from '../stores/building';
 import AnchorPicker from './AnchorPicker.vue';
-import { decodeDxf } from '../utils/coordinate';
+import { decodeDxf, fingerprintFromOutline } from '../utils/coordinate';
 import type { CoordSource, DxfParseResult, FloorTransform } from '../types/cad';
+import type { MatchResult } from '../utils/matcher';
 
 const props = withDefaults(
   defineProps<{
@@ -49,6 +50,30 @@ const suggestedCenter = computed<[number, number] | null>(() => {
   const fp = store.buildingFingerprint(buildingName.value);
   return fp.centerUtm ?? null;
 });
+
+/**
+ * 楼栋自动匹配：仅当图纸为 UTM 且已识别到「楼层外轮廓线」时，
+ * 用外轮廓指纹（中心 / 面积 / 方位）在楼栋库中比对。
+ */
+const matchResult = computed<MatchResult | null>(() => {
+  const p = preview.value;
+  if (!p || !p.floorOutline || coordSource.value !== 'utm') return null;
+  const fpRaw = fingerprintFromOutline(p.floorOutline.polygon);
+  if (!fpRaw.centerUtm) return null;
+  return store.matchByFingerprint({
+    centerUtm: fpRaw.centerUtm,
+    area: fpRaw.footprintArea ?? 0,
+    azimuth: fpRaw.azimuth ?? 0,
+  });
+});
+
+function applyMatch() {
+  const r = matchResult.value;
+  if (r && r.candidates.length === 1) {
+    buildingName.value = r.candidates[0];
+    ElMessage.success(`已采用自动匹配楼栋：${r.candidates[0]}`);
+  }
+}
 
 watch(
   () => props.modelValue,
@@ -306,6 +331,30 @@ onBeforeUnmount(() => {
           :closable="false"
           title="未识别到「楼层外轮廓线」图层，将改用房间外包络估算楼栋指纹（精度有限）"
         />
+
+        <el-alert
+          v-if="matchResult"
+          class="dxf-preview"
+          :type="matchResult.status === 'strong' ? 'success' : matchResult.status === 'weak' ? 'warning' : 'error'"
+          :closable="false"
+        >
+          <template #title>
+            <span>楼栋自动匹配（{{ matchResult.status === 'strong' ? '强匹配' : matchResult.status === 'weak' ? '弱匹配' : '未匹配' }}）：</span>
+            <span v-if="matchResult.candidates.length">{{ matchResult.candidates.join('、') }}</span>
+            <span v-else>无</span>
+            <el-button
+              v-if="matchResult.candidates.length === 1"
+              link
+              type="primary"
+              size="small"
+              style="margin-left: 8px"
+              @click="applyMatch"
+            >采用</el-button>
+          </template>
+          <template v-if="matchResult.reasons.length" #default>
+            <div v-for="(rs, i) in matchResult.reasons" :key="i" class="dxf-match__reason">{{ rs }}</div>
+          </template>
+        </el-alert>
 
         <div class="dxf-roomlist">
           <div

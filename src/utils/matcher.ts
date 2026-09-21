@@ -4,6 +4,7 @@
  */
 
 import { dist2, pointInPolygon, type Pt } from './geometry';
+import type { BuildingDataMap, BuildingProps } from '../data/buildingData';
 
 export interface LabelText {
   pos: Pt;
@@ -87,4 +88,193 @@ export function matchFieldLines(
     }
     return best ? [best] : [];
   });
+}
+
+// ---------------------------------------------------------------------------
+// 楼栋匹配：指纹（中心 / 面积 / 方位）三维几何比对
+// 指纹只取自「楼层外轮廓线」那 1 条闭合线；房间闭合轮廓是业务内容，不参与匹配。
+// ---------------------------------------------------------------------------
+
+/** 匹配阈值（强匹配需三项全满足） */
+export const MATCH_CENTER_M = 50; // 中心距离 ≤ 50m
+export const MATCH_AREA_RATIO = 0.1; // 面积差异 ≤ 10%
+export const MATCH_AZIMUTH_DEG = 5; // 方位角差异 ≤ 5°
+
+/** none 诊断阈值（按优先级） */
+const NONE_CENTER_M = 10000; // ① 中心距离 > 10000m
+const NONE_AREA_RATIO = 0.5; // ② 面积差异 > 50%
+const NONE_AZIMUTH_DEG = 30; // ③ 方位角差异 > 30°
+
+/**
+ * 楼栋指纹：由「楼层外轮廓线」那 1 条闭合线算出。
+ * - centerUtm：轮廓质心（UTM 49N，米）
+ * - area：轮廓面积（㎡）
+ * - azimuth：轮廓主轴方位角（度，[0,360) 正北顺时针）
+ */
+export interface Fingerprint {
+  centerUtm: [number, number];
+  area: number;
+  azimuth: number;
+}
+
+/** 单个楼栋的匹配明细 */
+export interface BuildingMatch {
+  /** 楼栋名（= BuildingProps.name = GLB 节点名） */
+  name: string;
+  /** 中心距离（米） */
+  centerDist: number;
+  /** 面积相对差异（0~1） */
+  areaDiff: number;
+  /** 方位角差异（度，[0,180]） */
+  azimuthDiff: number;
+  /** 三项指标的判定结果 */
+  metrics: { center: boolean; area: boolean; azimuth: boolean };
+}
+
+/** 匹配结果 */
+export interface MatchResult {
+  /** strong：三项全满足且唯一候选；weak：满足 1~2 项或存在多个候选；none：全不满足 */
+  status: 'strong' | 'weak' | 'none';
+  /** 命中楼栋名（strong 1 个；weak 1 或多个；none 为空） */
+  candidates: string[];
+  /** 候选楼栋匹配明细 */
+  matches: BuildingMatch[];
+  /** 诊断原因（none 时按优先级给 1 条；weak 时给出未满足项说明） */
+  reasons: string[];
+}
+
+/** 从 BuildingProps 索引签名读取楼栋指纹；字段不齐（缺 centerUtm/footprintArea/azimuth）返回 null */
+export function readBuildingFingerprint(b: BuildingProps): Fingerprint | null {
+  const rec = b as Record<string, unknown>;
+  const c = rec['centerUtm'];
+  const area = rec['footprintArea'];
+  const az = rec['azimuth'];
+  if (
+    !Array.isArray(c) ||
+    c.length !== 2 ||
+    typeof c[0] !== 'number' ||
+    typeof c[1] !== 'number' ||
+    typeof area !== 'number' ||
+    !Number.isFinite(area) ||
+    typeof az !== 'number' ||
+    !Number.isFinite(az)
+  ) {
+    return null;
+  }
+  return {
+    centerUtm: [c[0], c[1]],
+    area,
+    azimuth: az,
+  };
+}
+
+/** 两方位角的最小夹角（度，[0,180]） */
+export function angleDiffDeg(a: number, b: number): number {
+  let d = Math.abs(((a - b) % 360 + 360) % 360);
+  if (d > 180) d = 360 - d;
+  return d;
+}
+
+function centerDistance(a: [number, number], b: [number, number]): number {
+  const dx = a[0] - b[0];
+  const dy = a[1] - b[1];
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
+/** 面积相对差异：|a-b| / max(a,b)（避免除零） */
+function areaDiffRatio(a: number, b: number): number {
+  const m = Math.max(a, b, 1e-9);
+  return Math.abs(a - b) / m;
+}
+
+/** 按优先级诊断「全不满足」的原因 */
+function diagnoseNone(m: BuildingMatch): string[] {
+  if (m.centerDist > NONE_CENTER_M) {
+    return ['中心距离超过 10000m，坐标系可能不是 UTM，请改用手动配准。'];
+  }
+  if (m.areaDiff > NONE_AREA_RATIO) {
+    return ['楼层外轮廓面积差异超过 50%，可能画错（误把走廊 / 房间当外轮廓）。'];
+  }
+  if (m.azimuthDiff > NONE_AZIMUTH_DEG) {
+    return ['方位角差异超过 30°，请确认是否按真实方位绘制。'];
+  }
+  return ['未匹配到楼栋，请手动指定。'];
+}
+
+/** 弱匹配时列出未满足的指标 */
+function describeWeak(m: BuildingMatch): string[] {
+  const fails: string[] = [];
+  if (!m.metrics.center) fails.push(`中心距离 ${Math.round(m.centerDist)}m（阈值 ≤${MATCH_CENTER_M}m）`);
+  if (!m.metrics.area) fails.push(`面积差异 ${(m.areaDiff * 100).toFixed(0)}%（阈值 ≤${MATCH_AREA_RATIO * 100}%）`);
+  if (!m.metrics.azimuth) fails.push(`方位角差异 ${m.azimuthDiff.toFixed(1)}°（阈值 ≤${MATCH_AZIMUTH_DEG}°）`);
+  return [`部分匹配「${m.name}」：${fails.join('；')}。`];
+}
+
+/**
+ * 把「楼层外轮廓指纹」与楼栋库比对，返回强 / 弱 / 无匹配。
+ *
+ * @param fp        解析得到的楼层外轮廓指纹（中心 / 面积 / 方位）
+ * @param buildings 楼栋属性表（Record<节点名, BuildingProps>），遍历 Object.values
+ *
+ * 规则：
+ * - 遍历每个楼栋，读取其挂载的指纹（centerUtm / footprintArea / azimuth）。
+ * - 三项指标：中心距离 ≤50m、面积差异 ≤10%、方位角差异 ≤5°。
+ * - strong：三项全满足且唯一候选。
+ * - weak  ：满足 1~2 项，或多个候选同时满足三项。
+ * - none  ：全不满足，按优先级诊断原因。
+ * 房间闭合轮廓不参与匹配。
+ */
+export function matchBuildings(fp: Fingerprint, buildings: BuildingDataMap): MatchResult {
+  const scored: Array<BuildingMatch & { score: number }> = [];
+  for (const b of Object.values(buildings)) {
+    const bf = readBuildingFingerprint(b);
+    if (!bf) continue; // 未录入指纹的楼栋无法参与几何比对
+    const centerDist = centerDistance(fp.centerUtm, bf.centerUtm);
+    const areaDiff = areaDiffRatio(fp.area, bf.area);
+    const azimuthDiff = angleDiffDeg(fp.azimuth, bf.azimuth);
+    const center = centerDist <= MATCH_CENTER_M;
+    const area = areaDiff <= MATCH_AREA_RATIO;
+    const azimuth = azimuthDiff <= MATCH_AZIMUTH_DEG;
+    scored.push({
+      name: b.name,
+      centerDist,
+      areaDiff,
+      azimuthDiff,
+      metrics: { center, area, azimuth },
+      score: (center ? 1 : 0) + (area ? 1 : 0) + (azimuth ? 1 : 0),
+    });
+  }
+
+  if (scored.length === 0) {
+    return {
+      status: 'none',
+      candidates: [],
+      matches: [],
+      reasons: ['楼栋尚未录入指纹信息（centerUtm / azimuth / footprintArea），无法自动匹配，请手动指定。'],
+    };
+  }
+
+  const full = scored.filter((s) => s.score === 3);
+  if (full.length === 1) {
+    return { status: 'strong', candidates: [full[0].name], matches: full, reasons: [] };
+  }
+  if (full.length > 1) {
+    return {
+      status: 'weak',
+      candidates: full.map((s) => s.name),
+      matches: full,
+      reasons: ['多个楼栋同时满足中心 / 面积 / 方位匹配，请确认归属。'],
+    };
+  }
+
+  // 无三项全中：取分数最高、中心最近者
+  const best = [...scored].sort((x, y) => {
+    if (y.score !== x.score) return y.score - x.score;
+    return x.centerDist - y.centerDist;
+  })[0];
+
+  if (best.score === 0) {
+    return { status: 'none', candidates: [], matches: [best], reasons: diagnoseNone(best) };
+  }
+  return { status: 'weak', candidates: [best.name], matches: [best], reasons: describeWeak(best) };
 }

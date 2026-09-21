@@ -30,6 +30,7 @@ import {
   fingerprintFromOutline,
 } from '../utils/coordinate';
 import { utm49nToGcj02 } from '../utils/coordTransform';
+import { matchBuildings, type Fingerprint, type MatchResult } from '../utils/matcher';
 import { polygonArea, polygonCentroid, transformPolygon, type Pt } from '../utils/geometry';
 
 function floorKey(buildingName: string, floorNo: number): string {
@@ -105,6 +106,8 @@ export const useBuildingStore = defineStore('building', () => {
   };
 
   const buildingNames = computed(() => Object.keys(buildingMap.value));
+  /** 当前生效的完整楼栋属性表（供楼栋匹配等需要遍历全部楼栋的场景） */
+  const buildingData = computed<BuildingDataMap>(() => buildingMap.value);
 
   // ---- actions ----
   function setBuildingMap(map: BuildingDataMap): void {
@@ -224,11 +227,20 @@ export const useBuildingStore = defineStore('building', () => {
     if (room) room.selected = selected;
   }
 
+  /**
+   * 用「楼层外轮廓指纹」在楼栋库中匹配楼栋。
+   * 仅在坐标为 UTM（可直接算出 UTM 指纹）或已提供 local→UTM 变换时才有意义。
+   */
+  function matchByFingerprint(fp: Fingerprint): MatchResult {
+    return matchBuildings(fp, buildingMap.value);
+  }
+
   return {
     buildingMap,
     floors,
     rooms,
     buildingNames,
+    buildingData,
     floorsOf,
     hasFloors,
     getFloor,
@@ -239,5 +251,6 @@ export const useBuildingStore = defineStore('building', () => {
     removeFloor,
     setRoomUseStatus,
     setRoomSelected,
+    matchByFingerprint,
   };
 });

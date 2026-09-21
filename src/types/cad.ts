@@ -54,6 +54,12 @@ export type FloorPlanLayerRole =
 export interface ClosedPolyline {
   /** 顶点（DXF 局部坐标） */
   polygon: [number, number][];
+  /**
+   * 内洞（柱洞 / 内凹），**预留字段，MVP 解析器不填充**。
+   * 每个元素是一条内环（逆时针）；后续版本用于支持带洞多边形。
+   * 目前前端仅提取外环，命中带洞多边形时计入告警、按外环尽力处理。
+   */
+  holes?: [number, number][][];
   /** 质心（局部坐标） */
   centroid: [number, number];
   /** 面积（DXF 原始单位平方） */
@@ -180,6 +186,11 @@ export interface ParsedRoom {
   buildArea: number;
   /** 轮廓（DXF 局部坐标） */
   polygon: [number, number][];
+  /**
+   * 轮廓内洞（柱洞 / 内凹），**预留字段，MVP 解析器不填充**。
+   * 与 Room.outline / ClosedPolyline.holes 对齐，后续版本用于支持带洞多边形。
+   */
+  holes?: [number, number][][];
   /** 质心（局部坐标） */
   centroid: [number, number];
   /** 面积（DXF 原始单位平方，多边形几何面积） */

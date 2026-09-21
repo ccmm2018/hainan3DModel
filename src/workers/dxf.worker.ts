@@ -14,6 +14,11 @@
  *   - unit：长度单位（m | cm | mm | unknown，自动推断）
  *   - rooms：extractRooms 产出的房间候选
  * 这些字段即导入向导「解析」步骤向用户呈现的核心数据。
+ *
+ * 能力边界：本 Worker 仅做「MVP 纯前端解析」——标准 DXF / 直线房间（LWPOLYLINE·POLYLINE）
+ * / TEXT·MTEXT / GBK·UTF-8·UTF-16 / 单文件 ≤20MB。命中不支持项（天正未转 T3 的私有实体、
+ * SPLINE·ELLIPSE 曲线房间、深层嵌套块、>20MB 图纸、带洞多边形）时，前端应拒解析并改走
+ * 后端兜底（预留接口 POST /api/cad/parse，客户端封装见 src/utils/cadParseApi.ts）。
  */
 
 import { parseDxfToResult } from '../utils/dxfParser';

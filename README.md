@@ -160,6 +160,45 @@ src/
 - **双击进入室内视角**：双击建筑 → 拉近视角 + 建筑半透明 + 预留楼层组；`ESC` 退出并恢复视角。
 - 配置：`indoorZoom` / `indoorPitch` / `defaultFloorCount`。
 
+## DXF 解析引擎能力边界
+
+导入向导使用**纯前端解析器**（`src/utils/dxfParser.ts` + `src/workers/dxf.worker.ts`），
+在浏览器内完成 DXF → 楼层平面图 的转换。为明确预期，引擎只保证以下能力；其余情形
+走**后端解析服务兜底**（预留接口 `POST /api/cad/parse`，客户端封装见 `src/utils/cadParseApi.ts`）。
+
+### MVP 纯前端解析 · 保证支持
+
+| 项 | 说明 |
+| --- | --- |
+| 标准 DXF | R12~R2018 的组码-值文本格式（ASCII） |
+| 直线房间 | `LWPOLYLINE` / `POLYLINE`（VERTEX+SEQEND），不含曲线段 |
+| 字段 | `TEXT` / `MTEXT`（MTEXT 自动去格式码、按 `\P` 拆行） |
+| 编码 | `GBK` / `UTF-8` / `UTF-16LE`，自动探测 |
+| 体积 | 单文件 ≤ **20MB** |
+
+### 不支持 · 走后端解析服务兜底
+
+| 项 | 说明 | 兜底路径 |
+| --- | --- | --- |
+| 天正私有实体 | 未转 T3 的 `ACAD_XRECORD` / 自定义图元 | `POST /api/cad/parse` |
+| 曲线房间 | `SPLINE` / `ELLIPSE`（MVP 仅提取直线段，曲线段计入告警、不静默丢弃） | `POST /api/cad/parse` |
+| 深层嵌套块 | `INSERT` 嵌套 `INSERT` | `POST /api/cad/parse` |
+| 超大图纸 | 单文件 > 20MB | `POST /api/cad/parse` |
+| 带洞多边形 | 柱洞 / 内凹（数据结构已预留 `holes` 字段，后续版本支持） | 前端按外环尽力处理，后续版本接入后端 |
+
+> 命中「不支持」项时，导入向导应提示用户：转 T3 / 拆图后重试，或等待后端解析服务上线。
+
+### 预留接口：`POST /api/cad/parse`
+
+前端预留的后端兜底契约（当前尚未部署，调用将抛出明确错误）：
+
+- **Request**：`multipart/form-data` 或 `application/json`
+  - `file`（DXF 字节，必填）
+  - `encoding?`（指定编码，可选，后端自动探测）
+  - `buildingName?` / `floorNo?`（批量上传归属，可选）
+- **Response**：与前端 `DxfParseResult` 对齐的 `{ result: DxfParseResult, engine?: string }`
+- 客户端封装：`src/utils/cadParseApi.ts` 的 `parseCadViaBackend()`
+
 ## 打印 / 导出
 
 点击右上角「打印 / 导出」打开对话框，可配置：

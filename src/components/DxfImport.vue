@@ -365,6 +365,28 @@ const selectedCount = computed(
   () => activeItem.value?.result?.rooms.filter((r) => r.selected).length ?? 0,
 );
 
+// ---- 步骤 3 解析结果摘要（extractRooms 输出 DxfParseResult） ----
+const parseResult = computed(() => activeItem.value?.result ?? null);
+/** 生效的坐标来源：用户在校验步骤的覆盖优先，否则取解析推断值 */
+const effectiveCoordSource = computed(
+  () => activeItem.value?.coordSource ?? activeItem.value?.result?.coordSource,
+);
+const unitLabel = computed(() => {
+  const u = parseResult.value?.unit;
+  return u === 'mm' ? '毫米' : u === 'cm' ? '厘米' : u === 'm' ? '米' : '未知';
+});
+const coordLabel = computed(() => {
+  const c = effectiveCoordSource.value;
+  return c === 'utm' ? 'UTM 49N（米）' : c === 'local' ? '局部坐标' : '未知';
+});
+const bboxLabel = computed(() => {
+  const b = parseResult.value?.bbox;
+  if (!b) return '—';
+  const w = b.maxX - b.minX;
+  const h = b.maxY - b.minY;
+  return `${w.toFixed(1)} × ${h.toFixed(1)}（源单位）`;
+});
+
 // ---- 向导导航 ----
 const canNext = computed(() => {
   if (step.value === 0) return doneItems.value.length > 0;
@@ -545,32 +567,79 @@ onBeforeUnmount(() => {
         </div>
       </section>
 
-      <!-- 步骤 2 解析 -->
+      <!-- 步骤 3 解析（Worker 内 extractRooms 输出 DxfParseResult：warnings / bbox / coordSource / unit） -->
       <section v-else-if="step === 2 && activeItem?.result" class="dxf-panel">
-        <div class="dxf-roomlist">
-          <div
-            v-for="(room, idx) in activeItem.result.rooms"
-            :key="room.id"
-            class="dxf-room"
-            :class="{ 'dxf-room--off': !room.selected }"
-          >
-            <el-checkbox v-model="room.selected" />
-            <span class="dxf-room__no">{{ room.code || `房间${idx + 1}` }}</span>
-            <span class="dxf-room__name">{{ room.name }}</span>
-            <span
-              class="dxf-room__tag"
-              :class="room.inspectStatus === 'highlight' ? 'is-warn' : ''"
-            >{{ room.inspectStatus === 'highlight' ? '需复核' : '正常' }}</span>
-            <span class="dxf-room__area">{{ room.area.toFixed(1) }}</span>
+        <!-- 解析结果摘要：rooms / unit / coordSource / bbox / layers -->
+        <div class="dxf-parse-summary">
+          <div class="dxf-parse-summary__title">解析结果（extractRooms 输出）</div>
+          <div class="dxf-parse-summary__grid">
+            <div class="dxf-parse-cell">
+              <span class="dxf-parse-cell__k">识别房间</span>
+              <span class="dxf-parse-cell__v">{{ activeItem.result.rooms.length }} 个</span>
+            </div>
+            <div class="dxf-parse-cell">
+              <span class="dxf-parse-cell__k">单位</span>
+              <span class="dxf-parse-cell__v">{{ unitLabel }}</span>
+            </div>
+            <div class="dxf-parse-cell">
+              <span class="dxf-parse-cell__k">坐标来源</span>
+              <span class="dxf-parse-cell__v">{{ coordLabel }}</span>
+            </div>
+            <div class="dxf-parse-cell">
+              <span class="dxf-parse-cell__k">包围盒尺寸</span>
+              <span class="dxf-parse-cell__v">{{ bboxLabel }}</span>
+            </div>
+            <div class="dxf-parse-cell">
+              <span class="dxf-parse-cell__k">识别图层</span>
+              <span class="dxf-parse-cell__v">{{ activeItem.result.layers.length }} 个</span>
+            </div>
           </div>
         </div>
-        <el-alert
-          v-if="!activeItem.result.rooms.length"
-          class="dxf-preview"
-          type="warning"
-          :closable="false"
-          title="未解析到房间轮廓，请检查 DXF 是否含闭合的「内部结构内墙线」图层"
-        />
+
+        <!-- 解析告警（DxfParseResult.warnings） -->
+        <div v-if="activeItem.result.warnings.length" class="dxf-parse-warn">
+          <div class="dxf-parse-warn__title">解析告警（{{ activeItem.result.warnings.length }} 条）</div>
+          <div
+            v-for="(w, i) in activeItem.result.warnings"
+            :key="i"
+            class="dxf-parse-warn__item"
+            :class="`is-${w.level}`"
+          >
+            <span class="dxf-parse-warn__badge">{{ w.code }}</span>
+            <span class="dxf-parse-warn__msg">{{ w.message }}</span>
+          </div>
+        </div>
+
+        <!-- 房间清单（勾选需入库；extractRooms 产物） -->
+        <div class="dxf-parse-rooms">
+          <div class="dxf-parse-rooms__head">
+            <span>房间清单（勾选需入库，已选 {{ selectedCount }} / {{ activeItem.result.rooms.length }}）</span>
+          </div>
+          <div class="dxf-roomlist">
+            <div
+              v-for="(room, idx) in activeItem.result.rooms"
+              :key="room.id"
+              class="dxf-room"
+              :class="{ 'dxf-room--off': !room.selected }"
+            >
+              <el-checkbox v-model="room.selected" />
+              <span class="dxf-room__no">{{ room.code || `房间${idx + 1}` }}</span>
+              <span class="dxf-room__name">{{ room.name }}</span>
+              <span
+                class="dxf-room__tag"
+                :class="room.inspectStatus === 'partial' ? 'is-warn' : ''"
+              >{{ room.inspectStatus === 'partial' ? '待补填' : room.inspectStatus === 'highlight' ? '需复核' : '正常' }}</span>
+              <span class="dxf-room__area">{{ room.area.toFixed(1) }}</span>
+            </div>
+          </div>
+          <el-alert
+            v-if="!activeItem.result.rooms.length"
+            class="dxf-preview"
+            type="warning"
+            :closable="false"
+            title="未解析到房间轮廓，请检查 DXF 是否含闭合的「内部结构内墙线」图层"
+          />
+        </div>
       </section>
 
       <!-- 步骤 3 预览确认 -->
@@ -774,6 +843,71 @@ onBeforeUnmount(() => {
   padding: 5px 0;
 }
 .dxf-final { font-size: 13px; color: #4b5563; line-height: 1.9; text-align: left; }
+.dxf-parse-summary {
+  border: 1px solid #ebeef5;
+  border-radius: 8px;
+  overflow: hidden;
+}
+.dxf-parse-summary__title {
+  padding: 9px 12px;
+  background: #f7f8fa;
+  font-size: 13px;
+  font-weight: 600;
+  color: #303133;
+  border-bottom: 1px solid #ebeef5;
+}
+.dxf-parse-summary__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 1px;
+  background: #ebeef5;
+}
+.dxf-parse-cell {
+  background: #fff;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.dxf-parse-cell__k { font-size: 12px; color: #909399; }
+.dxf-parse-cell__v { font-size: 14px; font-weight: 600; color: #303133; }
+.dxf-parse-warn {
+  border: 1px solid #fde68a;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #fffbeb;
+}
+.dxf-parse-warn__title {
+  padding: 9px 12px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #92400e;
+  border-bottom: 1px solid #fde68a;
+}
+.dxf-parse-warn__item {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 7px 12px;
+  font-size: 13px;
+  color: #4b5563;
+  border-bottom: 1px dashed #fde9b0;
+}
+.dxf-parse-warn__item:last-child { border-bottom: none; }
+.dxf-parse-warn__item.is-error { background: #fef2f2; }
+.dxf-parse-warn__badge {
+  flex: 0 0 auto;
+  font-size: 11px;
+  font-weight: 700;
+  color: #fff;
+  background: #d97706;
+  border-radius: 4px;
+  padding: 1px 7px;
+  margin-top: 1px;
+}
+.dxf-parse-warn__item.is-error .dxf-parse-warn__badge { background: #d92020; }
+.dxf-parse-warn__msg { flex: 1; line-height: 1.5; }
+.dxf-parse-rooms__head { font-size: 13px; color: #909399; margin-bottom: 6px; }
 .dxf-checks {
   border: 1px solid #ebeef5;
   border-radius: 8px;

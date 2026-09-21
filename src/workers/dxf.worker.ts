@@ -5,6 +5,15 @@
  *
  * 进度相位：收到字节后先发 `decoding`（解码中），解码完成发 `parsing`（解析中），
  * 最终发 `result` / `error`。主线程据此驱动「已接收→解码中→解析中→完成」进度条。
+ *
+ * 解析契约（导入向导「步骤3 解析」）：Worker 内执行 extractRooms（经 parseDxfToResult 编排），
+ * 返回完整的 DxfParseResult，其中包含：
+ *   - warnings：解析告警（曲线实体 / 自交 / 未识别外轮廓 / 缺图层 / 未匹配文本 等）
+ *   - bbox：原始坐标包围盒（minX/minY/maxX/maxY）
+ *   - coordSource：坐标来源（utm | local，自动推断）
+ *   - unit：长度单位（m | cm | mm | unknown，自动推断）
+ *   - rooms：extractRooms 产出的房间候选
+ * 这些字段即导入向导「解析」步骤向用户呈现的核心数据。
  */
 
 import { parseDxfToResult } from '../utils/dxfParser';
@@ -54,6 +63,8 @@ ctx.onmessage = async (ev: MessageEvent<RequestMsg>) => {
     const text = await decodeBuffer(buffer, encoding);
     // 解码完成，进入「解析中」
     ctx.postMessage({ id, phase: 'parsing' });
+    // 解析阶段：parseDxfToResult 内部调用 extractRooms 提取房间，
+    // 返回完整 DxfParseResult（含 warnings / bbox / coordSource / unit）。
     const result = parseDxfToResult(text, buildingName ?? '', floorNo ?? 0, { expandBlocks });
     ctx.postMessage({ id, result });
   } catch (err) {

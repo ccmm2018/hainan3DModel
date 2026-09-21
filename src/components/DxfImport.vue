@@ -17,10 +17,17 @@ import { ElMessage, type UploadFile, type UploadRawFile } from 'element-plus';
 import { useBuildingStore } from '../stores/building';
 import AnchorPicker from './AnchorPicker.vue';
 import FloorPlan2D from './FloorPlan2D.vue';
+import FootprintOverlay from './FootprintOverlay.vue';
 import { isRoomFieldComplete } from '../utils/roomFields';
-import { decodeDxf, fingerprintFromOutline } from '../utils/coordinate';
+import {
+  decodeDxf,
+  fingerprintFromOutline,
+  OVERLAP_DEVIATION_THRESHOLD,
+  polygonAreaDiffRatio,
+} from '../utils/coordinate';
+import { polygonCentroid, type Pt } from '../utils/geometry';
 import { validateDxf, type DxfValidation } from '../utils/dxfValidate';
-import type { CoordSource, DxfParseResult, FloorTransform, ParsedRoom } from '../types/cad';
+import type { BuildingFingerprint, CoordSource, DxfParseResult, FloorTransform, ParsedRoom } from '../types/cad';
 import type { MatchResult } from '../utils/matcher';
 
 const props = withDefaults(
@@ -112,6 +119,39 @@ const roomsLocal = computed<[number, number][][]>(
 const footprintUtm = computed<[number, number][] | null>(() => {
   const fp = store.buildingFingerprint(buildingName.value);
   return (fp.outline as [number, number][] | undefined) ?? null;
+});
+
+// ---- 步骤 5（坐标配准）：utm 分支 = 自动算指纹 + 与 footprint 叠加预览 ----
+/** 叠加预览的目标楼栋：优先用自动匹配候选，否则用当前所选楼栋 */
+const overlayTargetBuilding = computed(() => matchResult.value?.candidates[0] ?? buildingName.value);
+const overlayFootprint = computed<[number, number][] | null>(() => {
+  const fp = store.buildingFingerprint(overlayTargetBuilding.value).outline;
+  return (fp as [number, number][] | undefined) ?? null;
+});
+/** 来自「楼层外轮廓线」自动算得的楼栋指纹 */
+const computedFingerprint = computed<BuildingFingerprint>(() => {
+  const o = floorOutlineLocal.value;
+  if (!o || o.length < 3) return {};
+  return fingerprintFromOutline(o as Pt[]);
+});
+/** 解析外轮廓 vs footprint 的面积偏差（0~1） */
+const utmDeviation = computed<number | null>(() => {
+  const o = floorOutlineLocal.value;
+  const fp = overlayFootprint.value;
+  if (!o || o.length < 3 || !fp || fp.length < 3) return null;
+  return polygonAreaDiffRatio(o as Pt[], fp);
+});
+const utmDeviationWarn = computed(
+  () => utmDeviation.value !== null && utmDeviation.value > OVERLAP_DEVIATION_THRESHOLD,
+);
+/** 解析外轮廓质心与 footprint 质心的偏移（米） */
+const utmCenterOffset = computed<number | null>(() => {
+  const o = floorOutlineLocal.value;
+  const fp = overlayFootprint.value;
+  if (!o || o.length < 3 || !fp || fp.length < 3) return null;
+  const co = polygonCentroid(o as Pt[]);
+  const cf = polygonCentroid(fp as Pt[]);
+  return Math.hypot(co[0] - cf[0], co[1] - cf[1]);
 });
 
 const matchResult = computed<MatchResult | null>(() => {
@@ -434,6 +474,12 @@ const canNext = computed(() => {
   if (step.value === 1) return Boolean(activeItem.value?.result) && !validation.value?.hasError;
   // 步骤 4 预览确认：必须用户显式确认提取结果无误
   if (step.value === 3) return Boolean(activeItem.value?.result) && previewConfirmed.value;
+  // 步骤 5 坐标配准：local 必须完成手动配准（解出变换）；utm 自动匹配可继续
+  if (step.value === 4) {
+    const it = activeItem.value;
+    if (!it?.result) return false;
+    return effectiveCoordSource.value === 'local' ? Boolean(it.transform) : true;
+  }
   return Boolean(activeItem.value?.result);
 });
 
@@ -788,23 +834,26 @@ onBeforeUnmount(() => {
         </el-drawer>
       </section>
 
-      <!-- 步骤 4 坐标配准 -->
+      <!-- 步骤 5 坐标配准 -->
       <section v-else-if="step === 4 && activeItem?.result" class="dxf-panel">
-        <el-alert
-          v-if="activeItem.coordSource === 'local'"
-          class="dxf-preview"
-          type="info"
-          :closable="false"
-          title="局部坐标图纸：不进行指纹自动匹配，请通过下方「2 对同名锚点」完成手动配准后再入库"
-        />
-        <AnchorPicker
-          v-if="activeItem.coordSource === 'local'"
-          v-model="activeItem.transform"
-          :unit="activeItem.result.unit"
-          :floor-outline-local="floorOutlineLocal"
-          :rooms-local="roomsLocal"
-          :footprint-utm="footprintUtm"
-        />
+        <!-- 局部坐标：手动配准（上节 AnchorPicker） -->
+        <template v-if="effectiveCoordSource === 'local'">
+          <el-alert
+            class="dxf-preview"
+            type="info"
+            :closable="false"
+            title="局部坐标图纸：不进行指纹自动匹配，请通过下方「2 对同名锚点」完成手动配准后再入库"
+          />
+          <AnchorPicker
+            v-model="activeItem.transform"
+            :unit="activeItem.result.unit"
+            :floor-outline-local="floorOutlineLocal"
+            :rooms-local="roomsLocal"
+            :footprint-utm="footprintUtm"
+          />
+        </template>
+
+        <!-- UTM：自动算指纹 + 与 footprint 叠加预览 -->
         <template v-else>
           <el-alert
             v-if="matchResult"
@@ -829,7 +878,60 @@ onBeforeUnmount(() => {
               <div v-for="(rs, i) in matchResult.reasons" :key="i" class="dxf-match__reason">{{ rs }}</div>
             </template>
           </el-alert>
-          <el-alert v-else class="dxf-preview" type="info" :closable="false" title="UTM 图纸：未识别「楼层外轮廓线」，无法自动匹配楼栋，请在下一步手动选择归属楼栋" />
+          <el-alert
+            v-else
+            class="dxf-preview"
+            type="info"
+            :closable="false"
+            title="UTM 图纸：未识别「楼层外轮廓线」，无法自动匹配楼栋，请在下一步手动选择归属楼栋"
+          />
+
+          <!-- 自动算得的楼栋指纹（取自「楼层外轮廓线」） -->
+          <div v-if="computedFingerprint.centerUtm" class="dxf-fp">
+            <div class="dxf-fp__title">自动算得楼栋指纹（取自「楼层外轮廓线」）</div>
+            <div class="dxf-fp__grid">
+              <div class="dxf-fp__cell">
+                <span class="dxf-fp__k">中心 UTM</span>
+                <span class="dxf-fp__v">[{{ computedFingerprint.centerUtm[0].toFixed(1) }}, {{ computedFingerprint.centerUtm[1].toFixed(1) }}]</span>
+              </div>
+              <div class="dxf-fp__cell">
+                <span class="dxf-fp__k">轮廓面积</span>
+                <span class="dxf-fp__v">{{ computedFingerprint.footprintArea ? computedFingerprint.footprintArea.toFixed(0) : '—' }} ㎡</span>
+              </div>
+              <div class="dxf-fp__cell">
+                <span class="dxf-fp__k">主轴方位</span>
+                <span class="dxf-fp__v">{{ computedFingerprint.azimuth != null ? computedFingerprint.azimuth.toFixed(1) + '°' : '—' }}</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- 外轮廓 ↔ footprint 叠加预览 -->
+          <div class="dxf-overlay">
+            <div class="dxf-overlay__title">外轮廓 ↔ 楼栋 footprint 叠加预览（UTM，单位米）</div>
+            <FootprintOverlay
+              :footprint="overlayFootprint as unknown as Pt[] | null"
+              :outline="floorOutlineLocal as unknown as Pt[] | null"
+              :rooms="roomsLocal as unknown as Pt[][]"
+            />
+          </div>
+
+          <!-- 偏差提示：面积偏差 > 20% 红色警告 -->
+          <el-alert
+            v-if="utmDeviation !== null"
+            class="dxf-preview"
+            :type="utmDeviationWarn ? 'error' : 'success'"
+            :closable="false"
+            :title="utmDeviationWarn
+              ? `面积偏差 ${(utmDeviation * 100).toFixed(1)}% > 20%（质心偏移 ${utmCenterOffset ? utmCenterOffset.toFixed(1) : '?'}m），外轮廓与 footprint 差异过大，请核对图纸或改用局部手动配准`
+              : `面积偏差 ${(utmDeviation * 100).toFixed(1)}%（质心偏移 ${utmCenterOffset ? utmCenterOffset.toFixed(1) : '0'}m）≤ 20%，配准良好`"
+          />
+          <el-alert
+            v-else
+            class="dxf-preview"
+            type="info"
+            :closable="false"
+            :title="overlayFootprint ? '外轮廓点数不足，无法计算偏差' : '该楼暂无 footprint，无法做叠加校验；请尽量保证「楼层外轮廓线」与真实楼栋一致'"
+          />
         </template>
       </section>
 
@@ -1121,4 +1223,15 @@ onBeforeUnmount(() => {
 .dxf-room__tag.is-err { color: #d92020; border-color: #fecaca; background: #fef2f2; }
 .dxf-drawer__actions { display: flex; gap: 10px; margin-top: 16px; }
 .dxf-drawer__hint { font-size: 12px; color: #9ca3af; margin-top: 12px; line-height: 1.6; }
+
+/* 步骤 5 坐标配准：UTM 自动指纹 + 叠加预览 */
+.dxf-fp { border: 1px solid #ebeef5; border-radius: 8px; overflow: hidden; }
+.dxf-fp__title { padding: 9px 12px; background: #f7f8fa; font-size: 13px; font-weight: 600; color: #303133; border-bottom: 1px solid #ebeef5; }
+.dxf-fp__grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 1px; background: #ebeef5; }
+.dxf-fp__cell { background: #fff; padding: 10px 12px; display: flex; flex-direction: column; gap: 4px; }
+.dxf-fp__k { font-size: 12px; color: #909399; }
+.dxf-fp__v { font-size: 14px; font-weight: 600; color: #303133; }
+.dxf-overlay { border: 1px solid #e5e7eb; border-radius: 8px; overflow: hidden; }
+.dxf-overlay__title { padding: 8px 12px; font-size: 13px; font-weight: 600; color: #303133; background: #f7f8fa; border-bottom: 1px solid #ebeef5; }
+.dxf-match__reason { font-size: 12px; color: #6b7280; line-height: 1.6; }
 </style>

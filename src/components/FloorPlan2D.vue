@@ -1,24 +1,38 @@
 <script setup lang="ts">
 /**
  * FloorPlan2D：楼层 2.5D 平面图查看器。
- * - 楼层 Tab 切换；
+ * - 楼层 Tab 切换（store 模式）；
  * - 房间以「挤出侧壁 + 顶面」呈现 2.5D 效果；
  * - 着色模式可切换：审图状态 / 业务占用状态 / 按部门 / 按用途；
  * - 悬停 tooltip、点击选中、可隐藏误识别房间（写回 store）。
+ *
+ * 预览嵌入模式（embedded + preview）：
+ * - 不渲染 el-dialog，仅渲染 SVG stage；
+ * - 数据源由 preview.rooms（ParsedRoom[]，入库前候选）提供，按 selected 过滤；
+ * - 按审图状态分色（normal/highlight/partial/warning 一目了然）；
+ * - 额外绘制楼层外轮廓（虚线）作为参照；
+ * - 点击房间 emit('room-click', ParsedRoom)，交由外部（导入向导）打开编辑抽屉。
  */
 import { computed, ref, watch } from 'vue';
 import { useBuildingStore } from '../stores/building';
 import { fitTransform, projectPoint, type Pt } from '../utils/geometry';
-import type { InspectStatus, Room, UseStatus } from '../types/cad';
+import type { InspectStatus, ParsedRoom, Room, UseStatus } from '../types/cad';
 
-const props = defineProps<{
-  modelValue: boolean;
-  buildingName: string;
-}>();
+const props = withDefaults(
+  defineProps<{
+    modelValue?: boolean;
+    buildingName?: string;
+    /** 预览嵌入模式：传入即渲染预览（不显示 el-dialog） */
+    preview?: { rooms: ParsedRoom[]; outline?: [number, number][] | null } | null;
+    embedded?: boolean;
+  }>(),
+  { modelValue: false, buildingName: '', preview: null, embedded: false },
+);
 
 const emit = defineEmits<{
   (e: 'update:modelValue', v: boolean): void;
   (e: 'request-import'): void;
+  (e: 'room-click', room: ParsedRoom): void;
 }>();
 
 const store = useBuildingStore();
@@ -28,13 +42,15 @@ const VIEW_H = 640;
 const WALL_H = 18;
 
 type ColorMode = 'inspect' | 'use' | 'dept' | 'purpose';
+/** store 模式使用 Room，预览模式使用 ParsedRoom；两者共享着色所需字段 */
+type RoomLike = Room | ParsedRoom;
 
 const visible = computed({
   get: () => props.modelValue,
   set: (v) => emit('update:modelValue', v),
 });
 
-const floors = computed(() => store.floorsOf(props.buildingName));
+const floors = computed(() => store.floorsOf(props.buildingName ?? ''));
 const selectedFloor = ref<number>(1);
 const colorMode = ref<ColorMode>('use');
 
@@ -49,10 +65,14 @@ watch(
 );
 
 const currentFloor = computed(() =>
-  floors.value.length ? store.getFloor(props.buildingName, selectedFloor.value) : undefined,
+  floors.value.length ? store.getFloor(props.buildingName ?? '', selectedFloor.value) : undefined,
 );
 
-const displayedRooms = computed<Room[]>(() => {
+const displayedRooms = computed<RoomLike[]>(() => {
+  // 预览嵌入模式：直接使用 preview.rooms（按 selected 过滤，剔除误识别房间）
+  if (props.preview) {
+    return props.preview.rooms.filter((r) => r.selected !== false);
+  }
   const f = currentFloor.value;
   if (!f) return [];
   return store.roomsOfFloor(f.id).filter((r) => r.selected !== false);
@@ -81,8 +101,11 @@ const INSPECT_LABELS: Record<InspectStatus, string> = {
   normal: '正常',
   highlight: '需复核',
   warning: '警告',
-  partial: '部分',
+  partial: '待补填',
 };
+
+/** 预览模式强制按审图状态分色（in-progress 数据无业务状态） */
+const effectiveColorMode = computed<ColorMode>(() => (props.embedded ? 'inspect' : colorMode.value));
 
 function hslToHex(h: number, s: number, l: number): string {
   const a = (s * Math.min(l, 1 - l)) / 100;
@@ -102,8 +125,13 @@ function hashHue(s: string): number {
   return Math.abs(h) % 360;
 }
 
-function colorFor(room: Room): string {
-  switch (colorMode.value) {
+/** 兼容 Room.outline 与 ParsedRoom.polygon */
+function polyOf(r: RoomLike): [number, number][] {
+  return 'polygon' in r ? r.polygon : r.outline;
+}
+
+function colorFor(room: RoomLike): string {
+  switch (effectiveColorMode.value) {
     case 'inspect':
       return INSPECT_COLORS[room.inspectStatus];
     case 'use':
@@ -129,7 +157,7 @@ const bounds = computed(() => {
   let maxX = -Infinity;
   let maxY = -Infinity;
   for (const r of displayedRooms.value) {
-    for (const [x, y] of r.outline) {
+    for (const [x, y] of polyOf(r)) {
       if (x < minX) minX = x;
       if (y < minY) minY = y;
       if (x > maxX) maxX = x;
@@ -143,7 +171,7 @@ const bounds = computed(() => {
 const fit = computed(() => fitTransform(bounds.value, VIEW_W, VIEW_H));
 
 interface RoomShape {
-  room: Room;
+  room: RoomLike;
   top: string;
   wall: string;
   labelX: number;
@@ -157,7 +185,7 @@ const roomShapes = computed<RoomShape[]>(() => {
   const t = fit.value;
   const b = bounds.value;
   return displayedRooms.value.map((room) => {
-    const topPts: Pt[] = room.outline.map((p) => projectPoint(p, b, t));
+    const topPts: Pt[] = polyOf(room).map((p) => projectPoint(p, b, t));
     const top = topPts.map((p) => `${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(' ');
     const wall = topPts.map((p) => `${p[0].toFixed(1)},${(p[1] + WALL_H).toFixed(1)}`).join(' ');
     const c = projectPoint(room.centroid, b, t);
@@ -175,11 +203,31 @@ const roomShapes = computed<RoomShape[]>(() => {
   });
 });
 
+/** 楼层外轮廓（预览模式绘制为虚线参照） */
+const outlinePath = computed<string>(() => {
+  const poly =
+    props.embedded && props.preview
+      ? (props.preview.outline ?? null)
+      : currentFloor.value?.outline ?? null;
+  if (!poly || poly.length < 2) return '';
+  const t = fit.value;
+  const b = bounds.value;
+  return poly
+    .map((p, i) => {
+      const q = projectPoint(p, b, t);
+      return `${i === 0 ? 'M' : 'L'}${q[0].toFixed(1)},${q[1].toFixed(1)}`;
+    })
+    .join(' ') + ' Z';
+});
+
 const legend = computed(() => {
-  if (colorMode.value === 'inspect') {
-    return (Object.keys(INSPECT_COLORS) as InspectStatus[]).map((k) => ({ label: INSPECT_LABELS[k], color: INSPECT_COLORS[k] }));
+  if (effectiveColorMode.value === 'inspect') {
+    return (Object.keys(INSPECT_COLORS) as InspectStatus[]).map((k) => ({
+      label: INSPECT_LABELS[k],
+      color: INSPECT_COLORS[k],
+    }));
   }
-  if (colorMode.value === 'use') {
+  if (effectiveColorMode.value === 'use') {
     return (Object.keys(USE_COLORS) as Exclude<UseStatus, ''>[])
       .map((k) => ({ label: USE_LABELS[k], color: USE_COLORS[k] }))
       .concat([{ label: USE_LABELS[''], color: '#cbd5e1' }]);
@@ -187,7 +235,7 @@ const legend = computed(() => {
   // dept / purpose：取实际出现的类别
   const map = new Map<string, string>();
   for (const r of displayedRooms.value) {
-    const key = colorMode.value === 'dept' ? r.dept : r.usePurpose;
+    const key = effectiveColorMode.value === 'dept' ? r.dept : r.usePurpose;
     if (key) map.set(key, colorFor(r));
   }
   if (!map.size) map.set('（无）', '#cbd5e1');
@@ -196,29 +244,33 @@ const legend = computed(() => {
 
 const hoveredId = ref<string | null>(null);
 const selectedId = ref<string | null>(null);
-const tooltip = ref<{ x: number; y: number; room: Room } | null>(null);
+const tooltip = ref<{ x: number; y: number; room: RoomLike } | null>(null);
 
 const hoveredRoom = computed(() => displayedRooms.value.find((r) => r.id === hoveredId.value) ?? null);
 const selectedRoom = computed(() => displayedRooms.value.find((r) => r.id === selectedId.value) ?? null);
 
-function onEnter(room: Room, ev: MouseEvent) {
+function onEnter(room: RoomLike, ev: MouseEvent) {
   hoveredId.value = room.id;
   moveTooltip(room, ev);
 }
-function onMove(room: Room, ev: MouseEvent) {
+function onMove(room: RoomLike, ev: MouseEvent) {
   moveTooltip(room, ev);
 }
 function onLeave() {
   hoveredId.value = null;
   tooltip.value = null;
 }
-function moveTooltip(room: Room, ev: MouseEvent) {
+function moveTooltip(room: RoomLike, ev: MouseEvent) {
   const host = (ev.currentTarget as HTMLElement).closest('.fpv-stage') as HTMLElement | null;
   if (!host) return;
   const rect = host.getBoundingClientRect();
   tooltip.value = { x: ev.clientX - rect.left, y: ev.clientY - rect.top, room };
 }
-function onSelect(room: Room) {
+function onSelect(room: RoomLike) {
+  if (props.embedded) {
+    emit('room-click', room as ParsedRoom);
+    return;
+  }
   selectedId.value = selectedId.value === room.id ? null : room.id;
 }
 
@@ -239,6 +291,13 @@ function showAll() {
   for (const r of store.roomsOfFloor(f.id)) store.setRoomSelected(f.id, r.id, true);
 }
 
+/** 预览模式下：剔除 / 恢复房间（直接改 preview.rooms 上的 selected） */
+function previewToggleSelected(room: ParsedRoom, selected: boolean): void {
+  if (!props.preview) return;
+  const target = props.preview.rooms.find((r) => r.id === room.id);
+  if (target) target.selected = selected;
+}
+
 function requestImport() {
   emit('request-import');
 }
@@ -246,6 +305,7 @@ function requestImport() {
 
 <template>
   <el-dialog
+    v-if="!embedded"
     v-model="visible"
     :title="`${buildingName} · 楼宇分层图（2.5D）`"
     width="80%"
@@ -370,6 +430,77 @@ function requestImport() {
       </div>
     </div>
   </el-dialog>
+
+  <!-- 预览嵌入模式：仅渲染 SVG stage（供导入向导「预览确认」步骤使用） -->
+  <div v-else class="fpv fpv--embed">
+    <div class="fpv-legend fpv-legend--embed">
+      <span v-for="l in legend" :key="l.label" class="fpv-legend__item">
+        <i :style="{ background: l.color }"></i>{{ l.label }}
+      </span>
+      <el-button size="small" link type="primary" @click="props.preview?.rooms.forEach((r) => (r.selected = true))">
+        显示全部
+      </el-button>
+    </div>
+    <div class="fpv-stage">
+      <svg :viewBox="`0 0 ${VIEW_W} ${VIEW_H}`" class="fpv-svg fpv-svg--embed" preserveAspectRatio="xMidYMid meet">
+        <rect x="0" y="0" :width="VIEW_W" :height="VIEW_H" fill="#fbfcfe" />
+        <path
+          v-if="outlinePath"
+          :d="outlinePath"
+          fill="none"
+          stroke="#94a3b8"
+          stroke-width="2"
+          stroke-dasharray="8 6"
+          opacity="0.8"
+        />
+        <g
+          v-for="shape in roomShapes"
+          :key="shape.room.id"
+          class="fpv-room"
+          @mouseenter="onEnter(shape.room, $event)"
+          @mousemove="onMove(shape.room, $event)"
+          @mouseleave="onLeave"
+          @click="onSelect(shape.room)"
+        >
+          <polygon
+            :points="shape.wall"
+            :fill="shape.wallColor"
+            :opacity="hoveredId === shape.room.id ? 1 : 0.55"
+          />
+          <polygon
+            :points="shape.top"
+            :fill="shape.fill"
+            :stroke="shape.stroke"
+            :stroke-width="hoveredId === shape.room.id ? 3 : 1.5"
+          />
+          <text
+            :x="shape.labelX"
+            :y="shape.labelY"
+            text-anchor="middle"
+            dominant-baseline="middle"
+            :fill="shape.stroke"
+            font-size="13"
+            font-weight="600"
+            pointer-events="none"
+          >
+            {{ shape.room.code || shape.room.name }}
+          </text>
+        </g>
+      </svg>
+      <div
+        v-if="tooltip"
+        class="fpv-tooltip"
+        :style="{ left: tooltip.x + 12 + 'px', top: tooltip.y + 12 + 'px' }"
+      >
+        <div class="fpv-tooltip__no">{{ tooltip.room.code || tooltip.room.name }}</div>
+        <div class="fpv-tooltip__row">名称：{{ tooltip.room.name }}</div>
+        <div v-if="tooltip.room.dept" class="fpv-tooltip__row">部门：{{ tooltip.room.dept }}</div>
+        <div class="fpv-tooltip__row">建筑面积：{{ tooltip.room.buildArea.toFixed(1) }} ㎡</div>
+        <div class="fpv-tooltip__row">审图：{{ INSPECT_LABELS[tooltip.room.inspectStatus] }}</div>
+      </div>
+      <p v-if="!roomShapes.length" class="fpv-embed-empty">所选房间均已剔除，左侧重新勾选即可恢复</p>
+    </div>
+  </div>
 </template>
 
 <style scoped>
@@ -422,4 +553,19 @@ function requestImport() {
 .fpv-info__actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 .fpv-info__hint { color: #9ca3af; font-size: 13px; margin: 0; }
 .fpv-note { font-size: 11px; color: #9ca3af; margin: 0; }
+
+/* 预览嵌入模式 */
+.fpv--embed { gap: 8px; }
+.fpv-legend--embed { padding: 4px 2px; }
+.fpv-svg--embed { height: 46vh; }
+.fpv-embed-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #9ca3af;
+  font-size: 13px;
+  pointer-events: none;
+}
 </style>

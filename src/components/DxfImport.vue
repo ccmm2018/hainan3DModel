@@ -16,9 +16,11 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import { ElMessage, type UploadFile, type UploadRawFile } from 'element-plus';
 import { useBuildingStore } from '../stores/building';
 import AnchorPicker from './AnchorPicker.vue';
+import FloorPlan2D from './FloorPlan2D.vue';
+import { isRoomFieldComplete } from '../utils/roomFields';
 import { decodeDxf, fingerprintFromOutline } from '../utils/coordinate';
 import { validateDxf, type DxfValidation } from '../utils/dxfValidate';
-import type { CoordSource, DxfParseResult, FloorTransform } from '../types/cad';
+import type { CoordSource, DxfParseResult, FloorTransform, ParsedRoom } from '../types/cad';
 import type { MatchResult } from '../utils/matcher';
 
 const props = withDefaults(
@@ -365,6 +367,44 @@ const selectedCount = computed(
   () => activeItem.value?.result?.rooms.filter((r) => r.selected).length ?? 0,
 );
 
+// ---- 步骤 4 预览确认 ----
+const roomFieldStats = computed(() => {
+  const rooms = activeItem.value?.result?.rooms ?? [];
+  const N = rooms.length;
+  const X = rooms.filter(isRoomFieldComplete).length;
+  return {
+    N,
+    X,
+    Y: N - X,
+    excluded: rooms.filter((r) => r.selected === false).length,
+  };
+});
+
+/** 用户确认「提取结果无误」后才允许进入下一步 */
+const previewConfirmed = ref(false);
+const editingRoom = ref<ParsedRoom | null>(null);
+const drawerOpen = ref(false);
+
+function openEditor(room: ParsedRoom): void {
+  editingRoom.value = room;
+  drawerOpen.value = true;
+}
+function closeEditor(): void {
+  drawerOpen.value = false;
+  editingRoom.value = null;
+}
+function toggleExclude(room: ParsedRoom, excluded: boolean): void {
+  room.selected = !excluded;
+}
+
+// 离开步骤 4 或切换激活文件时，清除确认状态（需重新确认）
+watch([step, activeId], ([s]) => {
+  if (s !== 3) previewConfirmed.value = false;
+});
+watch(activeId, () => {
+  previewConfirmed.value = false;
+});
+
 // ---- 步骤 3 解析结果摘要（extractRooms 输出 DxfParseResult） ----
 const parseResult = computed(() => activeItem.value?.result ?? null);
 /** 生效的坐标来源：用户在校验步骤的覆盖优先，否则取解析推断值 */
@@ -392,6 +432,8 @@ const canNext = computed(() => {
   if (step.value === 0) return doneItems.value.length > 0;
   // 步骤 2 校验：存在硬错误（仅 C1）则阻断前进
   if (step.value === 1) return Boolean(activeItem.value?.result) && !validation.value?.hasError;
+  // 步骤 4 预览确认：必须用户显式确认提取结果无误
+  if (step.value === 3) return Boolean(activeItem.value?.result) && previewConfirmed.value;
   return Boolean(activeItem.value?.result);
 });
 
@@ -642,28 +684,108 @@ onBeforeUnmount(() => {
         </div>
       </section>
 
-      <!-- 步骤 3 预览确认 -->
-      <section v-else-if="step === 3 && activeItem?.result" class="dxf-panel">
-        <el-alert
-          class="dxf-preview"
-          type="success"
-          :closable="false"
-          :title="`解析成功：识别到 ${activeItem.result.rooms.length} 个房间，已选 ${selectedCount} 个`"
-        />
-        <el-alert
-          v-if="activeItem.result.floorOutline"
-          class="dxf-preview"
-          type="info"
-          :closable="false"
-          :title="`已识别「楼层外轮廓线」图层（${activeItem.result.floorOutline.layer}），将作为楼栋指纹（中心 / 轮廓 / 方位 / 占地面积）的唯一来源`"
-        />
-        <el-alert
-          v-if="activeItem.result.warnings.length"
-          class="dxf-preview"
-          type="warning"
-          :closable="false"
-          title="存在解析告警，请在上一步「校验」中确认；可在后续步骤继续处理"
-        />
+      <!-- 步骤 4 预览确认（用 FloorPlan2D 渲染提取结果；左侧清单剔除/补填，右侧 2.5D 预览） -->
+      <section v-else-if="step === 3 && activeItem?.result" class="dxf-panel dxf-panel--preview4">
+        <!-- 顶部统计 -->
+        <div class="dxf-stat">
+          <span>识别房间 <b>{{ roomFieldStats.N }}</b> 间</span>
+          <span class="is-ok">字段完整 <b>{{ roomFieldStats.X }}</b> 间</span>
+          <span class="is-warn">待补填 <b>{{ roomFieldStats.Y }}</b> 间</span>
+          <span v-if="roomFieldStats.excluded" class="is-muted">已剔除误识别 <b>{{ roomFieldStats.excluded }}</b> 间</span>
+        </div>
+
+        <div class="dxf-preview4__body">
+          <!-- 左侧房间清单 -->
+          <div class="dxf-preview4__list">
+            <div class="dxf-preview4__list-head">房间清单（取消勾选即剔除误识别房间）</div>
+            <div class="dxf-roomlist dxf-roomlist--tall">
+              <div
+                v-for="(room, idx) in activeItem.result.rooms"
+                :key="room.id"
+                class="dxf-room"
+                :class="{ 'dxf-room--off': room.selected === false }"
+              >
+                <el-checkbox v-model="room.selected" />
+                <span class="dxf-room__no">{{ room.code || `房间${idx + 1}` }}</span>
+                <span class="dxf-room__name">{{ room.name || '（未命名）' }}</span>
+                <span
+                  class="dxf-room__tag"
+                  :class="room.inspectStatus === 'partial' ? 'is-warn' : room.inspectStatus === 'highlight' ? 'is-info' : room.inspectStatus === 'warning' ? 'is-err' : ''"
+                >{{ room.inspectStatus === 'partial' ? '待补填' : room.inspectStatus === 'highlight' ? '需复核' : room.inspectStatus === 'warning' ? '警告' : '正常' }}</span>
+                <el-button link type="primary" size="small" @click="openEditor(room)">补填</el-button>
+              </div>
+            </div>
+          </div>
+
+          <!-- 右侧 FloorPlan2D 预览 -->
+          <div class="dxf-preview4__map">
+            <FloorPlan2D
+              :embedded="true"
+              :preview="{ rooms: activeItem.result.rooms, outline: activeItem.result.floorOutline?.polygon ?? null }"
+              @room-click="openEditor"
+            />
+          </div>
+        </div>
+
+        <!-- 确认门控：必须勾选后才允许进入下一步 -->
+        <el-checkbox v-model="previewConfirmed" class="dxf-confirm">
+          我已确认提取结果无误（已剔除的房间将不入库，字段已补填 / 核对）
+        </el-checkbox>
+
+        <!-- 6 字段补填 / 修正抽屉 -->
+        <el-drawer
+          v-model="drawerOpen"
+          :title="editingRoom ? `补填 / 修正：${editingRoom.code || editingRoom.name}` : '房间字段'"
+          size="360px"
+          @close="closeEditor"
+        >
+          <template v-if="editingRoom">
+            <el-form label-width="84px">
+              <el-form-item label="房间编码">
+                <el-input v-model="editingRoom.code" placeholder="如 101" />
+              </el-form-item>
+              <el-form-item label="房间号码">
+                <el-input v-model="editingRoom.number" placeholder="如 101" />
+              </el-form-item>
+              <el-form-item label="房间名称">
+                <el-input v-model="editingRoom.name" placeholder="如 办公室" />
+              </el-form-item>
+              <el-form-item label="部门名称">
+                <el-input v-model="editingRoom.dept" placeholder="如 保卫处" />
+              </el-form-item>
+              <el-form-item label="使用面积">
+                <el-input-number
+                  v-model="editingRoom.useArea"
+                  :min="0"
+                  :step="1"
+                  controls-position="right"
+                  style="width: 100%"
+                />
+              </el-form-item>
+              <el-form-item label="建筑面积">
+                <el-input-number
+                  v-model="editingRoom.buildArea"
+                  :min="0"
+                  :step="1"
+                  controls-position="right"
+                  style="width: 100%"
+                />
+              </el-form-item>
+            </el-form>
+            <div class="dxf-drawer__actions">
+              <el-button
+                v-if="editingRoom.selected !== false"
+                type="danger"
+                plain
+                @click="toggleExclude(editingRoom, true); closeEditor()"
+              >标记为误识别并剔除</el-button>
+              <el-button v-else type="primary" plain @click="toggleExclude(editingRoom, false); closeEditor()">
+                恢复保留
+              </el-button>
+            </div>
+            <p class="dxf-drawer__hint">修改即时生效；确认无误后勾选底部「已确认」再进入下一步。</p>
+          </template>
+        </el-drawer>
       </section>
 
       <!-- 步骤 4 坐标配准 -->
@@ -958,4 +1080,45 @@ onBeforeUnmount(() => {
 .dxf-check--error { background: #fef2f2; }
 .dxf-check--info .dxf-check__icon { color: #2563eb; }
 .dxf-check--info .dxf-check__badge { background: #2563eb; }
+
+/* 步骤 4 预览确认 */
+.dxf-stat {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 18px;
+  padding: 10px 14px;
+  background: #f7f8fa;
+  border: 1px solid #ebeef5;
+  border-radius: 8px;
+  font-size: 14px;
+  color: #4b5563;
+}
+.dxf-stat b { font-size: 16px; color: #111827; margin: 0 2px; }
+.dxf-stat .is-ok { color: #16a34a; }
+.dxf-stat .is-ok b { color: #16a34a; }
+.dxf-stat .is-warn { color: #d97706; }
+.dxf-stat .is-warn b { color: #d97706; }
+.dxf-stat .is-muted { color: #9ca3af; }
+.dxf-panel--preview4 { gap: 12px; }
+.dxf-preview4__body { display: flex; gap: 14px; align-items: stretch; }
+.dxf-preview4__list { flex: 0 0 320px; display: flex; flex-direction: column; min-width: 0; }
+.dxf-preview4__list-head { font-size: 13px; color: #909399; margin-bottom: 6px; }
+.dxf-roomlist--tall { max-height: 360px; }
+.dxf-preview4__map {
+  flex: 1 1 auto;
+  min-width: 0;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  overflow: hidden;
+  background: #fbfcfe;
+}
+.dxf-confirm {
+  align-self: flex-start;
+  font-size: 13px;
+  color: #303133;
+}
+.dxf-room__tag.is-info { color: #2563eb; border-color: #bfdbfe; background: #eff6ff; }
+.dxf-room__tag.is-err { color: #d92020; border-color: #fecaca; background: #fef2f2; }
+.dxf-drawer__actions { display: flex; gap: 10px; margin-top: 16px; }
+.dxf-drawer__hint { font-size: 12px; color: #9ca3af; margin-top: 12px; line-height: 1.6; }
 </style>

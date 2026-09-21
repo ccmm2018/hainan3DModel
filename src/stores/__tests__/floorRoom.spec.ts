@@ -59,4 +59,30 @@ describe('building store', () => {
     store.importFloor({ buildingName: '图书馆', floorNo: 1, parsed, coordSource: 'utm' });
     expect(store.buildingFingerprint('图书馆').centerUtm).toBeDefined();
   });
+
+  it('预览确认阶段补填 / 修正的 6 字段随入库写回', () => {
+    const store = useBuildingStore();
+    const parsed = parseDxfToResult(SAMPLE_DXF, '实验楼', 1);
+    const r = parsed.rooms[0];
+    r.code = '101';
+    r.number = '101';
+    r.name = '保卫处办公室';
+    r.dept = '保卫处';
+    r.useArea = 12.5;
+    r.buildArea = 15.2;
+    const fid = store.importFloor({
+      buildingName: '实验楼',
+      floorNo: 1,
+      parsed,
+      coordSource: 'local',
+      transform,
+    });
+    const room = store.roomsOfFloor(fid)[0];
+    expect(room.code).toBe('101');
+    expect(room.number).toBe('101');
+    expect(room.name).toBe('保卫处办公室');
+    expect(room.dept).toBe('保卫处');
+    expect(room.useArea).toBeCloseTo(12.5, 5);
+    expect(room.buildArea).toBeCloseTo(15.2, 5);
+  });
 });

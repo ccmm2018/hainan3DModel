@@ -63,6 +63,52 @@ const floors = computed(() => store.floorsOf(props.buildingName ?? ''));
 const selectedFloor = ref<number>(1);
 const colorMode = ref<ColorMode>('inspect');
 
+// ---- 缩放 / 平移（楼层切换保留）----
+// 注意：必须声明在下方 immediate watch 之前——该 watch 会在 setup 阶段同步调用
+// resetView()，若 zoom/panX/panY 尚未初始化会触发 TDZ（Cannot access 'zoom' before initialization）。
+const zoom = ref(1);
+const panX = ref(0);
+const panY = ref(0);
+const stageRef = ref<HTMLElement | null>(null);
+const MIN_ZOOM = 0.3;
+const MAX_ZOOM = 6;
+
+function clamp(v: number, lo: number, hi: number): number {
+  return Math.min(hi, Math.max(lo, v));
+}
+
+/** 以 (cx,cy)（stage 内像素）为锚点缩放 */
+function zoomAt(cx: number, cy: number, factor: number): void {
+  const nz = clamp(zoom.value * factor, MIN_ZOOM, MAX_ZOOM);
+  const real = nz / zoom.value;
+  panX.value = cx - (cx - panX.value) * real;
+  panY.value = cy - (cy - panY.value) * real;
+  zoom.value = nz;
+}
+
+function onWheel(ev: WheelEvent): void {
+  const stage = stageRef.value;
+  if (!stage) return;
+  const rect = stage.getBoundingClientRect();
+  zoomAt(ev.clientX - rect.left, ev.clientY - rect.top, ev.deltaY < 0 ? 1.12 : 1 / 1.12);
+}
+function zoomBy(factor: number): void {
+  const stage = stageRef.value;
+  if (!stage) return;
+  const rect = stage.getBoundingClientRect();
+  zoomAt(rect.width / 2, rect.height / 2, factor);
+}
+function resetView(): void {
+  zoom.value = 1;
+  panX.value = 0;
+  panY.value = 0;
+}
+
+const svgStyle = computed(() => ({
+  transform: `translate(${panX.value}px, ${panY.value}px) scale(${zoom.value})`,
+  transformOrigin: '0 0',
+}));
+
 watch(
   [() => props.modelValue, () => props.buildingName, floors],
   () => {
@@ -453,49 +499,7 @@ function saveEdit(): void {
   ElMessage.success('已保存房间信息');
 }
 
-// ---- 缩放 / 平移（楼层切换保留）----
-const zoom = ref(1);
-const panX = ref(0);
-const panY = ref(0);
-const stageRef = ref<HTMLElement | null>(null);
-const MIN_ZOOM = 0.3;
-const MAX_ZOOM = 6;
-
-function clamp(v: number, lo: number, hi: number): number {
-  return Math.min(hi, Math.max(lo, v));
-}
-
-/** 以 (cx,cy)（stage 内像素）为锚点缩放 */
-function zoomAt(cx: number, cy: number, factor: number): void {
-  const nz = clamp(zoom.value * factor, MIN_ZOOM, MAX_ZOOM);
-  const real = nz / zoom.value;
-  panX.value = cx - (cx - panX.value) * real;
-  panY.value = cy - (cy - panY.value) * real;
-  zoom.value = nz;
-}
-
-function onWheel(ev: WheelEvent): void {
-  const stage = stageRef.value;
-  if (!stage) return;
-  const rect = stage.getBoundingClientRect();
-  zoomAt(ev.clientX - rect.left, ev.clientY - rect.top, ev.deltaY < 0 ? 1.12 : 1 / 1.12);
-}
-function zoomBy(factor: number): void {
-  const stage = stageRef.value;
-  if (!stage) return;
-  const rect = stage.getBoundingClientRect();
-  zoomAt(rect.width / 2, rect.height / 2, factor);
-}
-function resetView(): void {
-  zoom.value = 1;
-  panX.value = 0;
-  panY.value = 0;
-}
-
-const svgStyle = computed(() => ({
-  transform: `translate(${panX.value}px, ${panY.value}px) scale(${zoom.value})`,
-  transformOrigin: '0 0',
-}));
+// ---- 缩放 / 平移 相关函数与状态已在上方（immediate watch 之前）声明，避免 TDZ ----
 </script>
 
 <template>

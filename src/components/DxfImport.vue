@@ -34,6 +34,7 @@ import {
   polygonAreaDiffRatio,
 } from '../utils/coordinate';
 import { polygonCentroid, type Pt } from '../utils/geometry';
+import { parseDxfToResult } from '../utils/dxfParser';
 import { validateDxf, type DxfValidation } from '../utils/dxfValidate';
 import type { BuildingFingerprint, CoordSource, DxfParseResult, Floor, FloorTransform, ParsedRoom } from '../types/cad';
 import type { MatchResult } from '../utils/matcher';
@@ -280,6 +281,9 @@ interface PendingReq {
   resolve: (r: DxfParseResult) => void;
   reject: (e: Error) => void;
   onPhase?: (p: 'decoding' | 'parsing') => void;
+  /** 兜底主线程解析所需：回退时要重新解码+解析 */
+  buffer: ArrayBuffer;
+  enc: string;
 }
 const pending = new Map<number, PendingReq>();
 
@@ -306,6 +310,15 @@ function ensureWorker(): Worker | null {
       if (result) req.resolve(result);
       else req.reject(new Error(error ?? '解析失败'));
     };
+    // 关键修复：Worker 加载/运行失败（最常见情况是构建后的 dist 用 file:// 直接打开、
+    // 模块 Worker 不被支持、或 worker 脚本 404）时，浏览器不会自动 reject 挂起的请求，
+    // 进度条会永久卡在「已接收 / 解码中」。这里捕获 onerror，立即把挂起请求转主线程兜底解析。
+    worker.onerror = () => {
+      for (const [id, req] of pending) {
+        pending.delete(id);
+        void parseOnMain(req.buffer, req.enc, (p) => req.onPhase?.(p)).then(req.resolve, req.reject);
+      }
+    };
   } catch {
     worker = null;
   }
@@ -323,7 +336,7 @@ async function decodeBuffer(buf: ArrayBuffer, enc: string): Promise<string> {
   return decodeDxf(buf);
 }
 
-/** 主线程兜底解析（无 Worker 时） */
+/** 主线程兜底解析（无 Worker / Worker 失败时）。用静态导入，避免动态 import 在异常环境下二次失败。 */
 async function parseOnMain(
   buffer: ArrayBuffer,
   enc: string,
@@ -332,8 +345,7 @@ async function parseOnMain(
   onPhase('decoding');
   const text = await decodeBuffer(buffer, enc);
   onPhase('parsing');
-  const mod = await import('../utils/dxfParser');
-  return mod.parseDxfToResult(text, '', 0, { expandBlocks: expandBlocks.value });
+  return parseDxfToResult(text, '', 0, { expandBlocks: expandBlocks.value });
 }
 
 function parseInWorker(
@@ -345,7 +357,7 @@ function parseInWorker(
   const w = ensureWorker();
   if (!w) return parseOnMain(buffer, enc, onPhase);
   return new Promise<DxfParseResult>((resolve, reject) => {
-    pending.set(id, { resolve, reject, onPhase });
+    pending.set(id, { resolve, reject, onPhase, buffer, enc });
     // 不 transfer：结构化克隆会复制 buffer，保留 item.buffer 供确认入库使用
     w.postMessage({ id, buffer, encoding: enc });
     window.setTimeout(() => {

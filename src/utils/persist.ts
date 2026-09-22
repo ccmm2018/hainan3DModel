@@ -143,6 +143,12 @@ export interface Persistence {
   removeFloor(buildingName: string, floorNo: number, version?: number): Promise<void>;
   /** 写回楼栋指纹 */
   saveFingerprint(buildingName: string, fp: BuildingFingerprint): Promise<void>;
+  /**
+   * 清空某栋楼的全部本地数据（楼层 / 房间 / 指纹 / DXF 原文件）。
+   * 主要用于清理历史上由「演示种子」写入的测试楼栋，使其在未上传真实 DXF 前
+   * 与其它楼栋一致地显示为「暂无室内图纸」空态。
+   */
+  clearBuilding(buildingName: string): Promise<void>;
   /** 取回 DXF 原文件（用于重新下载 / 再导入） */
   getBlob(blobId: string): Promise<DxfBlob | undefined>;
   /** 启动恢复：读出全部已持久化数据 */
@@ -188,6 +194,18 @@ export function createPersistence(backend: KvBackend): Persistence {
 
     async saveFingerprint(buildingName, fp) {
       await backend.put(STORE_FP, buildingName, fp);
+    },
+
+    async clearBuilding(buildingName) {
+      const recs = await backend.getAll<PersistedFloorRecord>(STORE_FLOORS);
+      for (const { key, value } of recs) {
+        if (value?.floor?.buildingName === buildingName) {
+          if (value.dxfBlobId) await backend.delete(STORE_BLOBS, value.dxfBlobId);
+          await backend.delete(STORE_FLOORS, key);
+          await backend.delete(STORE_ROOMS, key);
+        }
+      }
+      await backend.delete(STORE_FP, buildingName);
     },
 
     async getBlob(blobId) {

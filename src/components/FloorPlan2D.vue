@@ -6,7 +6,8 @@
  * - 数据坐标 X 东 / Y 北，SVG 的 Y 向下，故做 Y 翻转：
  *     scale = min(viewW/(maxX-minX), viewH/(maxY-minY)) * 0.95
  *     toScreen(p) = [ (p[0]-minX)*scale + padX, (maxY-p[1])*scale + padY ]
- * - 每个房间一个 <polygon>，@click / @mouseenter / @mouseleave；selected=false 的半透明。
+ * - 每个房间渲染为 2.5D 立体块：底面淡描边（定位参照）+ 四壁拉伸出的侧壁（深色）+ 抬升后的顶面（房间配色 + 阴影）。
+ *   墙面高度由 wallLift（「墙高」滑杆，默认 14px，仅「稍微拉伸」）控制；按底面质心 y 做画家算法排序保证遮挡正确。
  * - 房间中央文字按屏幕面积从大到小降级：房间号码(14px 粗) / 房间名称(10px) /
  *   部门(9px 灰) / 使用面积(9px 白底圆角)。
  * - 配色（按审图状态）：normal=#AED6F1，highlight=#C0392B，warning=#8E44AD，
@@ -72,6 +73,9 @@ const panY = ref(0);
 const stageRef = ref<HTMLElement | null>(null);
 const MIN_ZOOM = 0.3;
 const MAX_ZOOM = 6;
+/** 2.5D 墙面拉伸高度（屏幕 px；CSS transform 已含 zoom，故无需再乘 zoom）。
+ *  默认 14：仅「稍微拉伸」，呈现一块块格子边被抬起、带立体厚度的 2.5D 平面图。 */
+const wallLift = ref(14);
 
 function clamp(v: number, lo: number, hi: number): number {
   return Math.min(hi, Math.max(lo, v));
@@ -193,6 +197,17 @@ function hslToHex(h: number, s: number, l: number): string {
   return `#${f(0)}${f(8)}${f(4)}`;
 }
 
+/** 颜色加深 amt∈[0,1]，用于由房间顶面色推导墙面（侧面）色，制造 2.5D 立体感 */
+function darken(hex: string, amt: number): string {
+  const h = hex.replace('#', '');
+  const full = h.length === 3 ? h.split('').map((c) => c + c).join('') : h;
+  const n = parseInt(full, 16);
+  const r = Math.round(((n >> 16) & 255) * (1 - amt));
+  const g = Math.round(((n >> 8) & 255) * (1 - amt));
+  const b = Math.round((n & 255) * (1 - amt));
+  return `#${((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1)}`;
+}
+
 function hashHue(s: string): number {
   let h = 0;
   for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) & 0xffffffff;
@@ -239,10 +254,13 @@ const fit = computed(() => {
   const b = bounds.value;
   const w = Math.max(b.maxX - b.minX, 1e-6);
   const h = Math.max(b.maxY - b.minY, 1e-6);
-  const scale = Math.min(VIEW_W / w, VIEW_H / h) * FIT_MARGIN;
-  // 居中留白：padX/padY 取「视图中心减去缩放后图形半幅」
+  // 2.5D 拉伸需预留顶部墙高空间，避免抬升后的顶面被裁切
+  const lift = wallLift.value;
+  const availH = VIEW_H - lift - 12;
+  const scale = Math.min(VIEW_W / w, availH / h) * FIT_MARGIN;
   const padX = (VIEW_W - w * scale) / 2;
-  const padY = (VIEW_H - h * scale) / 2;
+  // 向下偏移 lift，使拉伸后的顶面落在视图内
+  const padY = lift + (availH - h * scale) / 2;
   return { scale, padX, padY };
 });
 
@@ -263,11 +281,24 @@ interface LabelLine {
   rect: { x: number; y: number; w: number; h: number } | null;
 }
 
-interface RoomShape {
-  room: RoomLike;
+/** 2.5D 拉伸后的单个房间绘制数据 */
+interface WallFace {
+  /** 侧壁 quad 的 points 串（a→b→tb→ta，底边拉起成的侧面） */
   points: string;
   fill: string;
+}
+interface ExtrudedShape {
+  room: RoomLike;
+  /** 抬升后的顶面多边形（points 串） */
+  topPoints: string;
+  /** 底面（淡描边，仅作定位参照） */
+  bottomPoints: string;
+  /** 各侧壁 quad（房间墙面被拉伸出的立体侧面） */
+  walls: WallFace[];
+  fill: string;
   stroke: string;
+  /** 墙面（侧面）色：由顶面配色加深得到，制造立体感 */
+  wallFill: string;
   dimmed: boolean;
   labelX: number;
   lines: LabelLine[];
@@ -298,29 +329,60 @@ function buildLabelLines(room: RoomLike, areaScreen: number): Omit<LabelLine, 'y
   return lines;
 }
 
-const roomShapes = computed<RoomShape[]>(() => {
+const roomShapes = computed<ExtrudedShape[]>(() => {
+  const lift = wallLift.value;
   const LINE_GAP = 14;
-  return displayedRooms.value.map((room) => {
-    const proj = polyOf(room).map(toScreen);
-    const points = proj.map((p) => `${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(' ');
+  const fmt = (p: [number, number]) => `${p[0].toFixed(1)},${p[1].toFixed(1)}`;
+  const raw = displayedRooms.value.map((room) => {
+    // base：底面（原始平面，未拉伸）；top：向上抬升 lift 像素后的顶面
+    const base = polyOf(room).map(toScreen);
+    const top = base.map(([x, y]) => [x, y - lift] as [number, number]);
+    const topPoints = top.map(fmt).join(' ');
+    const bottomPoints = base.map(fmt).join(' ');
     const color = colorFor(room);
-    const selected = room.selected !== false;
-    const c = toScreen(room.centroid);
-    const areaScreen = polygonArea(proj);
+    // 墙面（侧面）色 = 顶面配色加深 0.22，立体感来自此
+    const wallFill = darken(color, 0.22);
+    const walls: WallFace[] = [];
+    for (let i = 0; i < base.length; i++) {
+      const a = base[i];
+      const b = base[(i + 1) % base.length];
+      const ta = top[i];
+      const tb = top[(i + 1) % top.length];
+      // 每条底边拉起的侧壁 quad（a→b→tb→ta）
+      walls.push({ points: `${fmt(a)} ${fmt(b)} ${fmt(tb)} ${fmt(ta)}`, fill: wallFill });
+    }
+    // 标签锚点放在抬升后的顶面质心
+    const cBottom = toScreen(room.centroid);
+    const cTop: [number, number] = [cBottom[0], cBottom[1] - lift];
+    const areaScreen = polygonArea(top);
     const baseLines = buildLabelLines(room, areaScreen);
-    const startY = c[1] - ((baseLines.length - 1) * LINE_GAP) / 2;
+    const startY = cTop[1] - ((baseLines.length - 1) * LINE_GAP) / 2;
     const lines: LabelLine[] = baseLines.map((ln, i) => {
       const y = startY + i * LINE_GAP;
       let rect: LabelLine['rect'] = null;
       if (ln.badge) {
         const w = Math.max(ln.text.length * ln.size * 0.62 + 8, 22);
         const h = ln.size + 6;
-        rect = { x: c[0] - w / 2, y: y - h / 2, w, h };
+        rect = { x: cTop[0] - w / 2, y: y - h / 2, w, h };
       }
       return { ...ln, y, rect };
     });
-    return { room, points, fill: color, stroke: color, dimmed: !selected, labelX: c[0], lines };
+    return {
+      room,
+      topPoints,
+      bottomPoints,
+      walls,
+      fill: color,
+      stroke: color,
+      wallFill,
+      dimmed: room.selected !== false,
+      labelX: cTop[0],
+      lines,
+    };
   });
+  // 画家算法：按底面质心屏幕 y 升序（上方=后方先画），保证拉伸块前后遮挡正确
+  raw.sort((p, q) => toScreen(p.room.centroid)[1] - toScreen(q.room.centroid)[1]);
+  return raw;
 });
 
 /** 楼层外轮廓（预览模式绘制为虚线参照） */
@@ -538,6 +600,8 @@ function saveEdit(): void {
           </el-radio-group>
         </div>
         <div class="fpv__zoom">
+          <span class="fpv__modes-label">墙高</span>
+          <el-slider v-model="wallLift" :min="0" :max="60" :step="2" :show-tooltip="false" class="fpv__lift" />
           <el-button-group>
             <el-button size="small" title="放大" @click="zoomBy(1.2)">＋</el-button>
             <el-button size="small" title="缩小" @click="zoomBy(1 / 1.2)">－</el-button>
@@ -597,14 +661,25 @@ function saveEdit(): void {
               @mouseleave="onLeave"
               @click="onSelect(shape.room)"
             >
+              <!-- 底面淡描边：仅作定位参照 -->
+              <polygon :points="shape.bottomPoints" fill="none" :stroke="shape.stroke" stroke-width="0.6" opacity="0.25" />
+              <!-- 侧壁：房间墙面被拉伸出的立体侧面 -->
               <polygon
-                :points="shape.points"
+                v-for="(w, wi) in shape.walls"
+                :key="'w' + wi"
+                :points="w.points"
+                :fill="w.fill"
+                stroke="none"
+              />
+              <!-- 顶面：房间配色 + 阴影 -->
+              <polygon
+                :points="shape.topPoints"
                 :fill="shape.fill"
                 :stroke="shape.stroke"
                 :stroke-width="hoveredId === shape.room.id ? 3 : 1.2"
                 :filter="shape.dimmed ? undefined : 'url(#roomShadow)'"
               />
-              <template v-for="(ln, i) in shape.lines" :key="i">
+              <template v-for="(ln, i) in shape.lines" :key="'l' + i">
                 <rect
                   v-if="ln.rect"
                   :x="ln.rect.x"
@@ -751,14 +826,25 @@ function saveEdit(): void {
           @mouseleave="onLeave"
           @click="onSelect(shape.room)"
         >
+          <!-- 底面淡描边：仅作定位参照 -->
+          <polygon :points="shape.bottomPoints" fill="none" :stroke="shape.stroke" stroke-width="0.6" opacity="0.25" />
+          <!-- 侧壁：房间墙面被拉伸出的立体侧面 -->
           <polygon
-            :points="shape.points"
+            v-for="(w, wi) in shape.walls"
+            :key="'w' + wi"
+            :points="w.points"
+            :fill="w.fill"
+            stroke="none"
+          />
+          <!-- 顶面：房间配色 + 阴影 -->
+          <polygon
+            :points="shape.topPoints"
             :fill="shape.fill"
             :stroke="shape.stroke"
             :stroke-width="hoveredId === shape.room.id ? 3 : 1.2"
             :filter="shape.dimmed ? undefined : 'url(#roomShadow)'"
           />
-          <template v-for="(ln, i) in shape.lines" :key="i">
+          <template v-for="(ln, i) in shape.lines" :key="'l' + i">
             <rect
               v-if="ln.rect"
               :x="ln.rect.x"

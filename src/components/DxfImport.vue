@@ -20,7 +20,7 @@
  *   [约束8] 步骤2/3 的编码/单位/坐标/字段自动推断结果均在界面明示并支持人工纠正；
  *   解析（步骤1→3）全部在 dxf.worker.ts 执行 [约束7]，主线程无 >100ms 同步解析。
  */
-import { computed, onBeforeUnmount, ref, watch } from 'vue';
+import { computed, markRaw, onBeforeUnmount, reactive, ref, watch } from 'vue';
 import { ElMessage, ElMessageBox, type UploadFile, type UploadRawFile } from 'element-plus';
 import { useBuildingStore } from '../stores/building';
 import AnchorPicker from './AnchorPicker.vue';
@@ -423,7 +423,7 @@ async function parseFile(item: UploadItem, file: File): Promise<void> {
     const result = await parseInWorker(++reqId, buf, encoding.value, (p) => {
       item.status = p; // decoding / parsing
     });
-    item.result = result;
+    item.result = markRaw(result);
     item.coordSource = result.coordSource;
     item.status = 'done';
   } catch (err) {
@@ -439,12 +439,16 @@ function enqueueFile(raw: File): void {
     ElMessage.error(`「${raw.name}」不是 .dxf 文件，已跳过`);
     return;
   }
-  const item: UploadItem = {
+  // 关键：用 reactive 创建 item，使 parseFile 闭包里的所有状态变更（status / result /
+  // buffer / error / coordSource）都经过响应式代理的 set 陷阱，从而正确触发进度条与
+  // canNext 重渲染。若此处用普通对象，push 进 ref 数组后数组里存的是它的代理，而闭包里
+  // 仍是原始对象，Worker 回包后对其属性的修改不会触发重渲染，进度条会卡在初始的 15%（received）。
+  const item = reactive<UploadItem>({
     id: nextUid(),
     name: raw.name,
     size: raw.size,
     status: 'received',
-  };
+  });
   items.value.push(item);
   void parseFile(item, raw);
 }
@@ -473,7 +477,7 @@ async function reparse(item: UploadItem): Promise<void> {
     const result = await parseOnMain(item.buffer, encoding.value, (p) => {
       item.status = p;
     });
-    item.result = result;
+    item.result = markRaw(result);
     item.coordSource = result.coordSource;
     item.status = 'done';
   } catch (err) {

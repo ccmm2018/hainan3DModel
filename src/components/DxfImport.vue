@@ -537,8 +537,8 @@ function toggleExclude(room: ParsedRoom, excluded: boolean): void {
 // 离开步骤 4 / 切换激活文件时，清除预览确认状态（需重新确认）
 watch([step, activeId], ([s]) => {
   if (s !== 3) previewConfirmed.value = false;
-  // 离开步骤 6（确认归属）或切换文件时，清空归属确认态：禁止自动绑定，必须逐个重确认
-  if (s !== 5) attributionConfirmed.value = false;
+  // 注意：归属确认态（attributionConfirmed）不在离开步骤时清空，仅在「切换文件」时清空
+  // （见下方 watch(activeId)），避免用户在步骤间往返时刚确认的绑定被意外抹掉、红色「未匹配」误报
 });
 watch(activeId, () => {
   previewConfirmed.value = false;
@@ -1144,9 +1144,19 @@ onBeforeUnmount(() => {
 
       <!-- 步骤 6 确认归属（必经，不可跳过，禁止自动绑定） -->
       <section v-else-if="step === 5 && activeItem?.result" class="dxf-panel">
-        <!-- 匹配状态告警 -->
+        <!-- 已确认绑定：优先展示成功态，覆盖未匹配的红色告警 -->
         <el-alert
-          v-if="attributionStatus === 'strong' && matchResult?.candidates.length"
+          v-if="attributionConfirmed"
+          class="dxf-preview"
+          type="success"
+          :closable="false"
+          :title="`已确认归属：${effectiveBuildingName} ${effectiveFloorNo}F`"
+        >
+          <template #default>{{ attributionStatus === 'none' ? '已手动指定楼栋并完成绑定' : '已采用系统匹配结果并完成绑定' }}（可点击下方「下一步」继续）</template>
+        </el-alert>
+        <!-- 匹配状态告警（未确认前展示） -->
+        <el-alert
+          v-else-if="attributionStatus === 'strong' && matchResult?.candidates.length"
           class="dxf-preview"
           type="success"
           :closable="false"
@@ -1166,7 +1176,7 @@ onBeforeUnmount(() => {
           </template>
         </el-alert>
         <el-alert
-          v-else-if="attributionStatus === 'none'"
+          v-else-if="attributionStatus === 'none' && !attributionConfirmed"
           class="dxf-preview"
           type="error"
           :closable="false"

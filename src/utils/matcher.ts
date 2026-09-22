@@ -259,7 +259,7 @@ export function matchBuildings(fp: Fingerprint, buildings: BuildingDataMap): Mat
       status: 'none',
       candidates: [],
       matches: [],
-      reasons: ['楼栋尚未录入指纹信息（centerUtm / azimuth / footprintArea），无法自动匹配，请手动指定。'],
+      reasons: ['楼栋库中还没有对应楼栋的位置与轮廓信息，系统无法自动判断它属于哪栋楼。请点「下一步」，在「确认归属」中手动选择归属楼栋。'],
     };
   }
 

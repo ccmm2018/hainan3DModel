@@ -1065,7 +1065,7 @@ onBeforeUnmount(() => {
           <el-alert
             v-if="matchResult"
             class="dxf-preview"
-            :type="matchResult.status === 'strong' ? 'success' : matchResult.status === 'weak' ? 'warning' : 'error'"
+            :type="matchResult.status === 'strong' ? 'success' : 'warning'"
             :closable="false"
           >
             <template #title>
@@ -1095,10 +1095,10 @@ onBeforeUnmount(() => {
 
           <!-- 自动算得的楼栋指纹（取自「楼层外轮廓线」） -->
           <div v-if="computedFingerprint.centerUtm" class="dxf-fp">
-            <div class="dxf-fp__title">自动算得楼栋指纹（取自「楼层外轮廓线」）</div>
+            <div class="dxf-fp__title">从图纸自动识别的楼栋位置与轮廓（源自「楼层外轮廓线」图层）</div>
             <div class="dxf-fp__grid">
               <div class="dxf-fp__cell">
-                <span class="dxf-fp__k">中心 UTM</span>
+                <span class="dxf-fp__k">轮廓中心位置</span>
                 <span class="dxf-fp__v">[{{ computedFingerprint.centerUtm[0].toFixed(1) }}, {{ computedFingerprint.centerUtm[1].toFixed(1) }}]</span>
               </div>
               <div class="dxf-fp__cell">
@@ -1106,7 +1106,7 @@ onBeforeUnmount(() => {
                 <span class="dxf-fp__v">{{ computedFingerprint.footprintArea ? computedFingerprint.footprintArea.toFixed(0) : '—' }} ㎡</span>
               </div>
               <div class="dxf-fp__cell">
-                <span class="dxf-fp__k">主轴方位</span>
+                <span class="dxf-fp__k">轮廓朝向</span>
                 <span class="dxf-fp__v">{{ computedFingerprint.azimuth != null ? computedFingerprint.azimuth.toFixed(1) + '°' : '—' }}</span>
               </div>
             </div>
@@ -1181,7 +1181,7 @@ onBeforeUnmount(() => {
           class="dxf-preview"
           type="info"
           :closable="false"
-          title="局部坐标 / 无外轮廓图纸：无自动匹配，请手动指定归属楼栋"
+          title="局部坐标 / 无外轮廓图纸：不支持自动匹配，请在下方手动选择归属楼栋"
         />
 
         <!-- 弱匹配候选单选 -->

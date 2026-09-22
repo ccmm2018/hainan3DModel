@@ -149,7 +149,7 @@ describe('matcher - 楼栋匹配', () => {
     const buildings: BuildingDataMap = { A: { name: 'A' }, B: { name: 'B', height: 30 } };
     const r = matchBuildings(FP, buildings);
     expect(r.status).toBe('none');
-    expect(r.reasons[0]).toContain('尚未录入指纹');
+    expect(r.reasons[0]).toContain('楼栋库中还没有');
   });
 
   it('房间闭合轮廓不参与匹配（仅用楼层外轮廓指纹）', () => {

@@ -156,4 +156,33 @@ describe('building store', () => {
     expect(store.getFloor('图书馆', 1)!.status).toBe('parsed');
     expect(store.getFloor('图书馆', 1)!.errorReason).toBeUndefined();
   });
+
+  it('刷新后（applyPersisted）仍可按楼栋+楼层反查到房间', () => {
+    // 回归：applyPersisted 曾用 floor.id（教学楼-F1）作主键，而 getFloor 按
+    // floorKey（教学楼#1）反查，导致刷新/重启后楼层列表有、但打开显示「暂无房间数据」。
+    const store = useBuildingStore();
+    const parsed = parseDxfToResult(SAMPLE_DXF, '教学楼', 1);
+    const fid = store.importFloor({
+      buildingName: '教学楼',
+      floorNo: 1,
+      fileName: 'a.dxf',
+      parsed,
+      coordSource: 'local',
+      transform,
+    });
+    const rooms = store.roomsOfFloor(fid);
+    expect(rooms.length).toBeGreaterThan(0);
+
+    // 模拟 IndexedDB 恢复：floors 记录以 f.id 为存储键进入 applyPersisted
+    store.applyPersisted({
+      floors: [{ ...store.getFloor('教学楼', 1)! }],
+      roomsByFloor: { [fid]: rooms },
+      fingerprints: {},
+    });
+
+    // 关键回归断言：getFloor 必须能按 buildingName+floorNo 反查（主键已由 applyPersisted 规整为 floorKey）
+    expect(store.getFloor('教学楼', 1)?.id).toBe(fid);
+    expect(store.floorsOf('教学楼')).toContain(1);
+    expect(store.roomsOfFloor(fid).length).toBe(rooms.length);
+  });
 });

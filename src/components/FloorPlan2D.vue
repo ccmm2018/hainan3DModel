@@ -26,7 +26,7 @@ import { CircleCloseFilled, WarningFilled } from '@element-plus/icons-vue';
 import { useBuildingStore } from '../stores/building';
 import { polygonArea } from '../utils/geometry';
 import { isRoomFieldComplete } from '../utils/roomFields';
-import type { InspectStatus, ParsedRoom, Room, UseStatus } from '../types/cad';
+import type { Floor, InspectStatus, ParsedRoom, Room, UseStatus } from '../types/cad';
 
 const props = withDefaults(
   defineProps<{
@@ -35,8 +35,10 @@ const props = withDefaults(
     /** 预览嵌入模式：传入即渲染预览（不显示 el-dialog） */
     preview?: { rooms: ParsedRoom[]; outline?: [number, number][] | null } | null;
     embedded?: boolean;
+    /** 全屏工作区形态：为 true 时 el-dialog 以 fullscreen 呈现（替代弹窗，做成「单独界面」） */
+    fullscreen?: boolean;
   }>(),
-  { modelValue: false, buildingName: '', preview: null, embedded: false },
+  { modelValue: false, buildingName: '', preview: null, embedded: false, fullscreen: false },
 );
 
 const emit = defineEmits<{
@@ -74,8 +76,19 @@ const stageRef = ref<HTMLElement | null>(null);
 const MIN_ZOOM = 0.3;
 const MAX_ZOOM = 6;
 /** 2.5D 墙面拉伸高度（屏幕 px；CSS transform 已含 zoom，故无需再乘 zoom）。
- *  默认 14：仅「稍微拉伸」，呈现一块块格子边被抬起、带立体厚度的 2.5D 平面图。 */
-const wallLift = ref(14);
+ *  默认 22：配合斜等轴测投影，呈现明显抬起的立体楼块。 */
+const wallLift = ref(22);
+
+/** 投影方式：top=俯视（垂直抬升，平面感强）/ oblique=斜等轴测（默认，立体感强）。
+ *  原实现沿正上方直拉，看上去像俯视平面贴薄边、无立体感；oblique 沿右上仰角抬升即出楼块感。 */
+const projection = ref<'top' | 'oblique'>('oblique');
+const ELEV_ANGLE = (35 * Math.PI) / 180; // 斜向抬升仰角
+/** 由「墙高」滑杆 + 投影方式算出顶面的抬升向量（屏幕 px）。
+ *  top 模式纯垂直；oblique 模式沿右上 (cos35, -sin35) 斜拉。 */
+function liftVector(lift: number): [number, number] {
+  if (projection.value === 'top') return [0, -lift];
+  return [lift * Math.cos(ELEV_ANGLE), -lift * Math.sin(ELEV_ANGLE)];
+}
 
 function clamp(v: number, lo: number, hi: number): number {
   return Math.min(hi, Math.max(lo, v));
@@ -136,6 +149,63 @@ const displayedRooms = computed<RoomLike[]>(() => {
   if (!f) return [];
   return store.roomsOfFloor(f.id);
 });
+
+/** 右侧楼层格子数据：每格显示楼层号 / 房间数 / 总面积 / 状态（来自已上传 DXF 的楼层） */
+const floorSummary = computed(() =>
+  floors.value.map((f) => {
+    const floor = store.getFloor(props.buildingName ?? '', f);
+    const list = floor ? store.roomsOfFloor(floor.id) : [];
+    const area = list.reduce((s, r) => s + (r.useArea || 0), 0);
+    return {
+      floorNo: f,
+      id: floor?.id ?? '',
+      roomCount: list.length,
+      area,
+      status: (floor?.status ?? 'pending') as Floor['status'],
+    };
+  }),
+);
+
+/** 当前选中楼层的房间列表（右侧房间列表用） */
+const floorRooms = computed<RoomLike[]>(() =>
+  currentFloor.value ? store.roomsOfFloor(currentFloor.value.id) : [],
+);
+
+const roomTab = ref<'edit' | 'detail' | 'maint'>('detail');
+
+function selectFloor(n: number): void {
+  selectedFloor.value = n;
+  selectedId.value = null;
+  fillMode.value = false;
+  roomTab.value = 'detail';
+}
+
+function floorStatusLabel(s: Floor['status']): string {
+  return { pending: '待导入', parsed: '正常', partial: '部分完成', failed: '失败' }[s] ?? s;
+}
+
+// ---- 维护信息（Room.maintenance）----
+const maintForm = reactive({ responsibleDept: '', lastInspect: '', note: '' });
+function loadMaint(r: RoomLike | null): void {
+  const m = r && 'maintenance' in r ? r.maintenance : undefined;
+  maintForm.responsibleDept = m?.responsibleDept ?? '';
+  maintForm.lastInspect = m?.lastInspect ?? '';
+  maintForm.note = m?.note ?? '';
+}
+
+function saveMaint(): void {
+  const f = currentFloor.value;
+  const r = selectedRoom.value;
+  if (!f || !r) return;
+  store.updateRoom(f.id, r.id, {
+    maintenance: {
+      responsibleDept: maintForm.responsibleDept.trim() || undefined,
+      lastInspect: maintForm.lastInspect.trim() || undefined,
+      note: maintForm.note.trim() || undefined,
+    },
+  });
+  ElMessage.success('已保存维护信息');
+}
 
 // ---- 空状态 / 错误状态 / 部分成功状态（store 模式，针对当前选中楼层）----
 const isFailed = computed(() => props.embedded ? false : currentFloor.value?.status === 'failed');
@@ -254,13 +324,17 @@ const fit = computed(() => {
   const b = bounds.value;
   const w = Math.max(b.maxX - b.minX, 1e-6);
   const h = Math.max(b.maxY - b.minY, 1e-6);
-  // 2.5D 拉伸需预留顶部墙高空间，避免抬升后的顶面被裁切
+  // 2.5D 拉伸需预留顶/右侧墙高空间，避免斜向抬升后的顶面/右壁被裁切
   const lift = wallLift.value;
-  const availH = VIEW_H - lift - 12;
-  const scale = Math.min(VIEW_W / w, availH / h) * FIT_MARGIN;
+  const lv = liftVector(lift);
+  const reserveTop = Math.abs(lv[1]) + 12;
+  const reserveRight = Math.abs(lv[0]) + 12;
+  const availW = VIEW_W - reserveRight;
+  const availH = VIEW_H - reserveTop;
+  const scale = Math.min(availW / w, availH / h) * FIT_MARGIN;
   const padX = (VIEW_W - w * scale) / 2;
-  // 向下偏移 lift，使拉伸后的顶面落在视图内
-  const padY = lift + (availH - h * scale) / 2;
+  // 向下偏移 reserveTop，使斜向抬升后的顶面落在视图内
+  const padY = reserveTop + (availH - h * scale) / 2;
   return { scale, padX, padY };
 });
 
@@ -334,9 +408,10 @@ const roomShapes = computed<ExtrudedShape[]>(() => {
   const LINE_GAP = 14;
   const fmt = (p: [number, number]) => `${p[0].toFixed(1)},${p[1].toFixed(1)}`;
   const raw = displayedRooms.value.map((room) => {
-    // base：底面（原始平面，未拉伸）；top：向上抬升 lift 像素后的顶面
+    // base：底面（原始平面，未拉伸）；top：沿抬升向量斜拉 lift 后的顶面（oblique 呈立体楼块）
     const base = polyOf(room).map(toScreen);
-    const top = base.map(([x, y]) => [x, y - lift] as [number, number]);
+    const lv = liftVector(lift);
+    const top = base.map(([x, y]) => [x + lv[0], y + lv[1]] as [number, number]);
     const topPoints = top.map(fmt).join(' ');
     const bottomPoints = base.map(fmt).join(' ');
     const color = colorFor(room);
@@ -351,9 +426,9 @@ const roomShapes = computed<ExtrudedShape[]>(() => {
       // 每条底边拉起的侧壁 quad（a→b→tb→ta）
       walls.push({ points: `${fmt(a)} ${fmt(b)} ${fmt(tb)} ${fmt(ta)}`, fill: wallFill });
     }
-    // 标签锚点放在抬升后的顶面质心
+    // 标签锚点放在斜向抬升后的顶面质心（复用上方已算出的 lv）
     const cBottom = toScreen(room.centroid);
-    const cTop: [number, number] = [cBottom[0], cBottom[1] - lift];
+    const cTop: [number, number] = [cBottom[0] + lv[0], cBottom[1] + lv[1]];
     const areaScreen = polygonArea(top);
     const baseLines = buildLabelLines(room, areaScreen);
     const startY = cTop[1] - ((baseLines.length - 1) * LINE_GAP) / 2;
@@ -463,6 +538,9 @@ function onLeave(): void {
 
 const selectedRoom = computed(() => displayedRooms.value.find((r) => r.id === selectedId.value) ?? null);
 
+/** 选中房间变化时，同步加载其维护信息到表单 */
+watch(selectedRoom, (r) => loadMaint(r), { immediate: true });
+
 function onSelect(room: RoomLike): void {
   if (props.embedded) {
     emit('room-click', room as ParsedRoom);
@@ -571,44 +649,19 @@ function saveEdit(): void {
     :title="`${buildingName} · 楼宇分层图（2.5D）`"
     width="80%"
     top="5vh"
+    :fullscreen="fullscreen"
+    :show-header="!fullscreen"
+    :show-close="!fullscreen"
     class="fpv-dialog"
   >
     <el-empty v-if="!floors.length" description="暂无室内图纸，请先导入">
       <el-button type="primary" @click="requestImport">导入图纸</el-button>
     </el-empty>
 
-    <div v-else class="fpv">
-      <div class="fpv__top">
-        <div class="fpv__floors">
-          <button
-            v-for="f in floors"
-            :key="f"
-            class="fpv__floor-btn"
-            :class="{ active: f === selectedFloor }"
-            @click="selectedFloor = f; selectedId = null"
-          >
-            {{ f }}F
-          </button>
-        </div>
-        <div class="fpv__modes">
-          <span class="fpv__modes-label">着色</span>
-          <el-radio-group v-model="colorMode" size="small">
-            <el-radio-button value="use">业务状态</el-radio-button>
-            <el-radio-button value="inspect">审图状态</el-radio-button>
-            <el-radio-button value="dept">按部门</el-radio-button>
-            <el-radio-button value="purpose">按用途</el-radio-button>
-          </el-radio-group>
-        </div>
-        <div class="fpv__zoom">
-          <span class="fpv__modes-label">墙高</span>
-          <el-slider v-model="wallLift" :min="0" :max="60" :step="2" :show-tooltip="false" class="fpv__lift" />
-          <el-button-group>
-            <el-button size="small" title="放大" @click="zoomBy(1.2)">＋</el-button>
-            <el-button size="small" title="缩小" @click="zoomBy(1 / 1.2)">－</el-button>
-            <el-button size="small" title="复位视图" @click="resetView">复位</el-button>
-          </el-button-group>
-        </div>
-        <el-button link type="primary" class="fpv__import" @click="requestImport">+ 导入图纸</el-button>
+    <div v-else class="fpv fpv--ws">
+      <div v-if="fullscreen" class="fpv__head">
+        <strong class="fpv__title">{{ buildingName }} · 楼宇分层图（2.5D）</strong>
+        <el-button link type="primary" @click="visible = false">← 返回地图</el-button>
       </div>
 
       <div v-if="isFailed" class="fpv-state fpv-state--failed">
@@ -727,17 +780,91 @@ function saveEdit(): void {
           <p v-if="!roomShapes.length" class="fpv-embed-empty">暂无房间数据</p>
         </div>
 
-        <div class="fpv-side">
+        <aside class="fpv-side fpv-side--ws">
           <div class="fpv-legend">
             <span v-for="l in legend" :key="l.label" class="fpv-legend__item">
               <i :style="{ background: l.color }"></i>{{ l.label }}
             </span>
           </div>
-          <div class="fpv-info">
-            <template v-if="selectedRoom">
-              <div class="fpv-info__title">{{ selectedRoom.code || selectedRoom.name }} · {{ selectedRoom.name }}</div>
 
-              <div v-if="fillMode" class="fpv-edit">
+          <!-- 楼层格子：按已上传 DXF 动态生成，每格显示楼层信息 -->
+          <section class="fpv-sec">
+            <h4 class="fpv-sec__title">楼层（{{ floorSummary.length }}）</h4>
+            <div class="fpv-floorgrid">
+              <button
+                v-for="c in floorSummary"
+                :key="c.floorNo"
+                class="fpv-floorcard"
+                :class="{ active: c.floorNo === selectedFloor }"
+                @click="selectFloor(c.floorNo)"
+              >
+                <div class="fpv-floorcard__no">{{ c.floorNo }}F</div>
+                <div class="fpv-floorcard__meta">{{ c.roomCount }} 间 · {{ c.area.toFixed(0) }} ㎡</div>
+                <span class="fpv-floorcard__status" :data-s="c.status">{{ floorStatusLabel(c.status) }}</span>
+              </button>
+            </div>
+          </section>
+
+          <!-- 工具操作按钮 -->
+          <section class="fpv-sec">
+            <h4 class="fpv-sec__title">工具</h4>
+            <div class="fpv-tools">
+              <el-button size="small" type="primary" plain @click="requestImport">+ 导入图纸</el-button>
+              <div class="fpv-tools__row">
+                <span class="fpv-tools__label">视角</span>
+                <el-radio-group v-model="projection" size="small">
+                  <el-radio-button value="oblique">立体</el-radio-button>
+                  <el-radio-button value="top">俯视</el-radio-button>
+                </el-radio-group>
+              </div>
+              <div class="fpv-tools__row">
+                <span class="fpv-tools__label">着色</span>
+                <el-radio-group v-model="colorMode" size="small">
+                  <el-radio-button value="use">业务</el-radio-button>
+                  <el-radio-button value="inspect">审图</el-radio-button>
+                  <el-radio-button value="dept">部门</el-radio-button>
+                  <el-radio-button value="purpose">用途</el-radio-button>
+                </el-radio-group>
+              </div>
+              <div class="fpv-tools__row">
+                <span class="fpv-tools__label">墙高</span>
+                <el-slider v-model="wallLift" :min="0" :max="60" :step="2" :show-tooltip="false" class="fpv__lift" />
+              </div>
+              <div class="fpv-tools__row">
+                <el-button-group>
+                  <el-button size="small" @click="zoomBy(1.2)">＋</el-button>
+                  <el-button size="small" @click="zoomBy(1 / 1.2)">－</el-button>
+                  <el-button size="small" @click="resetView">复位</el-button>
+                </el-button-group>
+              </div>
+            </div>
+          </section>
+
+          <!-- 房间列表 + 选中房间的 信息修改 / 详情 / 维护信息 入口 -->
+          <section class="fpv-sec fpv-sec--grow">
+            <h4 class="fpv-sec__title">房间（{{ floorRooms.length }}）</h4>
+            <ul v-if="floorRooms.length" class="fpv-roomlist">
+              <li
+                v-for="r in floorRooms"
+                :key="r.id"
+                class="fpv-roomlist__item"
+                :class="{ active: r.id === selectedId }"
+                @click="onSelect(r)"
+              >
+                <span class="fpv-roomlist__code">{{ r.code || r.name }}</span>
+                <span class="fpv-roomlist__name">{{ r.name }}</span>
+              </li>
+            </ul>
+            <p v-else class="fpv-info__hint">本层暂无房间</p>
+
+            <div v-if="selectedRoom" class="fpv-roomdetail">
+              <el-tabs v-model="roomTab">
+                <el-tab-pane label="信息修改" name="edit" />
+                <el-tab-pane label="详情" name="detail" />
+                <el-tab-pane label="维护信息" name="maint" />
+              </el-tabs>
+
+              <div v-show="roomTab === 'edit'" class="fpv-edit">
                 <div class="fpv-edit__row"><label>房间号</label><el-input v-model="editRoom.code" size="small" /></div>
                 <div class="fpv-edit__row"><label>名称</label><el-input v-model="editRoom.name" size="small" /></div>
                 <div class="fpv-edit__row"><label>部门</label><el-input v-model="editRoom.dept" size="small" /></div>
@@ -748,32 +875,40 @@ function saveEdit(): void {
                   <el-button type="primary" size="small" @click="saveEdit">保存</el-button>
                   <el-button size="small" @click="fillMode = false">取消</el-button>
                 </div>
+                <div class="fpv-info__actions">
+                  <el-button size="small" @click="setUseStatus('occupied')">使用中</el-button>
+                  <el-button size="small" @click="setUseStatus('noaccess')">无权限</el-button>
+                  <el-button size="small" @click="setUseStatus('vacant')">空置</el-button>
+                  <el-button size="small" text @click="setUseStatus('')">清空</el-button>
+                </div>
+                <div class="fpv-info__actions">
+                  <el-button size="small" type="danger" plain @click="hideRoom">隐藏此房间</el-button>
+                </div>
               </div>
 
-              <dl v-else>
+              <dl v-show="roomTab === 'detail'" class="fpv-detail">
                 <div><dt>房间号</dt><dd>{{ selectedRoom.code || '—' }}</dd></div>
                 <div><dt>名称</dt><dd>{{ selectedRoom.name || '—' }}</dd></div>
                 <div><dt>部门</dt><dd>{{ selectedRoom.dept || '—' }}</dd></div>
                 <div><dt>用途</dt><dd>{{ selectedRoom.usePurpose || '—' }}</dd></div>
                 <div><dt>使用面积</dt><dd>{{ selectedRoom.useArea.toFixed(1) }} ㎡</dd></div>
                 <div><dt>建筑面积</dt><dd>{{ selectedRoom.buildArea.toFixed(1) }} ㎡</dd></div>
+                <div><dt>业务状态</dt><dd>{{ USE_LABELS[selectedRoom.useStatus] }}</dd></div>
+                <div><dt>审图状态</dt><dd>{{ INSPECT_LABELS[selectedRoom.inspectStatus] }}</dd></div>
               </dl>
-              <div class="fpv-info__actions">
-                <el-button size="small" @click="setUseStatus('occupied')">使用中</el-button>
-                <el-button size="small" @click="setUseStatus('noaccess')">无权限</el-button>
-                <el-button size="small" @click="setUseStatus('vacant')">空置</el-button>
-                <el-button size="small" text @click="setUseStatus('')">清空</el-button>
-                <el-button v-if="isPartial" size="small" type="warning" plain @click="startFill">补填信息</el-button>
+
+              <div v-show="roomTab === 'maint'" class="fpv-edit">
+                <div class="fpv-edit__row"><label>责任部门</label><el-input v-model="maintForm.responsibleDept" size="small" /></div>
+                <div class="fpv-edit__row"><label>最近巡检</label><el-input v-model="maintForm.lastInspect" size="small" placeholder="yyyy-mm-dd" /></div>
+                <div class="fpv-edit__row"><label>备注</label><el-input v-model="maintForm.note" size="small" type="textarea" :rows="2" /></div>
+                <div class="fpv-info__actions">
+                  <el-button type="primary" size="small" @click="saveMaint">保存维护信息</el-button>
+                </div>
               </div>
-              <div class="fpv-info__actions">
-                <el-button size="small" type="danger" plain @click="hideRoom">隐藏此房间</el-button>
-              </div>
-            </template>
-            <p v-else class="fpv-info__hint">点击房间查看详情 / 分配业务状态</p>
-            <el-button size="small" link @click="showAll">显示全部房间</el-button>
-          </div>
-          <p class="fpv-note">* 面积为图纸坐标变换后的估算值（㎡）。</p>
-        </div>
+            </div>
+            <el-button v-if="floorRooms.length" size="small" link class="fpv-showall" @click="showAll">显示全部房间</el-button>
+          </section>
+        </aside>
         </div>
       </template>
     </div>
@@ -916,23 +1051,60 @@ function saveEdit(): void {
 .fpv-edit__row { display: flex; align-items: center; gap: 8px; }
 .fpv-edit__row label { width: 56px; font-size: 13px; color: #6b7280; flex-shrink: 0; }
 .fpv-edit__row :deep(.el-input) { flex: 1; }
-.fpv__top { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
 .fpv__top--embed { justify-content: space-between; }
-.fpv__floors { display: flex; flex-wrap: wrap; gap: 8px; }
-.fpv__floor-btn {
-  border: 1px solid #d0d5dd;
-  background: #fff;
-  color: #4b5563;
-  border-radius: 7px;
-  padding: 6px 14px;
-  cursor: pointer;
-  font-size: 13px;
+.fpv__head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 2px 2px 10px; }
+.fpv__title { font-size: 16px; font-weight: 700; color: #111827; }
+
+/* 工作区主区：中央 stage + 右侧栏 */
+.fpv--ws { display: flex; flex-direction: column; gap: 10px; height: 100%; }
+.fpv--ws .fpv-main { flex: 1; min-height: 0; }
+.fpv--ws .fpv-stage { height: 100%; }
+.fpv--ws .fpv-svg { height: 100%; min-height: 50vh; }
+
+/* 右侧栏 */
+.fpv-side--ws { width: 340px; border-left: 1px solid #eef0f3; padding-left: 14px; overflow-y: auto; gap: 14px; }
+.fpv-sec { display: flex; flex-direction: column; gap: 8px; }
+.fpv-sec__title { margin: 0; font-size: 13px; font-weight: 700; color: #374151; }
+.fpv-sec--grow { flex: 1; min-height: 0; }
+
+/* 楼层格子 */
+.fpv-floorgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(92px, 1fr)); gap: 8px; }
+.fpv-floorcard {
+  display: flex; flex-direction: column; gap: 2px; align-items: flex-start;
+  border: 1px solid #d0d5dd; background: #fff; border-radius: 9px; padding: 8px 10px;
+  cursor: pointer; text-align: left; transition: all .15s;
 }
-.fpv__floor-btn.active { background: #2563eb; border-color: #2563eb; color: #fff; font-weight: 600; }
-.fpv__modes { display: flex; align-items: center; gap: 8px; }
-.fpv__modes-label { font-size: 13px; color: #6b7280; }
-.fpv__zoom { display: flex; align-items: center; }
-.fpv__import { margin-left: auto; }
+.fpv-floorcard:hover { border-color: #93c5fd; }
+.fpv-floorcard.active { background: #eff6ff; border-color: #2563eb; box-shadow: 0 0 0 2px rgba(37,99,235,.15); }
+.fpv-floorcard__no { font-size: 15px; font-weight: 700; color: #111827; }
+.fpv-floorcard__meta { font-size: 11px; color: #6b7280; }
+.fpv-floorcard__status { font-size: 11px; padding: 1px 7px; border-radius: 999px; background: #f1f5f9; color: #64748b; }
+.fpv-floorcard__status[data-s="parsed"] { background: #dcfce7; color: #15803d; }
+.fpv-floorcard__status[data-s="partial"] { background: #fef9c3; color: #a16207; }
+.fpv-floorcard__status[data-s="failed"] { background: #fee2e2; color: #b91c1c; }
+
+/* 工具 */
+.fpv-tools { display: flex; flex-direction: column; gap: 8px; }
+.fpv-tools__row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.fpv-tools__label { font-size: 13px; color: #6b7280; width: 32px; flex-shrink: 0; }
+.fpv__lift { flex: 1; min-width: 80px; }
+
+/* 房间列表 */
+.fpv-roomlist { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; max-height: 220px; overflow-y: auto; }
+.fpv-roomlist__item { display: flex; gap: 8px; padding: 6px 8px; border-radius: 7px; cursor: pointer; font-size: 13px; border: 1px solid transparent; }
+.fpv-roomlist__item:hover { background: #f8fafc; }
+.fpv-roomlist__item.active { background: #eff6ff; border-color: #bfdbfe; }
+.fpv-roomlist__code { font-weight: 700; color: #1f2937; }
+.fpv-roomlist__name { color: #6b7280; }
+
+/* 房间详情（tabs） */
+.fpv-roomdetail { margin-top: 10px; border: 1px solid #e5e7eb; border-radius: 10px; padding: 10px 12px; background: #fff; }
+.fpv-detail { margin: 0; }
+.fpv-detail div { display: flex; justify-content: space-between; padding: 4px 0; font-size: 13px; border-bottom: 1px dashed #eef0f3; }
+.fpv-detail div:last-child { border-bottom: 0; }
+.fpv-detail dt { color: #6b7280; }
+.fpv-detail dd { margin: 0; color: #111827; }
+.fpv-showall { margin-top: 8px; }
 .fpv-main { display: flex; gap: 12px; align-items: stretch; }
 .fpv-stage { position: relative; flex: 1; border: 1px solid #e5e7eb; border-radius: 10px; overflow: hidden; background: #fbfcfe; }
 .fpv-svg { display: block; width: 100%; height: 60vh; }

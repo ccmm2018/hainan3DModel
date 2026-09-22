@@ -112,6 +112,16 @@ export interface Floor {
   transform?: FloorTransform;
 }
 
+/** 房间维护信息（巡检 / 责任等），随楼层一并持久化 */
+export interface RoomMaintenance {
+  /** 责任部门 */
+  responsibleDept?: string;
+  /** 最近巡检日期（ISO yyyy-mm-dd） */
+  lastInspect?: string;
+  /** 维护备注 */
+  note?: string;
+}
+
 /** 单个房间（新增） */
 export interface Room {
   /** `${floorId}-${index}` */
@@ -144,6 +154,8 @@ export interface Room {
   remark?: string;
   /** 预览确认阶段用户可剔除误识别房间 */
   selected?: boolean;
+  /** 维护信息（巡检 / 责任等） */
+  maintenance?: RoomMaintenance;
 }
 
 // ---------------------------------------------------------------------------

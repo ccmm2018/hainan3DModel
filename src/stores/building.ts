@@ -279,7 +279,10 @@ export const useBuildingStore = defineStore('building', () => {
     fid: string,
     roomId: string,
     patch: Partial<
-      Pick<Room, 'code' | 'number' | 'name' | 'dept' | 'usePurpose' | 'useArea' | 'buildArea' | 'inspectStatus'>
+      Pick<
+        Room,
+        'code' | 'number' | 'name' | 'dept' | 'usePurpose' | 'useArea' | 'buildArea' | 'inspectStatus' | 'maintenance'
+      >
     >,
   ): void {
     const list = rooms.value[fid];
@@ -320,8 +323,13 @@ export const useBuildingStore = defineStore('building', () => {
    */
   function applyPersisted(state: LoadedState): void {
     for (const f of state.floors) {
-      // 用持久化记录里的真实 id 作为主键（可能含 -v{n} 版本后缀）
-      floors.value[f.id] = f;
+      // 主键必须与 importFloor 保持一致：用 floorKey（buildingName#floorNo[#version]），
+      // 而非 floor.id（buildingName-FfloorNo[-v{n}]）。否则 getFloor 按 floorKey 反查会落空，
+      // 表现为「楼层列表有楼栋、但打开后显示『暂无房间数据』」（刷新/重启后必现）。
+      let version = 1;
+      const m = /-v(\d+)$/.exec(f.id);
+      if (m) version = Number(m[1]);
+      floors.value[floorKey(f.buildingName, f.floorNo, version)] = f;
     }
     for (const [fid, list] of Object.entries(state.roomsByFloor)) {
       rooms.value[fid] = list;

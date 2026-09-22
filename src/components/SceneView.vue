@@ -435,6 +435,7 @@
     <FloorPlan2D
       v-model="floorPlan2DVisible"
       :building-name="floorPlanBuilding"
+      :fullscreen="true"
       @request-import="dxfImportVisible = true"
     />
     <DxfImport

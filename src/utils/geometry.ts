@@ -277,6 +277,25 @@ export function principalAxisAngle(points: Pt[]): number {
   return deg;
 }
 
+/**
+ * 闭合三选一判定：判断一个环的「闭合状态」，返回三种之一：
+ *   - 'closed'         首末点重合（容差 eps 内）且未自交
+ *   - 'self-intersect' 存在自交（优先级最高；自交环必然也是「未正确闭合」）
+ *   - 'open'           首末未闭合（开放多段线）
+ * 用途：校验阶段 C4（轮廓闭合性）据此给出告警级别与文案。
+ */
+export type RingClosure = 'closed' | 'open' | 'self-intersect';
+
+export function classifyRing(pts: Pt[], eps = 1e-4): RingClosure {
+  if (pts.length < 3) return 'open';
+  // 自交优先：自交环无法作为有效闭合面
+  if (isSelfIntersecting(pts)) return 'self-intersect';
+  const f = pts[0];
+  const l = pts[pts.length - 1];
+  const closed = Math.abs(f[0] - l[0]) < eps && Math.abs(f[1] - l[1]) < eps;
+  return closed ? 'closed' : 'open';
+}
+
 /** 相似变换：先旋转，再缩放，再平移 */
 export function transformPoint(p: Pt, t: FloorTransform): Pt {
   const c = Math.cos(t.rotation);

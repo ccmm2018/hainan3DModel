@@ -23,7 +23,7 @@
  * - 预览嵌入模式（embedded + preview）：不渲染 el-dialog，仅渲染 SVG stage，
  *   数据源为入库前候选（ParsedRoom[]），点击房间 emit('room-click') 交由导入向导编辑。
  */
-import { computed, reactive, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import { ElMessage } from 'element-plus';
 import { CircleCloseFilled, WarningFilled } from '@element-plus/icons-vue';
 import { useBuildingStore } from '../stores/building';
@@ -83,10 +83,10 @@ const wallHeight = ref(3);
 /** 倾斜横向（plan oblique / 斜二测）投影系数：
  *  X 轴保持水平（横向），Y 轴沿右上方向倾斜 TILT 角后退，Z（墙高）沿屏幕竖直向上。
  *  平面点 (x,y) 投屏：sx = x + y * OBLIQ_COS，sy = -y * OBLIQ_SIN - z（z 为高度，米）。
- *  TILT=30° 时倾斜系数 sin30°=0.5（不小于 0.5，确保足够纵深感，不退化成平面）。 */
-const OBLIQ_TILT = Math.PI / 6; // 30°
-const OBLIQ_COS = Math.cos(OBLIQ_TILT); // 0.8660254
-const OBLIQ_SIN = Math.sin(OBLIQ_TILT); // 0.5
+ *  TILT=40°（默认初始视角：向观看方向倾斜 40°，sin40°≈0.643，不小于 0.5，不退化成平面）。 */
+const OBLIQ_TILT = (40 * Math.PI) / 180; // 40°
+const OBLIQ_COS = Math.cos(OBLIQ_TILT); // ≈0.766
+const OBLIQ_SIN = Math.sin(OBLIQ_TILT); // ≈0.643
 /** 高度夸张系数（1 = 与楼层平面同真实比例，墙体即真实 wallHeight 米高）。 */
 const Z_EXAG = 1;
 /** 墙体厚度（米）：把一条墙线拉伸成有体积的墙体时赋予的真实厚度。 */
@@ -121,7 +121,44 @@ function resetView(): void {
   zoom.value = 1;
   panX.value = 0;
   panY.value = 0;
+  viewRotation.value = 0;
 }
+
+/** 视图旋转（度）：绕画面中心旋转整张 2.5D 平面图，默认 0（不旋转）。 */
+const viewRotation = ref(0);
+
+// ---- 拖拽平移（在 stage 上按住左键拖动）----
+const isPanning = ref(false);
+const dragMoved = ref(false);
+let dragStart = { x: 0, y: 0, panX: 0, panY: 0 };
+function onStageMouseDown(e: MouseEvent): void {
+  if (e.button !== 0) return;
+  isPanning.value = true;
+  dragMoved.value = false;
+  dragStart = { x: e.clientX, y: e.clientY, panX: panX.value, panY: panY.value };
+}
+function onStageMouseMove(e: MouseEvent): void {
+  if (!isPanning.value) return;
+  const dx = e.clientX - dragStart.x;
+  const dy = e.clientY - dragStart.y;
+  if (Math.abs(dx) > 3 || Math.abs(dy) > 3) dragMoved.value = true;
+  panX.value = dragStart.panX + dx;
+  panY.value = dragStart.panY + dy;
+}
+function onStageMouseUp(): void {
+  isPanning.value = false;
+}
+function onStageMouseLeave(): void {
+  isPanning.value = false;
+}
+onMounted(() => {
+  window.addEventListener('mousemove', onStageMouseMove);
+  window.addEventListener('mouseup', onStageMouseUp);
+});
+onBeforeUnmount(() => {
+  window.removeEventListener('mousemove', onStageMouseMove);
+  window.removeEventListener('mouseup', onStageMouseUp);
+});
 
 const svgStyle = computed(() => ({
   transform: `translate(${panX.value}px, ${panY.value}px) scale(${zoom.value})`,
@@ -168,18 +205,10 @@ const floorSummary = computed(() =>
   }),
 );
 
-/** 当前选中楼层的房间列表（右侧房间列表用） */
-const floorRooms = computed<RoomLike[]>(() =>
-  currentFloor.value ? store.roomsOfFloor(currentFloor.value.id) : [],
-);
-
-const roomTab = ref<'edit' | 'detail' | 'maint'>('detail');
-
 function selectFloor(n: number): void {
   selectedFloor.value = n;
   selectedId.value = null;
   fillMode.value = false;
-  roomTab.value = 'detail';
 }
 
 function floorStatusLabel(s: Floor['status']): string {
@@ -708,6 +737,9 @@ const legend = computed(() => {
 // ---- 交互：hover / 选中 / tooltip ----
 const hoveredId = ref<string | null>(null);
 const selectedId = ref<string | null>(null);
+/** 点击房间弹出的小卡片位置（stage 内像素坐标）与展开模式 */
+const popupPos = ref({ x: 0, y: 0 });
+const popMode = ref<'edit' | 'maint' | null>(null);
 const hoveredRoom = ref<RoomLike | null>(null);
 const tipVisible = ref(false);
 const tipPos = ref({ x: 0, y: 0 });
@@ -747,12 +779,38 @@ const selectedRoom = computed(() => displayedRooms.value.find((r) => r.id === se
 /** 选中房间变化时，同步加载其维护信息到表单 */
 watch(selectedRoom, (r) => loadMaint(r), { immediate: true });
 
-function onSelect(room: RoomLike): void {
+function onSelect(room: RoomLike, ev?: MouseEvent): void {
   if (props.embedded) {
     emit('room-click', room as ParsedRoom);
     return;
   }
-  selectedId.value = selectedId.value === room.id ? null : room.id;
+  // 拖拽平移结束后松手会触发一次 click，需忽略（避免误选）
+  if (dragMoved.value) {
+    dragMoved.value = false;
+    return;
+  }
+  const isSame = selectedId.value === room.id;
+  selectedId.value = isSame ? null : room.id;
+  if (!selectedId.value) return;
+  popMode.value = null;
+  const stage = stageRef.value;
+  if (!stage) return;
+  const r = stage.getBoundingClientRect();
+  let x: number;
+  let y: number;
+  if (ev) {
+    // 以点击点为锚，向右下偏移，避免遮挡房间
+    x = ev.clientX - r.left + 14;
+    y = ev.clientY - r.top + 14;
+  } else {
+    // 由房间列表等无坐标来源触发时，居中偏上
+    x = r.width / 2 - 130;
+    y = 24;
+  }
+  // 夹取在舞台内，防止弹出卡片被裁切
+  x = Math.min(Math.max(x, 8), Math.max(8, r.width - 268));
+  y = Math.min(Math.max(y, 8), Math.max(8, r.height - 248));
+  popupPos.value = { x, y };
 }
 
 function setUseStatus(status: UseStatus): void {
@@ -765,11 +823,6 @@ function hideRoom(): void {
   if (!f || !selectedRoom.value) return;
   store.setRoomSelected(f.id, selectedRoom.value.id, false);
   selectedId.value = null;
-}
-function showAll(): void {
-  const f = currentFloor.value;
-  if (!f) return;
-  for (const r of store.roomsOfFloor(f.id)) store.setRoomSelected(f.id, r.id, true);
 }
 
 /** 预览模式下：剔除 / 恢复房间（直接改 preview.rooms 上的 selected） */
@@ -889,7 +942,7 @@ function saveEdit(): void {
         </div>
 
         <div class="fpv-main">
-          <div class="fpv-stage" ref="stageRef" @wheel.prevent="onWheel">
+          <div class="fpv-stage" ref="stageRef" @wheel.prevent="onWheel" @mousedown="onStageMouseDown" @mouseleave="onStageMouseLeave">
           <svg
             :viewBox="`0 0 ${VIEW_W} ${VIEW_H}`"
             class="fpv-svg"
@@ -905,9 +958,10 @@ function saveEdit(): void {
                 <stop offset="100%" stop-color="#aeb6c2" />
               </linearGradient>
             </defs>
-            <rect x="0" y="0" :width="VIEW_W" :height="VIEW_H" fill="#fbfcfe" />
+            <rect x="0" y="0" :width="VIEW_W" :height="VIEW_H" fill="#fbfcfe" pointer-events="none" />
+            <g :transform="`rotate(${viewRotation} ${VIEW_W / 2} ${VIEW_H / 2})`">
             <!-- ① 地面(楼板) + ② 走廊：楼层外轮廓填充；房间在③层覆盖其上，自然得到「外轮廓减房间」的走廊区 -->
-            <path v-if="outlinePath" :d="outlinePath" fill="#eef1f5" stroke="#c4cbd4" stroke-width="1.5" />
+            <path v-if="outlinePath" :d="outlinePath" fill="#eef1f5" stroke="#c4cbd4" stroke-width="1.5" pointer-events="none" />
             <!-- ③ 房间平铺填充（z=0 地面，无侧面） -->
             <g
               v-for="rf in roomFills"
@@ -916,7 +970,7 @@ function saveEdit(): void {
               :opacity="rf.dimmed ? 0.18 : 1"
               @mouseenter="onEnter(rf.room, $event)"
               @mouseleave="onLeave"
-              @click="onSelect(rf.room)"
+              @click="onSelect(rf.room, $event)"
             >
               <polygon
                 :points="rf.points"
@@ -925,15 +979,16 @@ function saveEdit(): void {
                 :stroke-width="hoveredId === rf.id ? 2.5 : 1"
               />
             </g>
-            <!-- ④ 墙侧面（先画） -->
+            <!-- ④ 墙侧面（先画，仅作视觉，不拦截点击） -->
             <polygon
               v-for="(f, i) in wallSideFaces"
               :key="'s' + i"
               :points="f.points"
               :fill="f.fill"
               stroke="none"
+              pointer-events="none"
             />
-            <!-- ⑤ 墙顶面（后画，盖在侧面上）：浅灰实心面，非白线 -->
+            <!-- ⑤ 墙顶面（后画，盖在侧面上）：浅灰实心面，非白线，不拦截点击 -->
             <polygon
               v-for="(f, i) in wallTopFaces"
               :key="'t' + i"
@@ -941,6 +996,7 @@ function saveEdit(): void {
               :fill="f.fill"
               stroke="#8a8a8a"
               stroke-width="0.5"
+              pointer-events="none"
             />
             <!-- ⑥ 文字（最上层） -->
             <g class="fpv-labels" pointer-events="none">
@@ -969,6 +1025,7 @@ function saveEdit(): void {
                 </g>
               </template>
             </g>
+            </g>
           </svg>
 
           <el-tooltip
@@ -990,6 +1047,61 @@ function saveEdit(): void {
               </div>
             </template>
           </el-tooltip>
+
+          <!-- 点击房间弹出的小卡片：房间信息 + 修改 / 维护入口（替代原右侧房间信息面板） -->
+          <div
+            v-if="selectedRoom"
+            class="fpv-pop"
+            :style="{ left: popupPos.x + 'px', top: popupPos.y + 'px' }"
+            @mousedown.stop
+          >
+            <div class="fpv-pop__hd">
+              <span class="fpv-pop__title">{{ selectedRoom.code || selectedRoom.name || '未命名房间' }}</span>
+              <button class="fpv-pop__x" type="button" @click="selectedId = null">×</button>
+            </div>
+            <div class="fpv-pop__info">
+              <div><span>名称</span><b>{{ selectedRoom.name || '—' }}</b></div>
+              <div><span>部门</span><b>{{ selectedRoom.dept || '—' }}</b></div>
+              <div><span>用途</span><b>{{ selectedRoom.usePurpose || '—' }}</b></div>
+              <div><span>使用面积</span><b>{{ selectedRoom.useArea.toFixed(1) }} ㎡</b></div>
+              <div><span>建筑面积</span><b>{{ selectedRoom.buildArea.toFixed(1) }} ㎡</b></div>
+              <div><span>业务状态</span><b>{{ USE_LABELS[selectedRoom.useStatus] }}</b></div>
+              <div><span>审图状态</span><b>{{ INSPECT_LABELS[selectedRoom.inspectStatus] }}</b></div>
+            </div>
+            <div class="fpv-pop__acts">
+              <el-button size="small" :type="popMode === 'edit' ? 'primary' : 'default'" @click="popMode = 'edit'">修改信息</el-button>
+              <el-button size="small" :type="popMode === 'maint' ? 'primary' : 'default'" @click="popMode = 'maint'">维护房间信息</el-button>
+            </div>
+            <div v-if="popMode === 'edit'" class="fpv-pop__form">
+              <div class="fpv-edit__row"><label>房间号</label><el-input v-model="editRoom.code" size="small" /></div>
+              <div class="fpv-edit__row"><label>名称</label><el-input v-model="editRoom.name" size="small" /></div>
+              <div class="fpv-edit__row"><label>部门</label><el-input v-model="editRoom.dept" size="small" /></div>
+              <div class="fpv-edit__row"><label>用途</label><el-input v-model="editRoom.usePurpose" size="small" /></div>
+              <div class="fpv-edit__row"><label>使用面积</label><el-input v-model="editRoom.useArea" size="small" type="number" /></div>
+              <div class="fpv-edit__row"><label>建筑面积</label><el-input v-model="editRoom.buildArea" size="small" type="number" /></div>
+              <div class="fpv-info__actions">
+                <el-button type="primary" size="small" @click="saveEdit">保存</el-button>
+              </div>
+              <div class="fpv-info__actions">
+                <el-button size="small" @click="setUseStatus('occupied')">使用中</el-button>
+                <el-button size="small" @click="setUseStatus('noaccess')">无权限</el-button>
+                <el-button size="small" @click="setUseStatus('vacant')">空置</el-button>
+                <el-button size="small" text @click="setUseStatus('')">清空</el-button>
+              </div>
+              <div class="fpv-info__actions">
+                <el-button size="small" type="danger" plain @click="hideRoom">隐藏此房间</el-button>
+              </div>
+            </div>
+            <div v-if="popMode === 'maint'" class="fpv-pop__form">
+              <div class="fpv-edit__row"><label>责任部门</label><el-input v-model="maintForm.responsibleDept" size="small" /></div>
+              <div class="fpv-edit__row"><label>最近巡检</label><el-input v-model="maintForm.lastInspect" size="small" placeholder="yyyy-mm-dd" /></div>
+              <div class="fpv-edit__row"><label>备注</label><el-input v-model="maintForm.note" size="small" type="textarea" :rows="2" /></div>
+              <div class="fpv-info__actions">
+                <el-button type="primary" size="small" @click="saveMaint">保存维护信息</el-button>
+              </div>
+            </div>
+          </div>
+
           <p v-if="!roomFills.length" class="fpv-embed-empty">暂无房间数据</p>
         </div>
 
@@ -1037,6 +1149,10 @@ function saveEdit(): void {
                 <el-slider v-model="wallHeight" :min="1" :max="5" :step="0.5" :show-tooltip="true" class="fpv__lift" />
               </div>
               <div class="fpv-tools__row">
+                <span class="fpv-tools__label">旋转</span>
+                <el-slider v-model="viewRotation" :min="-180" :max="180" :step="5" :show-tooltip="true" class="fpv__lift" />
+              </div>
+              <div class="fpv-tools__row">
                 <el-button-group>
                   <el-button size="small" @click="zoomBy(1.2)">＋</el-button>
                   <el-button size="small" @click="zoomBy(1 / 1.2)">－</el-button>
@@ -1046,74 +1162,6 @@ function saveEdit(): void {
             </div>
           </section>
 
-          <!-- 房间列表 + 选中房间的 信息修改 / 详情 / 维护信息 入口 -->
-          <section class="fpv-sec fpv-sec--grow">
-            <h4 class="fpv-sec__title">房间（{{ floorRooms.length }}）</h4>
-            <ul v-if="floorRooms.length" class="fpv-roomlist">
-              <li
-                v-for="r in floorRooms"
-                :key="r.id"
-                class="fpv-roomlist__item"
-                :class="{ active: r.id === selectedId }"
-                @click="onSelect(r)"
-              >
-                <span class="fpv-roomlist__code">{{ r.code || r.name }}</span>
-                <span class="fpv-roomlist__name">{{ r.name }}</span>
-              </li>
-            </ul>
-            <p v-else class="fpv-info__hint">本层暂无房间</p>
-
-            <div v-if="selectedRoom" class="fpv-roomdetail">
-              <el-tabs v-model="roomTab">
-                <el-tab-pane label="信息修改" name="edit" />
-                <el-tab-pane label="详情" name="detail" />
-                <el-tab-pane label="维护信息" name="maint" />
-              </el-tabs>
-
-              <div v-show="roomTab === 'edit'" class="fpv-edit">
-                <div class="fpv-edit__row"><label>房间号</label><el-input v-model="editRoom.code" size="small" /></div>
-                <div class="fpv-edit__row"><label>名称</label><el-input v-model="editRoom.name" size="small" /></div>
-                <div class="fpv-edit__row"><label>部门</label><el-input v-model="editRoom.dept" size="small" /></div>
-                <div class="fpv-edit__row"><label>用途</label><el-input v-model="editRoom.usePurpose" size="small" /></div>
-                <div class="fpv-edit__row"><label>使用面积</label><el-input v-model="editRoom.useArea" size="small" type="number" /></div>
-                <div class="fpv-edit__row"><label>建筑面积</label><el-input v-model="editRoom.buildArea" size="small" type="number" /></div>
-                <div class="fpv-info__actions">
-                  <el-button type="primary" size="small" @click="saveEdit">保存</el-button>
-                  <el-button size="small" @click="fillMode = false">取消</el-button>
-                </div>
-                <div class="fpv-info__actions">
-                  <el-button size="small" @click="setUseStatus('occupied')">使用中</el-button>
-                  <el-button size="small" @click="setUseStatus('noaccess')">无权限</el-button>
-                  <el-button size="small" @click="setUseStatus('vacant')">空置</el-button>
-                  <el-button size="small" text @click="setUseStatus('')">清空</el-button>
-                </div>
-                <div class="fpv-info__actions">
-                  <el-button size="small" type="danger" plain @click="hideRoom">隐藏此房间</el-button>
-                </div>
-              </div>
-
-              <dl v-show="roomTab === 'detail'" class="fpv-detail">
-                <div><dt>房间号</dt><dd>{{ selectedRoom.code || '—' }}</dd></div>
-                <div><dt>名称</dt><dd>{{ selectedRoom.name || '—' }}</dd></div>
-                <div><dt>部门</dt><dd>{{ selectedRoom.dept || '—' }}</dd></div>
-                <div><dt>用途</dt><dd>{{ selectedRoom.usePurpose || '—' }}</dd></div>
-                <div><dt>使用面积</dt><dd>{{ selectedRoom.useArea.toFixed(1) }} ㎡</dd></div>
-                <div><dt>建筑面积</dt><dd>{{ selectedRoom.buildArea.toFixed(1) }} ㎡</dd></div>
-                <div><dt>业务状态</dt><dd>{{ USE_LABELS[selectedRoom.useStatus] }}</dd></div>
-                <div><dt>审图状态</dt><dd>{{ INSPECT_LABELS[selectedRoom.inspectStatus] }}</dd></div>
-              </dl>
-
-              <div v-show="roomTab === 'maint'" class="fpv-edit">
-                <div class="fpv-edit__row"><label>责任部门</label><el-input v-model="maintForm.responsibleDept" size="small" /></div>
-                <div class="fpv-edit__row"><label>最近巡检</label><el-input v-model="maintForm.lastInspect" size="small" placeholder="yyyy-mm-dd" /></div>
-                <div class="fpv-edit__row"><label>备注</label><el-input v-model="maintForm.note" size="small" type="textarea" :rows="2" /></div>
-                <div class="fpv-info__actions">
-                  <el-button type="primary" size="small" @click="saveMaint">保存维护信息</el-button>
-                </div>
-              </div>
-            </div>
-            <el-button v-if="floorRooms.length" size="small" link class="fpv-showall" @click="showAll">显示全部房间</el-button>
-          </section>
         </aside>
         </div>
       </template>
@@ -1134,9 +1182,13 @@ function saveEdit(): void {
           <el-button size="small" @click="zoomBy(1 / 1.2)">－</el-button>
           <el-button size="small" @click="resetView">复位</el-button>
         </el-button-group>
+        <div class="fpv-tools__row fpv-tools__row--embed">
+          <span class="fpv-tools__label">旋转</span>
+          <el-slider v-model="viewRotation" :min="-180" :max="180" :step="5" :show-tooltip="true" class="fpv__lift" />
+        </div>
       </div>
     </div>
-    <div class="fpv-stage" ref="stageRef" @wheel.prevent="onWheel">
+    <div class="fpv-stage" ref="stageRef" @wheel.prevent="onWheel" @mousedown="onStageMouseDown" @mouseleave="onStageMouseLeave">
       <svg
         :viewBox="`0 0 ${VIEW_W} ${VIEW_H}`"
         class="fpv-svg fpv-svg--embed"
@@ -1152,9 +1204,10 @@ function saveEdit(): void {
             <stop offset="100%" stop-color="#aeb6c2" />
           </linearGradient>
         </defs>
-        <rect x="0" y="0" :width="VIEW_W" :height="VIEW_H" fill="#fbfcfe" />
+        <rect x="0" y="0" :width="VIEW_W" :height="VIEW_H" fill="#fbfcfe" pointer-events="none" />
+        <g :transform="`rotate(${viewRotation} ${VIEW_W / 2} ${VIEW_H / 2})`">
         <!-- ① 地面(楼板) + ② 走廊：楼层外轮廓填充；房间在③层覆盖其上，自然得到「外轮廓减房间」的走廊区 -->
-        <path v-if="outlinePath" :d="outlinePath" fill="#eef1f5" stroke="#c4cbd4" stroke-width="1.5" />
+        <path v-if="outlinePath" :d="outlinePath" fill="#eef1f5" stroke="#c4cbd4" stroke-width="1.5" pointer-events="none" />
         <!-- ③ 房间平铺填充（z=0 地面，无侧面） -->
         <g
           v-for="rf in roomFills"
@@ -1162,25 +1215,26 @@ function saveEdit(): void {
           class="fpv-room"
           :opacity="rf.dimmed ? 0.18 : 1"
           @mouseenter="onEnter(rf.room, $event)"
-          @mouseleave="onLeave"
-          @click="onSelect(rf.room)"
-        >
-          <polygon
-            :points="rf.points"
-            :fill="rf.fill"
-            :stroke="rf.stroke"
-            :stroke-width="hoveredId === rf.id ? 2.5 : 1"
-          />
-        </g>
-        <!-- ④ 墙侧面（先画） -->
+              @mouseleave="onLeave"
+              @click="onSelect(rf.room, $event)"
+            >
+              <polygon
+                :points="rf.points"
+                :fill="rf.fill"
+                :stroke="rf.stroke"
+                :stroke-width="hoveredId === rf.id ? 2.5 : 1"
+              />
+            </g>
+        <!-- ④ 墙侧面（先画，仅作视觉，不拦截点击） -->
         <polygon
           v-for="(f, i) in wallSideFaces"
           :key="'s' + i"
           :points="f.points"
           :fill="f.fill"
           stroke="none"
+          pointer-events="none"
         />
-        <!-- ⑤ 墙顶面（后画，盖在侧面上）：浅灰实心面，非白线 -->
+        <!-- ⑤ 墙顶面（后画，盖在侧面上）：浅灰实心面，非白线，不拦截点击 -->
         <polygon
           v-for="(f, i) in wallTopFaces"
           :key="'t' + i"
@@ -1188,6 +1242,7 @@ function saveEdit(): void {
           :fill="f.fill"
           stroke="#8a8a8a"
           stroke-width="0.5"
+          pointer-events="none"
         />
         <!-- ⑥ 文字（最上层） -->
         <g class="fpv-labels" pointer-events="none">
@@ -1215,6 +1270,7 @@ function saveEdit(): void {
               >{{ ln.text }}</text>
             </g>
           </template>
+        </g>
         </g>
       </svg>
 
@@ -1354,4 +1410,29 @@ function saveEdit(): void {
   font-size: 13px;
   pointer-events: none;
 }
+
+/* 点击房间弹出的小卡片（替代原右侧房间信息面板） */
+.fpv-pop {
+  position: absolute;
+  z-index: 30;
+  width: 252px;
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  box-shadow: 0 10px 30px rgba(15, 23, 42, .18);
+  padding: 10px 12px;
+  font-size: 13px;
+  color: #111827;
+}
+.fpv-pop__hd { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+.fpv-pop__title { font-size: 14px; font-weight: 700; color: #111827; }
+.fpv-pop__x { border: 0; background: transparent; font-size: 18px; line-height: 1; color: #9ca3af; cursor: pointer; padding: 0 2px; }
+.fpv-pop__x:hover { color: #374151; }
+.fpv-pop__info { display: flex; flex-direction: column; gap: 3px; margin-bottom: 8px; }
+.fpv-pop__info div { display: flex; justify-content: space-between; gap: 10px; }
+.fpv-pop__info span { color: #6b7280; }
+.fpv-pop__info b { font-weight: 600; color: #111827; }
+.fpv-pop__acts { display: flex; gap: 8px; margin-bottom: 4px; }
+.fpv-pop__form { border-top: 1px dashed #eef0f3; padding-top: 8px; margin-top: 4px; }
+.fpv-tools__row--embed { margin-left: 10px; min-width: 160px; }
 </style>

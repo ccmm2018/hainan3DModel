@@ -9,7 +9,7 @@
  * - 倾斜横向（plan oblique / 斜二测）投影（无 3D 引擎依赖）：
  *     screenX = x + y * cos(30°)
  *     screenY = -y * sin(30°) - z
- *   楼地面的 X 轴保持水平（横向），Y 轴沿右上方向倾斜 30° 后退，墙体沿屏幕竖直方向拉出高度，
+ *   楼地面的 X 轴保持水平（横向），Y 轴沿右上方向倾斜 15° 后退，墙体沿屏幕竖直方向拉出高度，
  *   形成「俯视平铺、倾斜横向」的 2.5D 楼层图，而非 45° 菱形等轴测；
  *   缩放/居中由 fit 对整层（含墙顶 z=wallHeight）的投影包围盒计算；按墙体地面中点屏幕 Y 排序保证遮挡正确。
  * - 房间中央文字：房间号码(14px 粗) / 房间名称(10px) / 部门(9px 灰) / 使用面积(9px 白底圆角)。
@@ -83,10 +83,10 @@ const wallHeight = ref(3);
 /** 倾斜横向（plan oblique / 斜二测）投影系数：
  *  X 轴保持水平（横向），Y 轴沿右上方向倾斜 TILT 角后退，Z（墙高）沿屏幕竖直向上。
  *  平面点 (x,y) 投屏：sx = x + y * OBLIQ_COS，sy = -y * OBLIQ_SIN - z（z 为高度，米）。
- *  TILT=40°（默认初始视角：向观看方向倾斜 40°，sin40°≈0.643，不小于 0.5，不退化成平面）。 */
-const OBLIQ_TILT = (40 * Math.PI) / 180; // 40°
-const OBLIQ_COS = Math.cos(OBLIQ_TILT); // ≈0.766
-const OBLIQ_SIN = Math.sin(OBLIQ_TILT); // ≈0.643
+ *  TILT=55°（默认初始视角：向观看方向倾斜 55°；sin55°≈0.819，高于 0.5 下限，立体纵深明显更强）。 */
+const OBLIQ_TILT = (55 * Math.PI) / 180; // 55°
+const OBLIQ_COS = Math.cos(OBLIQ_TILT); // ≈0.574
+const OBLIQ_SIN = Math.sin(OBLIQ_TILT); // ≈0.819
 /** 高度夸张系数（1 = 与楼层平面同真实比例，墙体即真实 wallHeight 米高）。 */
 const Z_EXAG = 1;
 /** 墙体厚度（米）：把一条墙线拉伸成有体积的墙体时赋予的真实厚度。 */

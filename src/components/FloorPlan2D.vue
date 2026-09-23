@@ -6,11 +6,12 @@
  * - 渲染架构（建筑分层）：① 楼层外轮廓地面 + ② 走廊（外轮廓减房间，由③层房间覆盖得到）
  *   + ③ 房间平铺填充（z=0 地面，无侧面）+ ④ 墙侧面（外墙线/内墙线拉伸成 wallHeight 米高，先画）
  *   + ⑤ 墙顶面（后画）+ ⑥ 文字标签。墙体高度由「墙高(米)」滑杆驱动。
- * - 标准 30° 等轴测（isometric）投影（无 3D 引擎依赖）：
- *     screenX = (x - y) * 0.866
- *     screenY = (x + y) * 0.5 - z
- *   楼地面（z=0）自然旋转成菱形，墙体沿垂直方向拉出明显高度，可见厚度与侧面；
- *   缩放/居中由 fit 对整层（含墙顶 z=wallHeight）的等轴测包围盒计算；按墙体地面中点屏幕 Y 排序保证遮挡正确。
+ * - 倾斜横向（plan oblique / 斜二测）投影（无 3D 引擎依赖）：
+ *     screenX = x + y * cos(30°)
+ *     screenY = -y * sin(30°) - z
+ *   楼地面的 X 轴保持水平（横向），Y 轴沿右上方向倾斜 30° 后退，墙体沿屏幕竖直方向拉出高度，
+ *   形成「俯视平铺、倾斜横向」的 2.5D 楼层图，而非 45° 菱形等轴测；
+ *   缩放/居中由 fit 对整层（含墙顶 z=wallHeight）的投影包围盒计算；按墙体地面中点屏幕 Y 排序保证遮挡正确。
  * - 房间中央文字：房间号码(14px 粗) / 房间名称(10px) / 部门(9px 灰) / 使用面积(9px 白底圆角)。
  * - 配色（按审图状态）：normal=#AED6F1，highlight=#C0392B，warning=#8E44AD，
  *   partial(字段缺失)=#F5B041。
@@ -79,11 +80,13 @@ const MAX_ZOOM = 6;
 /** 墙体高度（米）：从墙线拉伸出的真实高度，由侧栏「墙高(米)」滑杆控制（默认 3m）。 */
 const wallHeight = ref(3);
 
-/** 标准 30° 等轴测（isometric）投影系数：
- *  水平轴 cos30° = 0.866；纵深轴与垂直抬升 sin30° = 0.5。
- *  平面点 (x,y) 投屏：sx = (x - y) * ISO_COS，sy = (x + y) * ISO_SIN - z（z 为高度，米）。 */
-const ISO_COS = Math.cos(Math.PI / 6); // 0.8660254
-const ISO_SIN = Math.sin(Math.PI / 6); // 0.5
+/** 倾斜横向（plan oblique / 斜二测）投影系数：
+ *  X 轴保持水平（横向），Y 轴沿右上方向倾斜 TILT 角后退，Z（墙高）沿屏幕竖直向上。
+ *  平面点 (x,y) 投屏：sx = x + y * OBLIQ_COS，sy = -y * OBLIQ_SIN - z（z 为高度，米）。
+ *  TILT=30° 时倾斜系数 sin30°=0.5（不小于 0.5，确保足够纵深感，不退化成平面）。 */
+const OBLIQ_TILT = Math.PI / 6; // 30°
+const OBLIQ_COS = Math.cos(OBLIQ_TILT); // 0.8660254
+const OBLIQ_SIN = Math.sin(OBLIQ_TILT); // 0.5
 /** 高度夸张系数（1 = 与楼层平面同真实比例，墙体即真实 wallHeight 米高）。 */
 const Z_EXAG = 1;
 /** 墙体厚度（米）：把一条墙线拉伸成有体积的墙体时赋予的真实厚度。 */
@@ -457,8 +460,8 @@ const fit = computed(() => {
   let minIX = Infinity, maxIX = -Infinity, minIY = Infinity, maxIY = -Infinity;
   const consider = (x: number, y: number, z: number) => {
     const [rx, ry] = rotatePlan([x, y]);
-    const ix = (rx - ry) * ISO_COS;
-    const iy = (rx + ry) * ISO_SIN - z * Z_EXAG;
+    const ix = rx + ry * OBLIQ_COS;
+    const iy = -ry * OBLIQ_SIN - z * Z_EXAG;
     if (ix < minIX) minIX = ix;
     if (ix > maxIX) maxIX = ix;
     if (iy < minIY) minIY = iy;
@@ -492,15 +495,16 @@ function toScreen(p: [number, number]): [number, number] {
   return project(p[0], p[1], 0);
 }
 
-/** 标准 30° 等轴测投影：平面点 (x,y) 抬升 z 米后的屏幕坐标（无任何 3D 引擎依赖）。
- *  screenX = (x - y) * 0.866
- *  screenY = (x + y) * 0.5 - z
- *  楼地面（z=0）自然旋转成菱形；墙体沿垂直方向拉出明显高度，可见厚度与侧面。 */
+/** 倾斜横向（plan oblique）投影：平面点 (x,y) 抬升 z 米后的屏幕坐标（无任何 3D 引擎依赖）。
+ *  screenX = x + y * cos(30°)
+ *  screenY = -y * sin(30°) - z
+ *  楼地面的 X 轴保持水平（横向），Y 轴沿右上倾斜后退，墙体沿屏幕竖直方向拉出高度，
+ *  形成俯视平铺、倾斜横向的 2.5D 楼层图（非 45° 菱形等轴测）。 */
 function project(x: number, y: number, z: number): [number, number] {
   const f = fit.value;
   const [rx, ry] = rotatePlan([x, y]);
-  const ix = (rx - ry) * ISO_COS;
-  const iy = (rx + ry) * ISO_SIN - z * Z_EXAG;
+  const ix = rx + ry * OBLIQ_COS;
+  const iy = -ry * OBLIQ_SIN - z * Z_EXAG;
   return [ix * f.scale + f.padX, iy * f.scale + f.padY];
 }
 

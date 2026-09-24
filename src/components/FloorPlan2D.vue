@@ -932,24 +932,23 @@ function saveEdit(): void {
   <el-dialog
     v-if="!embedded"
     v-model="visible"
-    :title="`${buildingName} · 楼宇分层图（2.5D）`"
     width="80%"
     top="5vh"
     :fullscreen="fullscreen"
-    :show-header="!fullscreen"
-    :show-close="!fullscreen"
+    :show-close="true"
     class="fpv-dialog"
   >
+    <template #header>
+      <div class="fpv__head">
+        <strong class="fpv__title">{{ buildingName }} · 楼宇分层图（2.5D）</strong>
+        <el-button link type="primary" @click="visible = false">← 返回室外</el-button>
+      </div>
+    </template>
     <el-empty v-if="!floors.length" description="暂无室内图纸，请先导入">
       <el-button type="primary" @click="requestImport">导入图纸</el-button>
     </el-empty>
 
     <div v-else class="fpv fpv--ws">
-      <div v-if="fullscreen" class="fpv__head">
-        <strong class="fpv__title">{{ buildingName }} · 楼宇分层图（2.5D）</strong>
-        <el-button link type="primary" @click="visible = false">← 返回地图</el-button>
-      </div>
-
       <div v-if="isFailed" class="fpv-state fpv-state--failed">
         <el-icon class="fpv-state__icon"><CircleCloseFilled /></el-icon>
         <div class="fpv-state__body">

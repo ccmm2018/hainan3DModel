@@ -1033,8 +1033,13 @@ function saveEdit(): void {
                 <stop offset="0%" stop-color="#d9dee5" />
                 <stop offset="100%" stop-color="#aeb6c2" />
               </linearGradient>
+              <linearGradient id="fpvBgStore" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stop-color="#8fc1ec" />
+                <stop offset="55%" stop-color="#bfdcf4" />
+                <stop offset="100%" stop-color="#eef6fc" />
+              </linearGradient>
             </defs>
-            <rect x="0" y="0" :width="VIEW_W" :height="VIEW_H" fill="#fbfcfe" pointer-events="none" />
+            <rect x="0" y="0" :width="VIEW_W" :height="VIEW_H" fill="url(#fpvBgStore)" pointer-events="none" />
             <g>
             <!-- ① 地面(楼板) + ② 走廊：楼层外轮廓填充；房间在③层覆盖其上，自然得到「外轮廓减房间」的走廊区 -->
             <path v-if="outlinePath" :d="outlinePath" fill="#eef1f5" stroke="#c4cbd4" stroke-width="1.5" pointer-events="none" />
@@ -1259,8 +1264,13 @@ function saveEdit(): void {
             <stop offset="0%" stop-color="#d9dee5" />
             <stop offset="100%" stop-color="#aeb6c2" />
           </linearGradient>
+          <linearGradient id="fpvBgEmbed" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stop-color="#8fc1ec" />
+            <stop offset="55%" stop-color="#bfdcf4" />
+            <stop offset="100%" stop-color="#eef6fc" />
+          </linearGradient>
         </defs>
-        <rect x="0" y="0" :width="VIEW_W" :height="VIEW_H" fill="#fbfcfe" pointer-events="none" />
+        <rect x="0" y="0" :width="VIEW_W" :height="VIEW_H" fill="url(#fpvBgEmbed)" pointer-events="none" />
         <g>
         <!-- ① 地面(楼板) + ② 走廊：楼层外轮廓填充；房间在③层覆盖其上，自然得到「外轮廓减房间」的走廊区 -->
         <path v-if="outlinePath" :d="outlinePath" fill="#eef1f5" stroke="#c4cbd4" stroke-width="1.5" pointer-events="none" />

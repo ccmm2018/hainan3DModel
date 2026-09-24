@@ -93,7 +93,7 @@ const wallHeight = ref(1.0);
  *    screenX = ax                                  （水平方向原样，房间宽度不变）
  *    screenY = ay * k - z * Z_EXAG                （深度压缩 + 墙高抬升）
  *  视图层面不含任何旋转（水平旋转滑杆已移除），故任意俯仰下底面都保持直角矩形。
- *  立体感不靠剪切，而靠：① 每个房间/墙线向下拉伸出暗色侧面多边形（模拟墙厚）② 顶面亮(#c8c8c8)/侧面暗(#8a8a8a)分层 ③ 按屏幕 Y 升序绘制（近处遮挡远处）。 */
+ *  立体感不靠剪切，而靠：① 每个房间/墙线向下拉伸出半透明灰侧面多边形（模拟墙厚/格子内壁）② 顶面白色/侧面灰半透明分层 ③ 按屏幕 Y 升序绘制（近处遮挡远处）。 */
 /** 纵向俯仰角（度）：由「纵向旋转」滑杆控制，默认 55°（→ k=cos55°≈0.574，落在推荐的 0.55~0.65 区间，给底面适度俯视压缩、保留明显立体感）。
  *  仅作为深度压缩系数 k=cos(俯仰)，不引入任何旋转；范围 0°(k=1 正俯视无压缩) ~ 80°(k≈0.17 压得很扁)。 */
 const pitchDeg = ref(55);
@@ -549,7 +549,7 @@ const visibleRooms = computed(() => displayedRooms.value.filter((r) => r.selecte
 /** 墙线来源（等效于 DXF 的「内部结构外墙线」+「内部结构内墙线」层）：
  *  - 楼层外轮廓（outerWall 周长，即 外墙线）作为外墙，每条边拉伸成一段墙体；
  *  - 每个房间轮廓（innerWall 房间，即 内墙线）作为内墙，每条边拉伸成一段墙体。
- *  每段墙线 (a,b) 经 wallFaces 拉伸成带厚度的实心盒：4 个侧面（深灰 #8a8a8a）+ 1 个顶面（浅灰 #c8c8c8）。
+ *  每段墙线 (a,b) 经 wallFaces 拉伸成带厚度的实心盒：4 个侧面（灰半透明 rgba(138,138,138,0.5)，即格子内壁）+ 1 个顶面（白色，即拉伸墙顶部面）。
  *  关键修复：相邻房间「共一堵墙」时，两侧房间各自贡献一条重合边 → 会画出两堵重叠墙。
  *  这里在聚合后做「共线重叠合并」(mergeWallSegments)，把同一物理墙的多条重合边合并成唯一一段，只画一次。 */
 
@@ -679,8 +679,8 @@ function wallFaces(seg: { a: [number, number]; b: [number, number] }): { sides: 
   const H = wallHeight.value;
   const P = (p: [number, number], z: number): [number, number] => project(p[0], p[1], z);
   const q = (p: [number, number]) => `${p[0].toFixed(1)},${p[1].toFixed(1)}`;
-  const sideFill = '#8a8a8a'; // 深灰墙体侧面（用户规范）
-  const topFill = '#c8c8c8'; // 浅灰墙体顶面（用户规范）
+  const sideFill = 'rgba(138,138,138,0.5)'; // 格子内壁：灰(半透明)（用户规范）
+  const topFill = '#ffffff'; // 拉伸的墙(顶部的面)：白色（用户规范）
   const sides: Face[] = [
     { points: `${q(P(A1, 0))} ${q(P(B1, 0))} ${q(P(B1, H))} ${q(P(A1, H))}`, fill: sideFill },
     { points: `${q(P(A2, 0))} ${q(P(B2, 0))} ${q(P(B2, H))} ${q(P(A2, H))}`, fill: sideFill },
@@ -722,8 +722,8 @@ const roomFills = computed<RoomFill[]>(() =>
   displayedRooms.value.map((room) => {
     const base = polyOf(room).map(toScreen);
     const points = base.map((p) => `${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(' ');
-    const color = colorFor(room);
-    const stroke = darken(color, 0.45);
+    const color = '#ffffff'; // 格子底部：白色（用户规范）
+    const stroke = '#c4cbd4'; // 浅灰描边：区分相邻房间、呈现格子边界
     // 标签锚点：直接用「房间多边形自身在屏幕上的几何质心」，而非依赖 room.centroid 字段。
     // 原因：真实 App 用的是 store 持久化的 Room 数据，若持久化时未写入 centroid，
     // toScreen(undefined) 会返回 [NaN,NaN]，文字被画到画布外不可见（而多边形用的是 polyOf，照常显示）→ 表现为「格子在、里面没字」。

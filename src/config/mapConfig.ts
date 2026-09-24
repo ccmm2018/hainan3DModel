@@ -99,6 +99,42 @@ export interface SceneConfig {
    * 例：{ '63': '教学楼', 'RoofShed_Rig': '食堂' }
    */
   buildingNameAliases: Record<string, string>;
+  /**
+   * 模型节点过滤：加载模型时按「节点名（GLB node name）」保留或隐藏部分子节点。
+   *
+   * 背景：Blender 导出 GLB 会把整个场景一起导出——屋顶棚(RoofShed)、女儿墙(Parapet)、
+   * 大门(Door)、廊架(Pergola)、空物体(Empty/CamTarget)、骨架(Rig) 等辅助几何全部进文件，
+   * 在地图上并不需要显示。本配置可让加载时自动隐藏它们。
+   *
+   * - mode: 'exclude' 隐藏命中的节点（默认，保留其余）；'include' 只保留命中的节点。
+   * - patterns: 子串匹配（不区分大小写），命中节点名即执行对应操作（含其整棵子树）。
+   *
+   * 例（默认）：隐藏屋顶棚/女儿墙/大门/廊架/骨架/空物体：
+   *   { mode: 'exclude', patterns: ['roof','parapet','door','pergola','rig','empty','camtarget','profile'] }
+   *
+   * 若只想保留编号为 1~25 的楼本体，可改为 include 模式并列出这些名字：
+   *   { mode: 'include', patterns: ['1','2','3','4','5','6','7','8','9','10','11','12','13','14','15','16','17','18','19','20','21','22','23','24','25'] }
+   */
+  modelNodeFilter?: {
+    mode: 'exclude' | 'include';
+    patterns: string[];
+  };
+  /**
+   * 视为「建筑（可点击 / 可选中）」的 GLB 节点名白名单。
+   *
+   * 模型里并非所有网格都是建筑：Blender 导出时会把屋顶棚(RoofShed)、女儿墙(Parapet)、
+   * 大门(Door)、廊架(Pergola)、空物体(Empty/CamTarget)、骨架(Rig)，以及非 0–25 的
+   * 数字节点一并导出。本集合明确「哪些节点才是建筑」：
+   *
+   *  - 只有本集合内的节点可被点击、可被选中高亮；
+   *  - 点击建筑时弹出的名称只显示该节点的「数字编号」（如 15），而不是建筑上装饰网格
+   *    （如 RoofShed_Rig / Parapet_Obj5 等棚架、女儿墙）的名字；
+   *  - 不在本集合内的节点：不可点击、无选中效果（命中它们时直接跳过，不弹窗、不高亮）。
+   *
+   * 当前模型：数字 0–25 为所有建筑节点（其余节点均非建筑）。
+   * 将来换模型或编号范围变化，只改这个数组即可。
+   */
+  buildingNodeNames: string[];
 }
 
 /**
@@ -142,4 +178,12 @@ export const DEFAULT_SCENE_CONFIG: SceneConfig = {
   buildingNameAliases: {},
   mapFeatures: ['bg', 'road', 'building'],
   showLabel: false,
+  // 隐藏 Blender 一并导出的辅助几何（屋顶棚/女儿墙/大门/廊架/骨架/空物体），只留楼本体可见；
+  // 具体的「可点击 / 可选中」范围由 buildingNodeNames 单独控制（数字 0–25 才是建筑）。
+  modelNodeFilter: {
+    mode: 'exclude',
+    patterns: ['roof', 'parapet', 'door', 'pergola', 'rig', 'empty', 'camtarget', 'profile'],
+  },
+  // 可点击 / 可选中的建筑节点白名单（点击只显示这些节点的数字编号，其余不可点击）
+  buildingNodeNames: Array.from({ length: 26 }, (_, i) => String(i)),
 };

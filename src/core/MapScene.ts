@@ -144,10 +144,20 @@ export class MapScene {
   private measureClickDomHandler: ((e: MouseEvent) => void) | null = null;
   private measureDownPos: { x: number; y: number; t: number } | null = null;
 
+  /** 视为「建筑（可点击 / 可选中）」的 GLB 节点名白名单（来自 config.buildingNodeNames） */
+  private buildingNames = new Set<string>();
+  /** 建筑节点名 → 其 Object3D（用于拾取后高亮整栋楼，而非某个装饰子网格） */
+  private buildingObjects = new Map<string, THREE.Object3D>();
+  /** 建筑节点名 → 其世界中心坐标（用于判断装饰网格是否「贴在某栋楼上」） */
+  private buildingCenters = new Map<string, THREE.Vector3>();
+  /** 装饰归并到建筑的拾取半径（模型水平尺寸的一半），超出则视为独立不可点击节点 */
+  private modelPickRadius = Infinity;
+
   constructor(container: HTMLDivElement, config: SceneConfig, callbacks: MapSceneCallbacks = {}) {
     this.container = container;
     this.config = config;
     this.callbacks = callbacks;
+    this.buildingNames = new Set(config.buildingNodeNames || []);
 
     this.gcjCenter = wgs84ToGcj02(config.center[0], config.center[1]);
     const anchor = config.anchor ?? config.center;
@@ -276,6 +286,10 @@ export class MapScene {
         if (this.disposed) return;
         this.modelRoot = gltf.scene;
 
+        // 按配置过滤节点：隐藏 Blender 一并导出的辅助几何（屋顶棚/女儿墙/大门/廊架/骨架/空物体等），
+        // 只保留楼本体，避免地图上出现无关网格。需在居中/命名解析前执行。
+        this.applyNodeFilter();
+
         this.modelRoot.traverse((child) => {
           if ((child as THREE.Mesh).isMesh) {
             child.castShadow = true;
@@ -322,6 +336,42 @@ export class MapScene {
         this.callbacks.onModelError?.(err);
       },
     );
+  }
+
+  /**
+   * 按 modelNodeFilter 配置隐藏/保留模型节点。
+   * 子串匹配节点名（不区分大小写）；命中后对该节点整棵子树设置 visible=false。
+   */
+  private applyNodeFilter(): void {
+    const filter = this.config.modelNodeFilter;
+    if (!filter || !this.modelRoot) return;
+    const mode = filter.mode === 'include' ? 'include' : 'exclude';
+    const pats = (filter.patterns || []).map((p) => p.toLowerCase());
+    if (pats.length === 0) return;
+
+    const matches = (name: string): boolean => {
+      const n = (name || '').toLowerCase();
+      return pats.some((p) => p !== '' && n.includes(p));
+    };
+
+    this.modelRoot.traverse((child) => {
+      const hit = matches((child as THREE.Object3D).name);
+      if (mode === 'exclude') {
+        if (hit) child.visible = false;
+      } else {
+        // include 模式：只保留命中节点（及其子树）。若节点本身未命中但存在命中的祖先，仍保留。
+        let ancestorHit = false;
+        let p = child.parent;
+        while (p) {
+          if (matches(p.name)) {
+            ancestorHit = true;
+            break;
+          }
+          p = p.parent;
+        }
+        if (!hit && !ancestorHit) child.visible = false;
+      }
+    });
   }
 
   private placeModelAtAnchor(): void {
@@ -374,23 +424,35 @@ export class MapScene {
    * 而射线拾取命中的正是这些无名子 Mesh，导致拿到的名称是 mesh_N 而非楼栋名，
    * 既会让属性面板显示 mesh_N，也会让房间数据按 mesh_N 查不到。
    *
-   * 这里以「所有带名字的节点」为锚点，让每个 Mesh 归属到空间上最近的锚点，
-   * 从而正确还原楼栋名（属性面板 / 房间数据查找都依赖此名称）。
+   * 关键纠偏（当前模型）：只有白名单 buildingNodeNames（数字 0–25）才是「建筑节点」，
+   * 棚架(RoofShed)、女儿墙(Parapet) 等装饰网格不是建筑。若把装饰节点也当作锚点，
+   * 建筑网格会被最近的装饰抢走名字，导致点击建筑却显示「RoofShed_Rig」之类装饰名。
+   * 因此这里**只以建筑节点为锚点**，确保每个 Mesh 归属到正确的建筑编号。
    */
   private resolveMeshBuildingNames(): void {
     if (!this.modelRoot) return;
     this.modelRoot.updateMatrixWorld(true);
+    this.buildingObjects.clear();
+    this.buildingCenters.clear();
 
-    const anchors: { name: string; pos: THREE.Vector3 }[] = [];
+    const anchors: { name: string; pos: THREE.Vector3; obj: THREE.Object3D }[] = [];
     this.modelRoot.traverse((o) => {
       if (o === this.modelRoot) return;
-      if (o.name && o.name.trim()) {
+      if (o.name && this.buildingNames.has(o.name)) {
         const c = new THREE.Box3().setFromObject(o).getCenter(new THREE.Vector3());
-        anchors.push({ name: o.name.trim(), pos: c });
+        anchors.push({ name: o.name, pos: c, obj: o });
+        this.buildingObjects.set(o.name, o);
+        this.buildingCenters.set(o.name, c);
       }
     });
     if (anchors.length === 0) return;
 
+    // 拾取半径：以模型水平包围盒较大边的一半为上限，用于判断「装饰网格是否贴在某栋楼上」。
+    const box = new THREE.Box3().setFromObject(this.modelRoot);
+    const size = box.getSize(new THREE.Vector3());
+    this.modelPickRadius = Math.max(size.x, size.z) * 0.5;
+
+    // 给每个 mesh 标注「最近建筑」与距离，供 pick 把贴在某楼上的装饰归并到该楼
     this.modelRoot.traverse((o) => {
       const mesh = o as THREE.Mesh;
       if (!mesh.isMesh) return;
@@ -400,13 +462,15 @@ export class MapScene {
       for (const a of anchors) {
         const dx = a.pos.x - c.x;
         const dy = a.pos.y - c.y;
-        const d = dx * dx + dy * dy;
+        const dz = a.pos.z - c.z;
+        const d = dx * dx + dy * dy + dz * dz;
         if (d < bestD) {
           bestD = d;
           best = a;
         }
       }
       mesh.userData.buildingName = best.name;
+      mesh.userData.buildingDist = Math.sqrt(bestD);
     });
   }
 
@@ -457,55 +521,76 @@ export class MapScene {
     const intersects = this.raycaster.intersectObjects(targets, true);
     if (intersects.length === 0) return null;
 
-    const first = intersects[0];
-    const mesh = first.object as THREE.Mesh;
-    const screenX = px;
-    const screenY = py;
+    for (const hit of intersects) {
+      const mesh = hit.object as THREE.Mesh;
+      const screenX = px;
+      const screenY = py;
 
-    // 命中了房间格子
-    if (mesh.userData.isRoom) {
-      const room = mesh.userData.room as Room;
-      return {
-        object: mesh,
-        target: mesh,
-        name: room.roomNo,
-        point: first.point.clone(),
-        lngLat: this.worldToWgs84(first.point),
-        screenX,
-        screenY,
-        isRoom: true,
-        room,
-      };
+      // 命中了房间格子
+      if (mesh.userData.isRoom) {
+        const room = mesh.userData.room as Room;
+        return {
+          object: mesh,
+          target: mesh,
+          name: room.roomNo,
+          point: hit.point.clone(),
+          lngLat: this.worldToWgs84(hit.point),
+          screenX,
+          screenY,
+          isRoom: true,
+          room,
+        };
+      }
+
+      // 1) 直接命中的是「建筑节点（或其后代）」→ 返回该建筑的数字节点名
+      const bObj = this.owningBuildingOf(mesh);
+      if (bObj) {
+        return this.makeBuildingPick(bObj, hit, px, py);
+      }
+
+      // 2) 命中的是非建筑网格（如建筑上的棚架 / 女儿墙装饰）：
+      //    若它空间上贴着某栋楼（在拾取半径内）则归并到该楼，否则视为不可点击。
+      const nearName = mesh.userData.buildingName as string | undefined;
+      if (nearName && this.buildingNames.has(nearName)) {
+        const dist = (mesh.userData.buildingDist as number) ?? Infinity;
+        if (dist <= this.modelPickRadius) {
+          const b = this.buildingObjects.get(nearName);
+          if (b) return this.makeBuildingPick(b, hit, px, py);
+        }
+      }
+      // 该节点不是建筑、也不贴任何楼 → 不可点击、无选中效果，继续看下一个相交对象
     }
 
-    // 命中了建筑/道路/水系
-    const target = this.selectableTargetOf(mesh);
-    // 优先用模型反推得到的楼栋名（解决 GLB 无名子 mesh 被自动命名为 mesh_N 的问题）
-    const resolvedName =
-      (mesh.userData.buildingName as string | undefined) ||
-      target.name ||
-      mesh.name ||
-      '(未命名)';
+    return null;
+  }
+
+  /** 构造「命中建筑」的拾取结果：名称用建筑的数字节点名（如 15），高亮对象锁定整栋楼 */
+  private makeBuildingPick(
+    bObj: THREE.Object3D,
+    hit: THREE.Intersection,
+    px: number,
+    py: number,
+  ): PickResult {
     return {
-      object: mesh,
-      target,
-      name: resolvedName,
-      point: first.point.clone(),
-      lngLat: this.worldToWgs84(first.point),
-      screenX,
-      screenY,
+      object: bObj,
+      target: bObj,
+      name: bObj.name, // 显示「数字节点」，而非装饰网格名
+      point: hit.point.clone(),
+      lngLat: this.worldToWgs84(hit.point),
+      screenX: px,
+      screenY: py,
       isRoom: false,
     };
   }
 
-  /** 从命中的 mesh 向上找到「可选择的命名分组」 */
-  private selectableTargetOf(obj: THREE.Object3D): THREE.Object3D {
+  /** 从命中的 mesh 向上（含自身）查找是否属于某栋「建筑节点」 */
+  private owningBuildingOf(obj: THREE.Object3D): THREE.Object3D | null {
     let cur: THREE.Object3D | null = obj;
     while (cur && cur !== this.modelRoot) {
-      if (cur.name && cur.name.trim()) return cur;
+      if (cur.name && this.buildingNames.has(cur.name)) return cur;
       cur = cur.parent;
     }
-    return obj;
+    return null;
   }
 
   /** 高亮对象（整棵子树），color 为高亮色 */
@@ -1247,7 +1332,8 @@ export class MapScene {
     if (!this.modelRoot) return result;
     const seen = new Set<string>();
     this.modelRoot.traverse((obj) => {
-      if (obj.name && obj.name.trim() && !seen.has(obj.name)) {
+      // 只暴露「建筑节点」：装饰网格（棚架/女儿墙/廊架…）不进入搜索/定位列表
+      if (obj.name && this.buildingNames.has(obj.name) && !seen.has(obj.name)) {
         seen.add(obj.name);
         const wp = new THREE.Vector3();
         obj.getWorldPosition(wp);

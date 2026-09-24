@@ -515,13 +515,20 @@ const buildingNames = computed(() => Object.keys(buildingData.value));
 // 把当前生效的楼栋属性表注入 building store（指纹写回目标）
 watch(buildingData, (m) => buildingStore.setBuildingMap(m), { immediate: true });
 
+/** 真实楼栋主键（用于查楼层图 / 取属性数据）：把模型数字节点经别名 / 经纬度归并到 buildingData 里的楼栋名。
+ * 显示名仍用 selected.value.name（数字节点，如 15），本值仅作数据查找键——两者解耦，
+ * 既满足「点击建筑显示数字节点」，又不破坏「查看图纸 / 属性数据」的匹配。 */
+const selectedKey = computed(() =>
+  selected.value ? resolveBuildingName(selected.value.name, selected.value.lngLat) : '',
+);
+
 /** 唯一对接点：点楼弹窗里的【查看室内图纸】
  *  - 已有 Floor 数据 → 打开 2.5D 查看器
  *  - 无数据 → 空态引导，点【导入图纸】打开 DxfImport */
 function openIndoorPlan() {
   if (!selected.value?.name) return;
-  floorPlanBuilding.value = selected.value.name;
-  if (buildingStore.hasFloors(selected.value.name)) {
+  floorPlanBuilding.value = selectedKey.value;
+  if (buildingStore.hasFloors(selectedKey.value)) {
     floorPlan2DVisible.value = true;
   } else {
     indoorEmptyVisible.value = true;
@@ -530,7 +537,7 @@ function openIndoorPlan() {
 
 function openImportFromEmpty() {
   if (!selected.value?.name) return;
-  floorPlanBuilding.value = selected.value.name;
+  floorPlanBuilding.value = selectedKey.value;
   indoorEmptyVisible.value = false;
   dxfImportVisible.value = true;
 }
@@ -759,10 +766,10 @@ const filteredObjects = computed(() => {
 
 const selectedProps = computed<BuildingProps>(() => {
   if (!selected.value) return { name: '' };
-  const base = buildingData.value[selected.value.name];
+  const base = buildingData.value[selectedKey.value];
   const height = base?.height ?? estimateHeight(selected.value.target);
   // 总层数 / 房间数：优先取属性数据，缺失时从房间数据回推
-  const rooms = roomsOf(selected.value.name);
+  const rooms = roomsOf(selectedKey.value);
   const totalFloors = base?.totalFloors ?? (rooms.length ? Math.max(...rooms.map((r) => r.floor)) : undefined);
   const roomCount = base?.roomCount ?? (rooms.length ? rooms.length : undefined);
   return { ...(base ?? {}), name: selected.value.name, height, totalFloors, roomCount };
@@ -1183,7 +1190,8 @@ function selectByName(name: string) {
     screenY: 0,
     isRoom: false,
   };
-  result.name = resolveBuildingName(result.name, result.lngLat);
+  // 注意：保留 result.name 为模型里的「数字节点名」（如 15）；
+  // 真实楼栋主键（用于查楼层图 / 属性数据）由 selectedKey 另行归并，避免显示名被改写。
   selected.value = result;
   detailOpen.value = false;
   imageError.value = false;
@@ -1312,7 +1320,7 @@ onMounted(async () => {
         }
         // 场景模式：点击建筑 → 属性面板（浮层锚定到点击的节点位置）
         if (result && !result.isRoom) {
-          result.name = resolveBuildingName(result.name, result.lngLat);
+          // 保留 result.name 为模型「数字节点名」；真实楼栋主键由 selectedKey 另行归并
           selected.value = result;
           detailOpen.value = false;
           imageError.value = false;

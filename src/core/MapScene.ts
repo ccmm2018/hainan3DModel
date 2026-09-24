@@ -146,12 +146,6 @@ export class MapScene {
 
   /** 视为「建筑（可点击 / 可选中）」的 GLB 节点名白名单（来自 config.buildingNodeNames） */
   private buildingNames = new Set<string>();
-  /** 建筑节点名 → 其 Object3D（用于拾取后高亮整栋楼，而非某个装饰子网格） */
-  private buildingObjects = new Map<string, THREE.Object3D>();
-  /** 建筑节点名 → 其世界中心坐标（用于判断装饰网格是否「贴在某栋楼上」） */
-  private buildingCenters = new Map<string, THREE.Vector3>();
-  /** 装饰归并到建筑的拾取半径（模型水平尺寸的一半），超出则视为独立不可点击节点 */
-  private modelPickRadius = Infinity;
 
   constructor(container: HTMLDivElement, config: SceneConfig, callbacks: MapSceneCallbacks = {}) {
     this.container = container;
@@ -322,7 +316,6 @@ export class MapScene {
 
         this.placeModelAtAnchor();
         this.scene!.add(this.modelRoot);
-        this.resolveMeshBuildingNames();
 
         this.markDirty();
         this.callbacks.onModelReady?.();
@@ -416,64 +409,6 @@ export class MapScene {
     this.modelRoot.updateMatrixWorld(true);
   }
 
-  /**
-   * 反推每个 Mesh 所属楼栋 / 道路 / 水系名称。
-   *
-   * 模型里建筑通常由「带中文名的父节点（如 教学楼）+ 若干无名子 Mesh」组成，
-   * three.js 加载时会给无名子 Mesh 自动命名为 mesh_0 / mesh_1 ……，
-   * 而射线拾取命中的正是这些无名子 Mesh，导致拿到的名称是 mesh_N 而非楼栋名，
-   * 既会让属性面板显示 mesh_N，也会让房间数据按 mesh_N 查不到。
-   *
-   * 关键纠偏（当前模型）：只有白名单 buildingNodeNames（数字 0–25）才是「建筑节点」，
-   * 棚架(RoofShed)、女儿墙(Parapet) 等装饰网格不是建筑。若把装饰节点也当作锚点，
-   * 建筑网格会被最近的装饰抢走名字，导致点击建筑却显示「RoofShed_Rig」之类装饰名。
-   * 因此这里**只以建筑节点为锚点**，确保每个 Mesh 归属到正确的建筑编号。
-   */
-  private resolveMeshBuildingNames(): void {
-    if (!this.modelRoot) return;
-    this.modelRoot.updateMatrixWorld(true);
-    this.buildingObjects.clear();
-    this.buildingCenters.clear();
-
-    const anchors: { name: string; pos: THREE.Vector3; obj: THREE.Object3D }[] = [];
-    this.modelRoot.traverse((o) => {
-      if (o === this.modelRoot) return;
-      if (o.name && this.buildingNames.has(o.name)) {
-        const c = new THREE.Box3().setFromObject(o).getCenter(new THREE.Vector3());
-        anchors.push({ name: o.name, pos: c, obj: o });
-        this.buildingObjects.set(o.name, o);
-        this.buildingCenters.set(o.name, c);
-      }
-    });
-    if (anchors.length === 0) return;
-
-    // 拾取半径：以模型水平包围盒较大边的一半为上限，用于判断「装饰网格是否贴在某栋楼上」。
-    const box = new THREE.Box3().setFromObject(this.modelRoot);
-    const size = box.getSize(new THREE.Vector3());
-    this.modelPickRadius = Math.max(size.x, size.z) * 0.5;
-
-    // 给每个 mesh 标注「最近建筑」与距离，供 pick 把贴在某楼上的装饰归并到该楼
-    this.modelRoot.traverse((o) => {
-      const mesh = o as THREE.Mesh;
-      if (!mesh.isMesh) return;
-      const c = new THREE.Box3().setFromObject(mesh).getCenter(new THREE.Vector3());
-      let best = anchors[0];
-      let bestD = Infinity;
-      for (const a of anchors) {
-        const dx = a.pos.x - c.x;
-        const dy = a.pos.y - c.y;
-        const dz = a.pos.z - c.z;
-        const d = dx * dx + dy * dy + dz * dz;
-        if (d < bestD) {
-          bestD = d;
-          best = a;
-        }
-      }
-      mesh.userData.buildingName = best.name;
-      mesh.userData.buildingDist = Math.sqrt(bestD);
-    });
-  }
-
   // -------------------------------------------------------------------------
   // 交互：拾取 / 高亮
   // -------------------------------------------------------------------------
@@ -548,17 +483,11 @@ export class MapScene {
         return this.makeBuildingPick(bObj, hit, px, py);
       }
 
-      // 2) 命中的是非建筑网格（如建筑上的棚架 / 女儿墙装饰）：
-      //    若它空间上贴着某栋楼（在拾取半径内）则归并到该楼，否则视为不可点击。
-      const nearName = mesh.userData.buildingName as string | undefined;
-      if (nearName && this.buildingNames.has(nearName)) {
-        const dist = (mesh.userData.buildingDist as number) ?? Infinity;
-        if (dist <= this.modelPickRadius) {
-          const b = this.buildingObjects.get(nearName);
-          if (b) return this.makeBuildingPick(b, hit, px, py);
-        }
-      }
-      // 该节点不是建筑、也不贴任何楼 → 不可点击、无选中效果，继续看下一个相交对象
+      // 2) 命中的是非建筑网格（道路 / 水系 / 杂项数字节点 / 装饰等）：
+      //    它们不属于任何建筑节点，按需求「不可点击、不可选中、也不显示节点信息」。
+      // 直接 return null（最顶层命中优先），避免「点道路却选中建筑 / 道路处显示建筑编号」的问题。
+      // （装饰网格已通过 modelNodeFilter 隐藏，本分支主要拦截仍可见的道路/杂项节点。）
+      return null;
     }
 
     return null;

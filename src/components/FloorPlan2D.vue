@@ -1,16 +1,18 @@
 <script setup lang="ts">
 /**
- * FloorPlan2D：楼层 2.5D 平面图查看器（SVG 渲染，标准 30° 等轴测投影）。
+ * FloorPlan2D：楼层 2.5D 平面图查看器（SVG 渲染，正交俯视压缩 + 源对齐转正，底面恒为水平直角矩形、墙体竖直抬升成长方体）。
  *
  * 渲染规范：
  * - 渲染架构（建筑分层）：① 楼层外轮廓地面 + ② 走廊（外轮廓减房间，由③层房间覆盖得到）
  *   + ③ 房间平铺填充（z=0 地面，无侧面）+ ④ 墙侧面（外墙线/内墙线拉伸成 wallHeight 米高，先画）
  *   + ⑤ 墙顶面（后画）+ ⑥ 文字标签。墙体高度由「墙高(米)」滑杆驱动。
- * - 倾斜横向（plan oblique / 斜二测）投影（无 3D 引擎依赖）：
- *     screenX = x + y * cos(30°)
- *     screenY = -y * sin(30°) - z
- *   楼地面的 X 轴保持水平（横向），Y 轴沿右上方向倾斜 15° 后退，墙体沿屏幕竖直方向拉出高度，
- *   形成「俯视平铺、倾斜横向」的 2.5D 楼层图，而非 45° 菱形等轴测；
+ * - 2.5D 投影（纯正交俯视压缩，无旋转 / 无剪切 / 无 3D 引擎依赖）：仅对深度 y 做等比压缩 k=cos(纵向俯仰角)，
+ *   楼层按 DXF 真实朝向渲染，轴对齐矩形恒为矩形、阳角 90°；立体感来自暗色墙侧面 + 亮色顶面 + 按屏幕 Y 升序遮挡。
+ *   纵向俯仰角由「纵向旋转」滑杆控制、默认 55°（k≈0.574，落在 0.55~0.65 推荐区间）。
+ *     screenX = x                          （水平方向原样，房间宽度不变）
+ *     screenY = y * k - z * Z_EXAG         （k=cos(俯仰)：深度等比压缩；z 为墙高抬升，向上为正）
+ *   对角矩阵（screenX 只含 x、screenY 只含 y 与 z）：轴对齐矩形恒为矩形、阳角严格 90°，绝不退化成平行四边形/梯形（那需要旋转或透视除法，二者皆无）。
+ *   screenX 不含任何 y 项；墙体保持竖直，墙体高度按 cos(Pitch) 投影，立体感来自底面后倾 + 墙高；
  *   缩放/居中由 fit 对整层（含墙顶 z=wallHeight）的投影包围盒计算；按墙体地面中点屏幕 Y 排序保证遮挡正确。
  * - 房间中央文字：房间号码(14px 粗) / 房间名称(10px) / 部门(9px 灰) / 使用面积(9px 白底圆角)。
  * - 配色（按审图状态）：normal=#AED6F1，highlight=#C0392B，warning=#8E44AD，
@@ -77,16 +79,26 @@ const panY = ref(0);
 const stageRef = ref<HTMLElement | null>(null);
 const MIN_ZOOM = 0.3;
 const MAX_ZOOM = 6;
-/** 墙体高度（米）：从墙线拉伸出的真实高度，由侧栏「墙高(米)」滑杆控制（默认 3m）。 */
-const wallHeight = ref(3);
+/** 墙体高度（米）：从墙线竖直拉伸出的墙体高度，由侧栏「墙高(米)」滑杆控制（默认 1.0m，立体感与可读性平衡；滑杆可调）。
+ *  墙体沿 z 轴竖直抬升（screenY 减小=向上），构成每个房间格子的长方体侧壁；高度越大长方体越立体。 */
+const wallHeight = ref(1.0);
 
-/** 倾斜横向（plan oblique / 斜二测）投影系数：
- *  X 轴保持水平（横向），Y 轴沿右上方向倾斜 TILT 角后退，Z（墙高）沿屏幕竖直向上。
- *  平面点 (x,y) 投屏：sx = x + y * OBLIQ_COS，sy = -y * OBLIQ_SIN - z（z 为高度，米）。
- *  TILT=55°（默认初始视角：向观看方向倾斜 55°；sin55°≈0.819，高于 0.5 下限，立体纵深明显更强）。 */
-const OBLIQ_TILT = (55 * Math.PI) / 180; // 55°
-const OBLIQ_COS = Math.cos(OBLIQ_TILT); // ≈0.574
-const OBLIQ_SIN = Math.sin(OBLIQ_TILT); // ≈0.819
+/** 2.5D 投影（纯正交俯视压缩 + 源楼层「转正」对齐，无视图 yaw 旋转 / 无剪切 / 无 3D 引擎）：
+ *  关键教训：任何「视图 yaw 旋转 + 非等比 Y 压缩」叠加都会产生错切(shear)，把矩形压成平行四边形——
+ *  仿射变换保平行性，纯 SVG 仿射只能得到平行四边形、做不出真梯形（那需要透视除法）。
+ *  解决「斜画矩形」的正确顺序是：先把源矩形「转正到坐标轴」(纯旋转，按最长边方向绕质心转 -θ)，
+ *  再做纯 Y 压缩 k（k = cos(纵向俯仰角)，0.55~0.65），旋转与压缩不耦合 → 底面恒为矩形、阳角严格 90°。
+ *    alignSource(x,y) → (ax, ay)                  （源转正：使矩形长边水平）
+ *    screenX = ax                                  （水平方向原样，房间宽度不变）
+ *    screenY = ay * k - z * Z_EXAG                （深度压缩 + 墙高抬升）
+ *  视图层面不含任何旋转（水平旋转滑杆已移除），故任意俯仰下底面都保持直角矩形。
+ *  立体感不靠剪切，而靠：① 每个房间/墙线向下拉伸出暗色侧面多边形（模拟墙厚）② 顶面亮(#c8c8c8)/侧面暗(#8a8a8a)分层 ③ 按屏幕 Y 升序绘制（近处遮挡远处）。 */
+/** 纵向俯仰角（度）：由「纵向旋转」滑杆控制，默认 55°（→ k=cos55°≈0.574，落在推荐的 0.55~0.65 区间，给底面适度俯视压缩、保留明显立体感）。
+ *  仅作为深度压缩系数 k=cos(俯仰)，不引入任何旋转；范围 0°(k=1 正俯视无压缩) ~ 80°(k≈0.17 压得很扁)。 */
+const pitchDeg = ref(55);
+const PITCH = computed(() => (pitchDeg.value * Math.PI) / 180);
+/** 深度方向压缩系数 k = cos(纵向俯仰角)：纯对角矩阵的 Y 缩放，无旋转项。屏幕 Y 按此压缩、墙高按 Z_EXAG 抬升。 */
+const K = computed(() => Math.cos(PITCH.value));
 /** 高度夸张系数（1 = 与楼层平面同真实比例，墙体即真实 wallHeight 米高）。 */
 const Z_EXAG = 1;
 /** 墙体厚度（米）：把一条墙线拉伸成有体积的墙体时赋予的真实厚度。 */
@@ -121,35 +133,33 @@ function resetView(): void {
   zoom.value = 1;
   panX.value = 0;
   panY.value = 0;
-  viewRotation.value = 0;
 }
 
-/** 视图旋转（度）：绕画面中心旋转整张 2.5D 平面图，默认 0（不旋转）。 */
-const viewRotation = ref(0);
-
-// ---- 拖拽平移（在 stage 上按住左键拖动）----
-const isPanning = ref(false);
+// ---- 鼠标交互：左键拖拽 = 平移（视图不做任何旋转，避免引入错切把矩形压成平行四边形）；滚轮 = 缩放 ----
+const isDragging = ref(false);
 const dragMoved = ref(false);
 let dragStart = { x: 0, y: 0, panX: 0, panY: 0 };
 function onStageMouseDown(e: MouseEvent): void {
   if (e.button !== 0) return;
-  isPanning.value = true;
+  isDragging.value = true;
   dragMoved.value = false;
   dragStart = { x: e.clientX, y: e.clientY, panX: panX.value, panY: panY.value };
 }
 function onStageMouseMove(e: MouseEvent): void {
-  if (!isPanning.value) return;
+  if (!isDragging.value) return;
   const dx = e.clientX - dragStart.x;
   const dy = e.clientY - dragStart.y;
-  if (Math.abs(dx) > 3 || Math.abs(dy) > 3) dragMoved.value = true;
+  // 仅当「按住并移动超过阈值」才视为拖拽，避免「点一下松开鼠标」就产生位移
+  if (!dragMoved.value && Math.hypot(dx, dy) < 4) return;
+  dragMoved.value = true;
   panX.value = dragStart.panX + dx;
   panY.value = dragStart.panY + dy;
 }
 function onStageMouseUp(): void {
-  isPanning.value = false;
+  isDragging.value = false;
 }
 function onStageMouseLeave(): void {
-  isPanning.value = false;
+  isDragging.value = false;
 }
 onMounted(() => {
   window.addEventListener('mousemove', onStageMouseMove);
@@ -384,113 +394,61 @@ function colorFor(room: RoomLike): string {
   }
 }
 
-// ---- 显示方向归一化：把斜放的图纸转正为水平 ----
-// 背景：CAD 图纸常按楼栋自身轴网绘制（或经锚点配准继承了楼栋相对地图的真实朝向），
-// 原始坐标里的楼层平面可能是斜的；toScreen 只做 Y 翻转，会整张斜放。
-// 这里用「边长加权 + 角度倍频圆统计」估算墙体主方向（模 90°），仅用于显示时转正，
-// 不修改任何持久化数据，也不影响指纹匹配 / 锚点配准。
+// ---- 源楼层「转正」对齐（关键修复：DXF 里斜画的矩形必须先转正到坐标轴，再做纯 Y 压缩，否则会被压成平行四边形）----
+//   任何「旋转 + 非等比 Y 压缩」叠加都产生错切 → 平行四边形；但正确顺序是「先把矩形转正到坐标轴(纯旋转)」再「纯 Y 压缩」：
+//   旋转作用在已对齐的矩形上、压缩只沿对齐后的 y 轴，二者不耦合 → 不会剪切，底面恒为矩形、阳角严格 90°。
+//   做法：取源楼层外轮廓（兜底用所有房间）最长边方向 θ，绕质心旋转 -θ 使矩形长边水平 → 轴对齐；之后 scale(1,k) 仅压缩深度。
+//   此旋转是「把斜画矩形扶正」的数据预处理，不是视图 yaw 旋转（视图 yaw 旋转 + 压缩才是产生错切的根因，已彻底移除）。
+//   alignToAxisEnabled 关闭时按 DXF 真实朝向渲染（斜矩形会如实呈平行四边形，属几何预期，非 bug）。 ----
 
-/** 估算图纸相对坐标轴的旋转角（弧度，折叠到 [-45°, 45°)，接近 0° 时返回 0）。
- *  原理：房间/外轮廓的墙边在楼栋自身坐标系里是横平竖直的，把每条边的方向角 θ
- *  按 e^{i2θ} 做边长加权累计（倍频消除 mod 180° 歧义），合成向量的辐角一半即主方向。 */
-const planRotation = computed<number>(() => {
-  const polys: [number, number][][] = [];
-  const outline = props.preview ? props.preview.outline : (currentFloor.value?.outline ?? null);
-  if (outline && outline.length > 2) polys.push(outline);
-  for (const r of displayedRooms.value) polys.push(polyOf(r));
-  let sx = 0;
-  let sy = 0;
-  for (const poly of polys) {
-    for (let i = 0; i < poly.length; i++) {
-      const [x1, y1] = poly[i]!;
-      const [x2, y2] = poly[(i + 1) % poly.length]!;
-      const dx = x2 - x1;
-      const dy = y2 - y1;
-      const len = Math.hypot(dx, dy);
-      if (len < 1e-6) continue;
-      const a2 = 2 * Math.atan2(dy, dx);
-      sx += len * Math.cos(a2);
-      sy += len * Math.sin(a2);
-    }
+/** 是否将源楼层「转正到坐标轴」后再投影（默认开启）。关闭则按 DXF 真实朝向（斜画矩形会呈平行四边形，非 bug）。 */
+const alignToAxisEnabled = ref(true);
+
+const outlinePoints = computed<[number, number][]>(() => {
+  if (props.embedded && props.preview) {
+    return (props.preview.outline as unknown as [number, number][]) ?? [];
   }
-  if (sx === 0 && sy === 0) return 0;
-  let theta = Math.atan2(sy, sx) / 2;
-  // 折叠到 [-45°, 45°)：转正时取最短旋转，避免长边被竖过来
-  if (theta > Math.PI / 4) theta -= Math.PI / 2;
-  if (theta < -Math.PI / 4) theta += Math.PI / 2;
-  if (Math.abs(theta) < (1 * Math.PI) / 180) theta = 0;
-  // 转正后若仍是「竖条」（高 > 宽），再补转 90°，保证楼层图横向铺开（匹配 3D 楼层平面图的横版观感）
-  const [cx0, cy0] = rotationCenter.value;
-  const bboxAt = (t: number): { w: number; h: number } => {
-    let minX = Infinity;
-    let minY = Infinity;
-    let maxX = -Infinity;
-    let maxY = -Infinity;
-    const c = Math.cos(-t);
-    const s = Math.sin(-t);
-    for (const poly of polys) {
-      for (const [px, py] of poly) {
-        const dx = px - cx0;
-        const dy = py - cy0;
-        const x = cx0 + dx * c - dy * s;
-        const y = cy0 + dx * s + dy * c;
-        if (x < minX) minX = x;
-        if (y < minY) minY = y;
-        if (x > maxX) maxX = x;
-        if (y > maxY) maxY = y;
-      }
-    }
-    return { w: maxX - minX, h: maxY - minY };
-  };
-  if (bboxAt(theta).h > bboxAt(theta + Math.PI / 2).h) theta += Math.PI / 2;
-  return theta;
+  return (currentFloor.value?.outline as [number, number][]) ?? [];
 });
 
-/** 旋转中心：全部几何点的算术平均（与旋转角无关，避免 computed 循环依赖） */
-const rotationCenter = computed<[number, number]>(() => {
-  let sx = 0;
-  let sy = 0;
-  let n = 0;
-  const outline = props.preview ? props.preview.outline : (currentFloor.value?.outline ?? null);
-  if (outline && outline.length > 2) {
-    for (const [x, y] of outline) {
-      sx += x;
-      sy += y;
-      n++;
-    }
+/** 求源楼层的「主方向」：最长边方向角 θ（绕质心旋转 -θ 可把矩形转正到坐标轴）。对矩形鲁棒：最长边即矩形边。 */
+const sourceAlign = computed(() => {
+  let pts: [number, number][] = outlinePoints.value ?? [];
+  if (!pts || pts.length < 3) {
+    pts = [];
+    for (const r of displayedRooms.value) for (const p of polyOf(r)) pts.push(p);
   }
-  for (const r of displayedRooms.value) {
-    for (const [x, y] of polyOf(r)) {
-      sx += x;
-      sy += y;
-      n++;
-    }
+  if (pts.length < 3) return { cx: 0, cy: 0, angle: 0 };
+  let cx = 0, cy = 0;
+  for (const p of pts) { cx += p[0]; cy += p[1]; }
+  cx /= pts.length; cy /= pts.length;
+  let best = 0, bestLen = -1;
+  for (let i = 0; i < pts.length; i++) {
+    const a = pts[i]!, b = pts[(i + 1) % pts.length]!;
+    const dx = b[0] - a[0], dy = b[1] - a[1];
+    const len = dx * dx + dy * dy;
+    if (len > bestLen) { bestLen = len; best = Math.atan2(dy, dx); }
   }
-  if (!n) return [0, 0];
-  return [sx / n, sy / n];
+  return { cx, cy, angle: best };
 });
 
-/** 把图纸坐标点绕旋转中心转正（planRotation 为 0 时原样返回） */
-function rotatePlan(p: [number, number]): [number, number] {
-  const t = planRotation.value;
-  if (!t) return p;
-  const [cx, cy] = rotationCenter.value;
-  const dx = p[0] - cx;
-  const dy = p[1] - cy;
-  const cos = Math.cos(-t);
-  const sin = Math.sin(-t);
-  return [cx + dx * cos - dy * sin, cy + dx * sin + dy * cos];
+/** 把图纸坐标点「转正到坐标轴」（绕楼层质心纯旋转，使矩形长边水平）。alignToAxisEnabled 关闭时原样返回。纯旋转，无拉伸/无剪切。 */
+function alignSource(p: [number, number]): [number, number] {
+  if (!alignToAxisEnabled.value) return p;
+  const { cx, cy, angle } = sourceAlign.value;
+  const phi = -angle;
+  const c = Math.cos(phi), s = Math.sin(phi);
+  const dx = p[0] - cx, dy = p[1] - cy;
+  return [dx * c - dy * s + cx, dx * s + dy * c + cy];
 }
 
-// ---- 坐标变换（标准 30° 等轴测，见 fit / project）----
-
 const fit = computed(() => {
-  // 标准 30° 等轴测：先按投影算整层（含墙顶 z=wallHeight）的屏幕包围盒，再求缩放与居中
+  // 先按投影算整层（含墙顶 z=wallHeight）的屏幕包围盒，再求缩放与居中
   let minIX = Infinity, maxIX = -Infinity, minIY = Infinity, maxIY = -Infinity;
   const consider = (x: number, y: number, z: number) => {
-    const [rx, ry] = rotatePlan([x, y]);
-    const ix = rx + ry * OBLIQ_COS;
-    const iy = -ry * OBLIQ_SIN - z * Z_EXAG;
+    const [ax, ay] = alignSource([x, y]);
+    const ix = ax;
+    const iy = ay * K.value - z * Z_EXAG;
     if (ix < minIX) minIX = ix;
     if (ix > maxIX) maxIX = ix;
     if (iy < minIY) minIY = iy;
@@ -524,16 +482,20 @@ function toScreen(p: [number, number]): [number, number] {
   return project(p[0], p[1], 0);
 }
 
-/** 倾斜横向（plan oblique）投影：平面点 (x,y) 抬升 z 米后的屏幕坐标（无任何 3D 引擎依赖）。
- *  screenX = x + y * cos(30°)
- *  screenY = -y * sin(30°) - z
- *  楼地面的 X 轴保持水平（横向），Y 轴沿右上倾斜后退，墙体沿屏幕竖直方向拉出高度，
- *  形成俯视平铺、倾斜横向的 2.5D 楼层图（非 45° 菱形等轴测）。 */
+/** 2.5D 投影（纯正交俯视压缩，无旋转项）：平面点 (x,y) 抬升 z 米后的屏幕坐标。
+ *    screenX = x                         （水平方向原样，房间格子宽度不变）
+ *    screenY = y * k - z * Z_EXAG        （k = cos(纵向俯仰角)：深度方向等比压缩；z 为墙高抬升，向上为正）
+ *  对角矩阵（screenX 只含 x、screenY 只含 y 与 z）→ 轴对齐矩形恒为矩形、阳角严格 90°、墙体竖直；
+ *  绝不退化成平行四边形/梯形（那需要旋转+yaw 或透视除法，本实现两者皆无）。
+ *  立体感来自墙体侧面暗色多边形 + 顶面亮色 + 按屏幕 Y 升序绘制（见 wallFaces / wallSideFaces）。 */
 function project(x: number, y: number, z: number): [number, number] {
   const f = fit.value;
-  const [rx, ry] = rotatePlan([x, y]);
-  const ix = rx + ry * OBLIQ_COS;
-  const iy = -ry * OBLIQ_SIN - z * Z_EXAG;
+  // 关键修复：渲染路径必须与 fit 一致地先「源对齐转正」再投影，否则斜画的 DXF 矩形会被原样
+  // 画出（常常呈竖向斜片），而 fit 却按转正后的包围盒去缩放/居中 → 内容错位、整体竖向斜置。
+  // 这里对齐后再做纯 Y 压缩 k=cos(俯仰)，旋转与压缩不耦合 → 底面恒为矩形、长边水平、阳角严格 90°。
+  const [ax, ay] = alignSource([x, y]);
+  const ix = ax;
+  const iy = ay * K.value - z * Z_EXAG;
   return [ix * f.scale + f.padX, iy * f.scale + f.padY];
 }
 
@@ -959,7 +921,7 @@ function saveEdit(): void {
               </linearGradient>
             </defs>
             <rect x="0" y="0" :width="VIEW_W" :height="VIEW_H" fill="#fbfcfe" pointer-events="none" />
-            <g :transform="`rotate(${viewRotation} ${VIEW_W / 2} ${VIEW_H / 2})`">
+            <g>
             <!-- ① 地面(楼板) + ② 走廊：楼层外轮廓填充；房间在③层覆盖其上，自然得到「外轮廓减房间」的走廊区 -->
             <path v-if="outlinePath" :d="outlinePath" fill="#eef1f5" stroke="#c4cbd4" stroke-width="1.5" pointer-events="none" />
             <!-- ③ 房间平铺填充（z=0 地面，无侧面） -->
@@ -1146,11 +1108,18 @@ function saveEdit(): void {
               </div>
               <div class="fpv-tools__row">
                 <span class="fpv-tools__label">墙高(米)</span>
-                <el-slider v-model="wallHeight" :min="1" :max="5" :step="0.5" :show-tooltip="true" class="fpv__lift" />
+                <el-slider v-model="wallHeight" :min="0.5" :max="5" :step="0.5" :show-tooltip="true" class="fpv__lift" />
               </div>
               <div class="fpv-tools__row">
-                <span class="fpv-tools__label">旋转</span>
-                <el-slider v-model="viewRotation" :min="-180" :max="180" :step="5" :show-tooltip="true" class="fpv__lift" />
+                <span class="fpv-tools__label">纵向旋转</span>
+                <el-slider v-model="pitchDeg" :min="0" :max="80" :step="1" :show-tooltip="true" class="fpv__lift" />
+                <span class="fpv-tools__val">{{ pitchDeg }}°</span>
+              </div>
+              <div class="fpv-tools__row">
+                <el-checkbox v-model="alignToAxisEnabled" size="small">源对齐(转正为水平矩形)</el-checkbox>
+              </div>
+              <div class="fpv-tools__row">
+                <span class="fpv-tools__hint">左键拖拽平移图层；滚轮缩放。底面经源对齐转正为水平矩形，仅做俯视压缩保持直角；墙体竖直抬升形成长方体</span>
               </div>
               <div class="fpv-tools__row">
                 <el-button-group>
@@ -1183,8 +1152,12 @@ function saveEdit(): void {
           <el-button size="small" @click="resetView">复位</el-button>
         </el-button-group>
         <div class="fpv-tools__row fpv-tools__row--embed">
-          <span class="fpv-tools__label">旋转</span>
-          <el-slider v-model="viewRotation" :min="-180" :max="180" :step="5" :show-tooltip="true" class="fpv__lift" />
+          <span class="fpv-tools__label">倾角</span>
+          <el-slider v-model="pitchDeg" :min="0" :max="80" :step="1" :show-tooltip="true" class="fpv__lift fpv__lift--embed" />
+          <span class="fpv-tools__val">{{ pitchDeg }}°</span>
+        </div>
+        <div class="fpv-tools__row fpv-tools__row--embed">
+          <el-checkbox v-model="alignToAxisEnabled" size="small">源对齐</el-checkbox>
         </div>
       </div>
     </div>
@@ -1205,7 +1178,7 @@ function saveEdit(): void {
           </linearGradient>
         </defs>
         <rect x="0" y="0" :width="VIEW_W" :height="VIEW_H" fill="#fbfcfe" pointer-events="none" />
-        <g :transform="`rotate(${viewRotation} ${VIEW_W / 2} ${VIEW_H / 2})`">
+        <g>
         <!-- ① 地面(楼板) + ② 走廊：楼层外轮廓填充；房间在③层覆盖其上，自然得到「外轮廓减房间」的走廊区 -->
         <path v-if="outlinePath" :d="outlinePath" fill="#eef1f5" stroke="#c4cbd4" stroke-width="1.5" pointer-events="none" />
         <!-- ③ 房间平铺填充（z=0 地面，无侧面） -->
@@ -1357,6 +1330,8 @@ function saveEdit(): void {
 .fpv-tools__row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .fpv-tools__label { font-size: 13px; color: #6b7280; width: 32px; flex-shrink: 0; }
 .fpv__lift { flex: 1; min-width: 80px; }
+.fpv-tools__val { font-size: 12px; color: #6b7280; width: 40px; text-align: right; flex-shrink: 0; font-variant-numeric: tabular-nums; }
+.fpv__lift--embed { min-width: 90px; max-width: 150px; }
 
 /* 房间列表 */
 .fpv-roomlist { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; max-height: 220px; overflow-y: auto; }

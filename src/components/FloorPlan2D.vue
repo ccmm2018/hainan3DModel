@@ -1033,13 +1033,7 @@ function saveEdit(): void {
                 <stop offset="0%" stop-color="#d9dee5" />
                 <stop offset="100%" stop-color="#aeb6c2" />
               </linearGradient>
-              <linearGradient id="fpvBgStore" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stop-color="#8fc1ec" />
-                <stop offset="55%" stop-color="#bfdcf4" />
-                <stop offset="100%" stop-color="#eef6fc" />
-              </linearGradient>
             </defs>
-            <rect x="0" y="0" :width="VIEW_W" :height="VIEW_H" fill="url(#fpvBgStore)" pointer-events="none" />
             <g>
             <!-- ① 地面(楼板) + ② 走廊：楼层外轮廓填充；房间在③层覆盖其上，自然得到「外轮廓减房间」的走廊区 -->
             <path v-if="outlinePath" :d="outlinePath" fill="#eef1f5" stroke="#c4cbd4" stroke-width="1.5" pointer-events="none" />
@@ -1260,17 +1254,11 @@ function saveEdit(): void {
           <filter id="roomShadow" x="-30%" y="-30%" width="160%" height="160%">
             <feDropShadow dx="0" dy="2" stdDeviation="2.2" flood-color="#0f172a" flood-opacity="0.22" />
           </filter>
-          <linearGradient id="rimGrad" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stop-color="#d9dee5" />
-            <stop offset="100%" stop-color="#aeb6c2" />
-          </linearGradient>
-          <linearGradient id="fpvBgEmbed" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stop-color="#8fc1ec" />
-            <stop offset="55%" stop-color="#bfdcf4" />
-            <stop offset="100%" stop-color="#eef6fc" />
-          </linearGradient>
-        </defs>
-        <rect x="0" y="0" :width="VIEW_W" :height="VIEW_H" fill="url(#fpvBgEmbed)" pointer-events="none" />
+              <linearGradient id="rimGrad" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stop-color="#d9dee5" />
+                <stop offset="100%" stop-color="#aeb6c2" />
+              </linearGradient>
+            </defs>
         <g>
         <!-- ① 地面(楼板) + ② 走廊：楼层外轮廓填充；房间在③层覆盖其上，自然得到「外轮廓减房间」的走廊区 -->
         <path v-if="outlinePath" :d="outlinePath" fill="#eef1f5" stroke="#c4cbd4" stroke-width="1.5" pointer-events="none" />
@@ -1411,7 +1399,7 @@ function saveEdit(): void {
 .fpv-detail dd { margin: 0; color: #111827; }
 .fpv-showall { margin-top: 8px; }
 .fpv-main { display: flex; gap: 12px; align-items: stretch; }
-.fpv-stage { position: relative; flex: 1; border: 1px solid #e5e7eb; border-radius: 10px; overflow: hidden; background: #fbfcfe; }
+.fpv-stage { position: relative; flex: 1; border: 1px solid #e5e7eb; border-radius: 10px; overflow: hidden; background: linear-gradient(180deg, #8fc1ec 0%, #bfdcf4 55%, #eef6fc 100%); }
 .fpv-svg { display: block; width: 100%; height: 60vh; }
 .fpv-room { cursor: pointer; }
 .fpv-tip { line-height: 1.6; }

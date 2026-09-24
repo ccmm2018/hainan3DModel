@@ -558,13 +558,23 @@ const visibleRooms = computed(() => displayedRooms.value.filter((r) => r.selecte
  *  这里在聚合后做「共线重叠合并」(mergeWallSegments)，把同一物理墙的多条重合边合并成唯一一段，只画一次。 */
 
 /** 把若干墙线段做「共线重叠合并」：相邻房间共用的同一堵墙、外轮廓与房间周界重合的边，会被合并成唯一一段，
- *  避免「共一堵墙显示两堵」的重叠双描。共线判定基于无限直线（方向 + 到原点垂距），1D 投影后按区间合并重叠段。 */
+ *  只画一次，避免「共一堵墙显示两堵」的重叠双描。
+ *  判定两条边属于同一堵墙（单位无关，全部以 WALL_THICK 为量纲基准，因为 WALL_THICK 是直接叠加到墙线坐标上的，
+ *  与坐标同单位）：
+ *    1) 近似平行：方向叉积 |ux·uy' − uy·ux'| ≤ ANGLE_TOL（≈2.3°），吸收极小的绘制/解析角度抖动；
+ *    2) 两线垂直距离 |c₁ − c₂| ≤ DIST_TOL（= 2×墙厚）：吸收共享墙坐标错位、半墙偏移；
+ *    3) 两线段在墙方向上的投影区间重叠或间隙 ≤ GAP_TOL（= 2×墙厚）：吸收端点不齐。
+ *  用并查集合并，组内按长度加权平均取代表方向与垂距，还原为单段，使单堵墙落在平均位置。 */
 function mergeWallSegments(raw: { a: [number, number]; b: [number, number] }[]): {
   a: [number, number];
   b: [number, number];
 }[] {
-  const EPS = 1e-4;
-  const groups = new Map<string, { ux: number; uy: number; c: number; segs: { a: [number, number]; b: [number, number] }[] }>();
+  const EPS = 1e-6;
+  const ANGLE_TOL = 0.04; // |sin(Δθ)| ≈ 2.3°
+  const DIST_TOL = WALL_THICK * 2;
+  const GAP_TOL = WALL_THICK * 2;
+  type Item = { ux: number; uy: number; c: number; t0: number; t1: number; len: number };
+  const items: Item[] = [];
   for (const s of raw) {
     const dx = s.b[0] - s.a[0];
     const dy = s.b[1] - s.a[1];
@@ -572,44 +582,70 @@ function mergeWallSegments(raw: { a: [number, number]; b: [number, number] }[]):
     if (len < EPS) continue;
     let ux = dx / len;
     let uy = dy / len;
-    // 规范化方向，使反向线段（a→b 与 b→a）归入同一直线
+    // 规范化方向，使反向线段（a→b 与 b→a）归入同向
     if (ux < 0 || (ux === 0 && uy < 0)) {
       ux = -ux;
       uy = -uy;
     }
     // 单位法向量 n=(-uy,ux)，c = a·n 即直线到原点的有符号垂距
     const c = s.a[0] * -uy + s.a[1] * ux;
-    const key = `${ux.toFixed(4)}|${uy.toFixed(4)}|${c.toFixed(3)}`;
-    const g = groups.get(key) ?? { ux, uy, c, segs: [] };
-    g.segs.push(s);
-    groups.set(key, g);
+    const t1 = s.a[0] * ux + s.a[1] * uy;
+    const t2 = s.b[0] * ux + s.b[1] * uy;
+    items.push({ ux, uy, c, t0: Math.min(t1, t2), t1: Math.max(t1, t2), len });
+  }
+  const parent = items.map((_, i) => i);
+  const find = (x: number): number => (parent[x] === x ? x : (parent[x] = find(parent[x])));
+  const union = (a: number, b: number) => {
+    parent[find(a)] = find(b);
+  };
+  for (let i = 0; i < items.length; i++) {
+    for (let j = i + 1; j < items.length; j++) {
+      const A = items[i]!;
+      const B = items[j]!;
+      if (Math.abs(A.ux * B.uy - A.uy * B.ux) > ANGLE_TOL) continue;
+      if (Math.abs(A.c - B.c) > DIST_TOL) continue;
+      const gap = Math.max(A.t0, B.t0) - Math.min(A.t1, B.t1);
+      if (gap > GAP_TOL) continue;
+      union(i, j);
+    }
+  }
+  const groups = new Map<number, Item[]>();
+  for (let i = 0; i < items.length; i++) {
+    const r = find(i);
+    const arr = groups.get(r) ?? [];
+    arr.push(items[i]!);
+    groups.set(r, arr);
   }
   const out: { a: [number, number]; b: [number, number] }[] = [];
-  for (const g of groups.values()) {
-    const { ux, uy, c, segs } = g;
-    // 各端点在方向 u 上投影为 1D 区间（t = P·u）
-    const ivs = segs
-      .map((s) => {
-        const t1 = s.a[0] * ux + s.a[1] * uy;
-        const t2 = s.b[0] * ux + s.b[1] * uy;
-        return [Math.min(t1, t2), Math.max(t1, t2)] as [number, number];
-      })
-      .sort((p, q) => p[0] - q[0]);
-    // 合并重叠区间
-    let cur = ivs[0]!;
-    const make = (iv: [number, number]) => ({
-      a: [-c * uy + iv[0] * ux, c * ux + iv[0] * uy] as [number, number],
-      b: [-c * uy + iv[1] * ux, c * ux + iv[1] * uy] as [number, number],
-    });
-    for (let i = 1; i < ivs.length; i++) {
-      if (ivs[i]![0] <= cur[1] + EPS) {
-        cur = [cur[0], Math.max(cur[1], ivs[i]![1])];
-      } else {
-        out.push(make(cur));
-        cur = ivs[i]!;
-      }
+  for (const arr of groups.values()) {
+    let sux = 0;
+    let suy = 0;
+    let sc = 0;
+    let sl = 0;
+    let tmin = Infinity;
+    let tmax = -Infinity;
+    for (const it of arr) {
+      sux += it.ux * it.len;
+      suy += it.uy * it.len;
+      sc += it.c * it.len;
+      sl += it.len;
+      tmin = Math.min(tmin, it.t0);
+      tmax = Math.max(tmax, it.t1);
     }
-    out.push(make(cur));
+    let ux = sux / sl;
+    let uy = suy / sl;
+    const ul = Math.hypot(ux, uy) || 1;
+    ux /= ul;
+    uy /= ul;
+    if (ux < 0 || (ux === 0 && uy < 0)) {
+      ux = -ux;
+      uy = -uy;
+    }
+    const c = sc / sl;
+    out.push({
+      a: [-c * uy + tmin * ux, c * ux + tmin * uy],
+      b: [-c * uy + tmax * ux, c * ux + tmax * uy],
+    });
   }
   return out;
 }

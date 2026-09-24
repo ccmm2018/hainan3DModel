@@ -534,10 +534,10 @@ function buildLabelLines(room: RoomLike): Omit<LabelLine, 'y' | 'rect'>[] {
   const code = (room.code || room.number || room.name || '').trim();
   const d = (s: string) => (s.trim() !== '' ? s.trim() : '—');
   return [
-    { text: code !== '' ? code : '未命名房间', size: 13, weight: 700, color: '#1f2937', badge: false },
-    { text: `名称:${d(room.name)}`, size: 9, weight: 400, color: '#374151', badge: false },
-    { text: `建筑面积:${room.buildArea > 0 ? room.buildArea.toFixed(1) : '—'}㎡`, size: 9, weight: 600, color: '#111827', badge: true },
-    { text: `使用面积:${room.useArea > 0 ? room.useArea.toFixed(1) : '—'}㎡`, size: 9, weight: 600, color: '#111827', badge: true },
+    { text: code !== '' ? code : '未命名房间', size: 11, weight: 500, color: '#1f2937', badge: false },
+    { text: `名称:${d(room.name)}`, size: 8, weight: 400, color: '#374151', badge: false },
+    { text: `建筑面积:${room.buildArea > 0 ? room.buildArea.toFixed(1) : '—'}㎡`, size: 8, weight: 400, color: '#111827', badge: true },
+    { text: `使用面积:${room.useArea > 0 ? room.useArea.toFixed(1) : '—'}㎡`, size: 8, weight: 400, color: '#111827', badge: true },
   ];
 }
 

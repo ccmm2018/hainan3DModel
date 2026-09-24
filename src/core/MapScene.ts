@@ -120,13 +120,11 @@ export class MapScene {
   private captureResolve: ((dataUrl: string) => void) | null = null;
 
   /**
-   * 渲染节流：仅当「视角签名发生变化」或「场景被标记为脏」时才真正执行 renderer.render。
-   * 低配机器上 AMap 自定义图层会高频调用 render()，若每帧都重绘（即便视角未变）会持续占满 CPU。
-   * 视角变化已由 syncViewChange 通过签名比对，这里复用同一签名决定是否跳过整帧重绘。
+   * 渲染策略：AMap 的 GL 自定义图层每帧都会清掉底图帧缓冲后回调 render()，
+   * 因此每帧都必须重新叠加绘制模型（不可整帧跳过，否则模型会闪烁/隐藏）。
+   * 低配机器的性能压力由「低功耗渲染设置（关抗锯齿、像素比封顶为 1）」承担。
+   * 场景内容变化时调用 markDirty() 唤醒地图重绘即可。
    */
-  private lastRenderSig = '';
-  private sceneDirty = true;
-
   private disposed = false;
 
   // 量算（测距 / 测面）状态
@@ -1275,33 +1273,20 @@ export class MapScene {
   // -------------------------------------------------------------------------
   // 渲染循环
   // -------------------------------------------------------------------------
-  /** 标记场景需要重绘（场景内容变化时调用，避免被渲染节流跳过） */
+  /** 场景内容发生变化（加载模型 / 切换楼层 / 高亮 / 业务状态），唤醒地图重绘以反映变化 */
   private markDirty(): void {
-    this.sceneDirty = true;
+    // AMap 自定义图层每帧都会清底图帧缓冲后回调 render()，render() 内总是重新叠加绘制模型。
+    // 若地图当前处于空闲（不再持续回调），需主动唤醒一次重绘，否则变更要等用户下次交互才显示。
+    if (typeof this.map?.render === 'function') this.map.render();
   }
 
   private render(): void {
     if (!this.renderer || !this.scene || !this.camera || !this.customCoords) return;
 
-    // 视角签名：与 syncViewChange 同源，若未变化且场景未脏，整帧跳过，避免无谓重绘。
-    // 注意：AMap 调用本函数时上下文已切到它的 GL 状态，跳过时不需要 resetState。
-    let sig = '';
-    try {
-      const c = this.map?.getCenter?.();
-      sig = [
-        c?.lng,
-        c?.lat,
-        this.map?.getZoom?.(),
-        this.map?.getRotation?.(),
-        this.map?.getPitch?.(),
-      ].join(',');
-    } catch {
-      sig = '';
-    }
-    if (!this.sceneDirty && sig === this.lastRenderSig && !this.captureResolve) return;
-    this.lastRenderSig = sig;
-    this.sceneDirty = false;
-
+    // ⚠️ 不能整帧跳过渲染：AMap 的 GL 自定义图层每帧都会先清掉底图帧缓冲、再回调本函数，
+    // 模型必须在本帧重新叠加绘制到该帧缓冲上。若「视角未变」就 return 跳过 renderer.render()，
+    // 被跳过的那一帧模型就不会被画出（底图已清），缩放/平移时表现为模型时而显示时而隐藏（闪烁）。
+    // 低配机器的性能压力已由「低功耗渲染设置（关抗锯齿、像素比封顶为 1）」承担，无需靠跳帧降负载。
     this.renderer.resetState();
 
     // 视角变化检测（拖拽 / 缩放 / 旋转 / 飞行）→ 通知上层刷新锚定浮层位置

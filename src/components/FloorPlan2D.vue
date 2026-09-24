@@ -17,7 +17,8 @@
  * - 房间中央文字：房间号码(14px 粗) / 房间名称(10px) / 部门(9px 灰) / 使用面积(9px 白底圆角)。
  * - 配色（按审图状态）：normal=#AED6F1，highlight=#C0392B，warning=#8E44AD，
  *   partial(字段缺失)=#F5B041。
- * - hover 高亮 + el-tooltip 显示全部 6 字段（房间号/名称/部门/用途/使用面积/建筑面积）。
+ * - 仅点击房间弹出小卡片（含修改 / 维护入口），不再使用 hover tooltip（避免遮挡与误触；点击容差 8px，点任意位置即可触发）。
+ * - 墙段按「共线重叠合并」去重：相邻房间共用的同一堵墙、外轮廓与房间周界重合的边只绘制一次，避免双墙重叠。
  * - 楼层切换 tabs（F1/F2/...），切换时保留缩放/平移状态。
  *
  * 两种模式：
@@ -552,22 +553,82 @@ const visibleRooms = computed(() => displayedRooms.value.filter((r) => r.selecte
 /** 墙线来源（等效于 DXF 的「内部结构外墙线」+「内部结构内墙线」层）：
  *  - 楼层外轮廓（outerWall 周长，即 外墙线）作为外墙，每条边拉伸成一段墙体；
  *  - 每个房间轮廓（innerWall 房间，即 内墙线）作为内墙，每条边拉伸成一段墙体。
- *  每段墙线 (a,b) 经 wallFaces 拉伸成带厚度的实心盒：4 个侧面（深灰 #8a8a8a）+ 1 个顶面（浅灰 #c8c8c8）。 */
-const wallSegments = computed<{ a: [number, number]; b: [number, number]; key: string }[]>(() => {
-  const segs: { a: [number, number]; b: [number, number]; key: string }[] = [];
+ *  每段墙线 (a,b) 经 wallFaces 拉伸成带厚度的实心盒：4 个侧面（深灰 #8a8a8a）+ 1 个顶面（浅灰 #c8c8c8）。
+ *  关键修复：相邻房间「共一堵墙」时，两侧房间各自贡献一条重合边 → 会画出两堵重叠墙。
+ *  这里在聚合后做「共线重叠合并」(mergeWallSegments)，把同一物理墙的多条重合边合并成唯一一段，只画一次。 */
+
+/** 把若干墙线段做「共线重叠合并」：相邻房间共用的同一堵墙、外轮廓与房间周界重合的边，会被合并成唯一一段，
+ *  避免「共一堵墙显示两堵」的重叠双描。共线判定基于无限直线（方向 + 到原点垂距），1D 投影后按区间合并重叠段。 */
+function mergeWallSegments(raw: { a: [number, number]; b: [number, number] }[]): {
+  a: [number, number];
+  b: [number, number];
+}[] {
+  const EPS = 1e-4;
+  const groups = new Map<string, { ux: number; uy: number; c: number; segs: { a: [number, number]; b: [number, number] }[] }>();
+  for (const s of raw) {
+    const dx = s.b[0] - s.a[0];
+    const dy = s.b[1] - s.a[1];
+    const len = Math.hypot(dx, dy);
+    if (len < EPS) continue;
+    let ux = dx / len;
+    let uy = dy / len;
+    // 规范化方向，使反向线段（a→b 与 b→a）归入同一直线
+    if (ux < 0 || (ux === 0 && uy < 0)) {
+      ux = -ux;
+      uy = -uy;
+    }
+    // 单位法向量 n=(-uy,ux)，c = a·n 即直线到原点的有符号垂距
+    const c = s.a[0] * -uy + s.a[1] * ux;
+    const key = `${ux.toFixed(4)}|${uy.toFixed(4)}|${c.toFixed(3)}`;
+    const g = groups.get(key) ?? { ux, uy, c, segs: [] };
+    g.segs.push(s);
+    groups.set(key, g);
+  }
+  const out: { a: [number, number]; b: [number, number] }[] = [];
+  for (const g of groups.values()) {
+    const { ux, uy, c, segs } = g;
+    // 各端点在方向 u 上投影为 1D 区间（t = P·u）
+    const ivs = segs
+      .map((s) => {
+        const t1 = s.a[0] * ux + s.a[1] * uy;
+        const t2 = s.b[0] * ux + s.b[1] * uy;
+        return [Math.min(t1, t2), Math.max(t1, t2)] as [number, number];
+      })
+      .sort((p, q) => p[0] - q[0]);
+    // 合并重叠区间
+    let cur = ivs[0]!;
+    const make = (iv: [number, number]) => ({
+      a: [-c * uy + iv[0] * ux, c * ux + iv[0] * uy] as [number, number],
+      b: [-c * uy + iv[1] * ux, c * ux + iv[1] * uy] as [number, number],
+    });
+    for (let i = 1; i < ivs.length; i++) {
+      if (ivs[i]![0] <= cur[1] + EPS) {
+        cur = [cur[0], Math.max(cur[1], ivs[i]![1])];
+      } else {
+        out.push(make(cur));
+        cur = ivs[i]!;
+      }
+    }
+    out.push(make(cur));
+  }
+  return out;
+}
+
+const wallSegments = computed<{ a: [number, number]; b: [number, number] }[]>(() => {
+  const raw: { a: [number, number]; b: [number, number] }[] = [];
   const outline =
     (props.embedded && props.preview ? props.preview.outline : currentFloor.value?.outline) ?? [];
-  const pushLoop = (poly: [number, number][], tag: string) => {
+  const pushLoop = (poly: [number, number][]) => {
     for (let i = 0; i < poly.length; i++) {
       const a = poly[i]!;
       const b = poly[(i + 1) % poly.length]!;
       if (Math.hypot(b[0] - a[0], b[1] - a[1]) < 1e-6) continue;
-      segs.push({ a, b, key: `${tag}-${i}` });
+      raw.push({ a, b });
     }
   };
-  pushLoop(outline, 'outer');
-  for (const r of visibleRooms.value) pushLoop(polyOf(r), `r-${r.id}`);
-  return segs;
+  pushLoop(outline);
+  for (const r of visibleRooms.value) pushLoop(polyOf(r));
+  return mergeWallSegments(raw);
 });
 
 /** 把一段墙线 (a,b) 拉伸成高 wallHeight 米的墙体：4 个竖直侧面 + 1 个顶面。 */
@@ -696,45 +757,11 @@ const legend = computed(() => {
   return [...map.entries()].map(([label, color]) => ({ label, color }));
 });
 
-// ---- 交互：hover / 选中 / tooltip ----
-const hoveredId = ref<string | null>(null);
+// ---- 交互：仅点击选中弹出小卡片（已移除 hover tooltip，避免遮挡与误触）----
 const selectedId = ref<string | null>(null);
 /** 点击房间弹出的小卡片位置（stage 内像素坐标）与展开模式 */
 const popupPos = ref({ x: 0, y: 0 });
 const popMode = ref<'edit' | 'maint' | null>(null);
-const hoveredRoom = ref<RoomLike | null>(null);
-const tipVisible = ref(false);
-const tipPos = ref({ x: 0, y: 0 });
-/** 虚拟触发锚点：el-tooltip 以此矩形定位（viewport 坐标） */
-const tipMeasurable = {
-  getBoundingClientRect: () => {
-    const { x, y } = tipPos.value;
-    return {
-      x,
-      y,
-      left: x,
-      top: y,
-      right: x,
-      bottom: y,
-      width: 0,
-      height: 0,
-      toJSON: () => ({}),
-    } as DOMRect;
-  },
-};
-
-function onEnter(room: RoomLike, ev: MouseEvent): void {
-  hoveredId.value = room.id;
-  hoveredRoom.value = room;
-  const r = (ev.currentTarget as SVGGraphicsElement).getBoundingClientRect();
-  tipPos.value = { x: r.left + r.width / 2, y: r.top + r.height / 2 };
-  tipVisible.value = true;
-}
-function onLeave(): void {
-  hoveredId.value = null;
-  hoveredRoom.value = null;
-  tipVisible.value = false;
-}
 
 const selectedRoom = computed(() => displayedRooms.value.find((r) => r.id === selectedId.value) ?? null);
 
@@ -746,10 +773,12 @@ function onSelect(room: RoomLike, ev?: MouseEvent): void {
     emit('room-click', room as ParsedRoom);
     return;
   }
-  // 拖拽平移结束后松手会触发一次 click，需忽略（避免误选）
-  if (dragMoved.value) {
-    dragMoved.value = false;
-    return;
+  // 拖拽平移（移动超过阈值）结束后松手会触发一次 click，需忽略；
+  // 用「按下点→松开点」的直线距离判断，容忍点击瞬间的微小手抖（≤8px 仍算点击），
+  // 避免「必须点中房间正中才能弹出」的误吞现象。
+  if (ev) {
+    const d = Math.hypot(ev.clientX - dragStart.x, ev.clientY - dragStart.y);
+    if (d > 8) return;
   }
   const isSame = selectedId.value === room.id;
   selectedId.value = isSame ? null : room.id;
@@ -930,15 +959,13 @@ function saveEdit(): void {
               :key="rf.id"
               class="fpv-room"
               :opacity="rf.dimmed ? 0.18 : 1"
-              @mouseenter="onEnter(rf.room, $event)"
-              @mouseleave="onLeave"
               @click="onSelect(rf.room, $event)"
             >
               <polygon
                 :points="rf.points"
                 :fill="rf.fill"
                 :stroke="rf.stroke"
-                :stroke-width="hoveredId === rf.id ? 2.5 : 1"
+                stroke-width="1"
               />
             </g>
             <!-- ④ 墙侧面（先画，仅作视觉，不拦截点击） -->
@@ -990,27 +1017,6 @@ function saveEdit(): void {
             </g>
           </svg>
 
-          <el-tooltip
-            v-model:visible="tipVisible"
-            virtual-triggering
-            :virtual-ref="tipMeasurable"
-            placement="top"
-            :show-after="0"
-            :hide-after="0"
-          >
-            <template #content>
-              <div v-if="hoveredRoom" class="fpv-tip">
-                <div class="fpv-tip__no">{{ hoveredRoom.code || hoveredRoom.number || hoveredRoom.name }}</div>
-                <div class="fpv-tip__row">名称：{{ hoveredRoom.name || '—' }}</div>
-                <div class="fpv-tip__row">部门：{{ hoveredRoom.dept || '—' }}</div>
-                <div class="fpv-tip__row">用途：{{ hoveredRoom.usePurpose || '—' }}</div>
-                <div class="fpv-tip__row">使用面积：{{ hoveredRoom.useArea.toFixed(1) }} ㎡</div>
-                <div class="fpv-tip__row">建筑面积：{{ hoveredRoom.buildArea.toFixed(1) }} ㎡</div>
-              </div>
-            </template>
-          </el-tooltip>
-
-          <!-- 点击房间弹出的小卡片：房间信息 + 修改 / 维护入口（替代原右侧房间信息面板） -->
           <div
             v-if="selectedRoom"
             class="fpv-pop"
@@ -1187,15 +1193,13 @@ function saveEdit(): void {
           :key="rf.id"
           class="fpv-room"
           :opacity="rf.dimmed ? 0.18 : 1"
-          @mouseenter="onEnter(rf.room, $event)"
-              @mouseleave="onLeave"
-              @click="onSelect(rf.room, $event)"
+          @click="onSelect(rf.room, $event)"
             >
               <polygon
                 :points="rf.points"
                 :fill="rf.fill"
                 :stroke="rf.stroke"
-                :stroke-width="hoveredId === rf.id ? 2.5 : 1"
+                stroke-width="1"
               />
             </g>
         <!-- ④ 墙侧面（先画，仅作视觉，不拦截点击） -->
@@ -1247,25 +1251,6 @@ function saveEdit(): void {
         </g>
       </svg>
 
-      <el-tooltip
-        v-model:visible="tipVisible"
-        virtual-triggering
-        :virtual-ref="tipMeasurable"
-        placement="top"
-        :show-after="0"
-        :hide-after="0"
-      >
-        <template #content>
-          <div v-if="hoveredRoom" class="fpv-tip">
-            <div class="fpv-tip__no">{{ hoveredRoom.code || hoveredRoom.number || hoveredRoom.name }}</div>
-            <div class="fpv-tip__row">名称：{{ hoveredRoom.name || '—' }}</div>
-            <div class="fpv-tip__row">部门：{{ hoveredRoom.dept || '—' }}</div>
-            <div class="fpv-tip__row">用途：{{ hoveredRoom.usePurpose || '—' }}</div>
-            <div class="fpv-tip__row">使用面积：{{ hoveredRoom.useArea.toFixed(1) }} ㎡</div>
-            <div class="fpv-tip__row">建筑面积：{{ hoveredRoom.buildArea.toFixed(1) }} ㎡</div>
-          </div>
-        </template>
-      </el-tooltip>
       <p v-if="!roomFills.length" class="fpv-embed-empty">所选房间均已剔除，左侧重新勾选即可恢复</p>
     </div>
   </div>

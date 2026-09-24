@@ -508,7 +508,6 @@ interface LabelLine {
   color: string;
   badge: boolean;
   y: number;
-  rect: { x: number; y: number; w: number; h: number } | null;
 }
 
 /** 平面模式（top）的侧壁 quad */
@@ -530,18 +529,15 @@ interface RoomFill {
   labelX: number;
 }
 
-/** 房间文字标签：固定 6 项（房间号 / 名称 / 部门 / 用途 / 使用面积 / 建筑面积），房间号缺省兜底「未命名」。
- *  去掉原按屏幕面积分档降级逻辑——按需求「文字补全 6 项」。 */
+/** 房间文字标签：固定 4 项（房间号 / 名称 / 建筑面积 / 使用面积），房间号缺省兜底「未命名」。 */
 function buildLabelLines(room: RoomLike): Omit<LabelLine, 'y' | 'rect'>[] {
   const code = (room.code || room.number || room.name || '').trim();
   const d = (s: string) => (s.trim() !== '' ? s.trim() : '—');
   return [
     { text: code !== '' ? code : '未命名房间', size: 13, weight: 700, color: '#1f2937', badge: false },
     { text: `名称:${d(room.name)}`, size: 9, weight: 400, color: '#374151', badge: false },
-    { text: `部门:${d(room.dept)}`, size: 9, weight: 400, color: '#6b7280', badge: false },
-    { text: `用途:${d(room.usePurpose)}`, size: 9, weight: 400, color: '#6b7280', badge: false },
-    { text: `使用:${room.useArea > 0 ? room.useArea.toFixed(1) : '—'}㎡`, size: 9, weight: 600, color: '#111827', badge: true },
-    { text: `建筑:${room.buildArea > 0 ? room.buildArea.toFixed(1) : '—'}㎡`, size: 9, weight: 600, color: '#111827', badge: true },
+    { text: `建筑面积:${room.buildArea > 0 ? room.buildArea.toFixed(1) : '—'}㎡`, size: 9, weight: 600, color: '#111827', badge: true },
+    { text: `使用面积:${room.useArea > 0 ? room.useArea.toFixed(1) : '—'}㎡`, size: 9, weight: 600, color: '#111827', badge: true },
   ];
 }
 
@@ -728,18 +724,22 @@ const roomFills = computed<RoomFill[]>(() =>
     const points = base.map((p) => `${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(' ');
     const color = colorFor(room);
     const stroke = darken(color, 0.45);
-    const c = toScreen(room.centroid);
+    // 标签锚点：直接用「房间多边形自身在屏幕上的几何质心」，而非依赖 room.centroid 字段。
+    // 原因：真实 App 用的是 store 持久化的 Room 数据，若持久化时未写入 centroid，
+    // toScreen(undefined) 会返回 [NaN,NaN]，文字被画到画布外不可见（而多边形用的是 polyOf，照常显示）→ 表现为「格子在、里面没字」。
+    // 由多边形顶点反推质心永远成立，杜绝该问题。
+    const c: [number, number] =
+      base.length > 0
+        ? [
+            base.reduce((s, p) => s + p[0], 0) / base.length,
+            base.reduce((s, p) => s + p[1], 0) / base.length,
+          ]
+        : toScreen(room.centroid ?? [0, 0]);
     const baseLines = buildLabelLines(room);
     const startY = c[1] - ((baseLines.length - 1) * LINE_GAP) / 2;
     const lines: LabelLine[] = baseLines.map((ln, i) => {
       const y = startY + i * LINE_GAP;
-      let rect: LabelLine['rect'] = null;
-      if (ln.badge) {
-        const w = Math.max(ln.text.length * ln.size * 0.62 + 8, 22);
-        const h = ln.size + 6;
-        rect = { x: c[0] - w / 2, y: y - h / 2, w, h };
-      }
-      return { ...ln, y, rect };
+      return { ...ln, y };
     });
     return {
       id: room.id,
@@ -1076,17 +1076,6 @@ function saveEdit(): void {
             <g class="fpv-labels" pointer-events="none">
               <template v-for="rf in roomFills" :key="'L' + rf.id">
                 <g v-for="(ln, i) in rf.lines" :key="i">
-                  <rect
-                    v-if="ln.rect"
-                    :x="ln.rect.x"
-                    :y="ln.rect.y"
-                    :width="ln.rect.w"
-                    :height="ln.rect.h"
-                    rx="6"
-                    fill="#ffffff"
-                    :stroke="rf.stroke"
-                    stroke-width="0.4"
-                  />
                   <text
                     :x="rf.labelX"
                     :y="ln.y"
@@ -1313,17 +1302,6 @@ function saveEdit(): void {
         <g class="fpv-labels" pointer-events="none">
           <template v-for="rf in roomFills" :key="'L' + rf.id">
             <g v-for="(ln, i) in rf.lines" :key="i">
-              <rect
-                v-if="ln.rect"
-                :x="ln.rect.x"
-                :y="ln.rect.y"
-                :width="ln.rect.w"
-                :height="ln.rect.h"
-                rx="6"
-                fill="#ffffff"
-                :stroke="rf.stroke"
-                stroke-width="0.4"
-              />
               <text
                 :x="rf.labelX"
                 :y="ln.y"

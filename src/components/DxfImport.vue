@@ -269,6 +269,11 @@ watch(
       prefillFloor.value = 1;
       attributionConfirmed.value = false;
       manualPick.value = false;
+      // 若从「某栋楼」入口打开（已带 defaultBuilding），且它已存在于楼栋表，
+      // 则预选为归属楼栋，避免第 6 步还要手动找。
+      if (props.defaultBuilding && store.buildingNames.includes(props.defaultBuilding)) {
+        prefillBuilding.value = props.defaultBuilding;
+      }
     }
   },
 );
@@ -1209,19 +1214,25 @@ onBeforeUnmount(() => {
         </div>
 
         <!-- 楼栋选择（核心控件，必须可筛选搜索） -->
-        <div v-show="attributionStatus !== 'none' || manualPick" class="dxf-row dxf-row--col">
-          <label class="dxf-label">楼栋（可搜索）</label>
-          <el-select
-            v-model="effectiveBuildingName"
-            filterable
-            placeholder="选择 / 搜索楼栋名称"
-            class="dxf-control"
-          >
-            <el-option v-for="b in store.buildingNames" :key="b" :label="b" :value="b" />
-          </el-select>
-          <label class="dxf-label" style="margin-top: 10px">楼层</label>
-          <el-input-number v-model="effectiveFloorNo" :min="1" :max="99" controls-position="right" class="dxf-control" />
-          <span class="dxf-unit">F</span>
+        <div v-show="attributionStatus !== 'none' || manualPick" class="dxf-attr">
+          <div class="dxf-row dxf-row--wrap">
+            <label class="dxf-label">楼栋（可搜索）</label>
+            <el-select
+              v-model="effectiveBuildingName"
+              filterable
+              placeholder="选择 / 搜索楼栋名称"
+              class="dxf-control"
+            >
+              <el-option v-for="b in store.buildingNames" :key="b" :label="b" :value="b" />
+            </el-select>
+          </div>
+          <div class="dxf-row">
+            <label class="dxf-label">楼层</label>
+            <div class="dxf-floor-input">
+              <el-input-number v-model="effectiveFloorNo" :min="1" :max="99" controls-position="right" class="dxf-control" />
+              <span class="dxf-unit">F</span>
+            </div>
+          </div>
         </div>
 
         <!-- 批量沿用提示 -->
@@ -1332,10 +1343,13 @@ onBeforeUnmount(() => {
 .dxf-row { display: flex; align-items: center; gap: 12px; }
 .dxf-row--col { flex-direction: column; align-items: stretch; gap: 8px; }
 .dxf-row--wrap { flex-wrap: wrap; gap: 10px; }
-.dxf-label { width: 56px; flex: 0 0 auto; color: #4b5563; font-size: 14px; }
+.dxf-attr { display: flex; flex-direction: column; gap: 12px; }
+.dxf-label { width: auto; flex: 0 0 auto; white-space: nowrap; color: #4b5563; font-size: 14px; }
 .dxf-control { flex: 1 1 auto; }
 .dxf-enc { width: 200px; }
-.dxf-unit { color: #6b7280; }
+.dxf-unit { color: #6b7280; white-space: nowrap; }
+/* 楼层：数字输入框与「F」同一行紧贴 */
+.dxf-floor-input { display: flex; align-items: center; gap: 6px; flex: 1 1 auto; }
 .dxf-tip { font-size: 12px; color: #9ca3af; }
 .dxf-uploader { width: 100%; }
 .dxf-drop {

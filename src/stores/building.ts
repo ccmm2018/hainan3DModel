@@ -142,6 +142,25 @@ export const useBuildingStore = defineStore('building', () => {
     buildingMap.value = map;
   }
 
+  /**
+   * 把 GLB 模型里实际存在的「建筑节点名」（如 0–25）登记进楼栋表。
+   * 仅补充缺失项、保留已有属性（不覆盖真实 GeoJSON / API 数据）。
+   * 解决：替换 GLB 后，新模型的建筑节点未进入 buildingMap，
+   * 导致 DXF 第 6 步「确认归属」候选列表里找不到当前选中的建筑。
+   */
+  function registerBuildings(names: string[]): void {
+    const map = buildingMap.value;
+    let changed = false;
+    for (const n of names) {
+      if (!n) continue;
+      if (!map[n]) {
+        map[n] = { name: n } as BuildingDataMap[string];
+        changed = true;
+      }
+    }
+    if (changed) buildingMap.value = { ...map };
+  }
+
   function importFloor(payload: ImportFloorPayload): string {
     const { buildingName, floorNo, fileName, parsed } = payload;
     const version = payload.version ?? 1;
@@ -362,6 +381,7 @@ export const useBuildingStore = defineStore('building', () => {
     roomsOfFloor,
     buildingFingerprint,
     setBuildingMap,
+    registerBuildings,
     importFloor,
     removeFloor,
     /** 计算同楼同层下一个可用版本号（同楼同层已存在时用于「另存为新版本」） */

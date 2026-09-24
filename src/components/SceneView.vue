@@ -1273,6 +1273,9 @@ onMounted(async () => {
       onModelReady: () => {
         status.value = 'ready';
         objectList.value = scene?.listObjects() ?? [];
+        // 把 GLB 里真实存在的建筑节点名（0–25）登记进楼栋表，
+        // 否则 DXF 第 6 步「确认归属」候选列表里找不到当前选中的建筑。
+        buildingStore.registerBuildings(objectList.value.map((o) => o.name));
       },
       onModelError: () => {
         status.value = 'error';

@@ -535,6 +535,36 @@ function openImportFromEmpty() {
   dxfImportVisible.value = true;
 }
 
+/**
+ * 把模型/搜索返回的「节点名」反查成 buildingData 里的真实楼栋名。
+ * 替换后的真实 GLB 节点命名（RoofShed_Rig / 63 / Parapet_Obj5…）并不等于楼栋名，
+ * 直接拿它去 floorsOf / 属性面板查找必然落空，这就是「上传 DXF 后查不到楼层图」的根因。
+ * 反查优先级：① 已是 buildingData 键 → 直接用；② 命中手动别名表；③ 有经纬度 → 取已导入楼栋
+ * 指纹中心（centerGcj02）最近者（导入 DXF 后才有指纹，故仅对已导入楼栋生效）。
+ */
+function resolveBuildingName(raw: string, lngLat?: [number, number]): string {
+  if (!raw) return raw;
+  const names = buildingStore.buildingNames;
+  if (names.includes(raw)) return raw;
+  const alias = DEFAULT_SCENE_CONFIG.buildingNameAliases[raw];
+  if (alias && names.includes(alias)) return alias;
+  if (lngLat) {
+    let best = raw;
+    let bestD = Infinity;
+    for (const bn of names) {
+      const c = buildingStore.buildingFingerprint(bn).centerGcj02;
+      if (!c) continue;
+      const d = Math.hypot(lngLat[0] - c[0], lngLat[1] - c[1]); // 度，仅做相对比较
+      if (d < bestD) {
+        bestD = d;
+        best = bn;
+      }
+    }
+    if (bestD < 0.015) return best; // 约 1.5km 内视为同一楼栋
+  }
+  return raw;
+}
+
 // 分配模式状态
 const selectedRooms = ref<Room[]>([]);
 const allocating = ref(false);
@@ -1153,6 +1183,7 @@ function selectByName(name: string) {
     screenY: 0,
     isRoom: false,
   };
+  result.name = resolveBuildingName(result.name, result.lngLat);
   selected.value = result;
   detailOpen.value = false;
   imageError.value = false;
@@ -1281,6 +1312,7 @@ onMounted(async () => {
         }
         // 场景模式：点击建筑 → 属性面板（浮层锚定到点击的节点位置）
         if (result && !result.isRoom) {
+          result.name = resolveBuildingName(result.name, result.lngLat);
           selected.value = result;
           detailOpen.value = false;
           imageError.value = false;

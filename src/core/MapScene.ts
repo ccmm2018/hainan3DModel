@@ -119,6 +119,14 @@ export class MapScene {
   /** 截图捕获请求 */
   private captureResolve: ((dataUrl: string) => void) | null = null;
 
+  /**
+   * 渲染节流：仅当「视角签名发生变化」或「场景被标记为脏」时才真正执行 renderer.render。
+   * 低配机器上 AMap 自定义图层会高频调用 render()，若每帧都重绘（即便视角未变）会持续占满 CPU。
+   * 视角变化已由 syncViewChange 通过签名比对，这里复用同一签名决定是否跳过整帧重绘。
+   */
+  private lastRenderSig = '';
+  private sceneDirty = true;
+
   private disposed = false;
 
   // 量算（测距 / 测面）状态
@@ -213,18 +221,25 @@ export class MapScene {
     const width = this.container.clientWidth || 1;
     const height = this.container.clientHeight || 1;
 
+    // 低配设备探测：CPU 核心数少 / 设备内存小 → 关闭抗锯齿、像素比封顶为 1，
+    // 否则弱机平移/缩放地图时每帧渲染开销过大，CPU 瞬间 100%。
+    const lowEnd =
+      (navigator.hardwareConcurrency || 4) <= 4 ||
+      (((navigator as unknown as { deviceMemory?: number }).deviceMemory ?? 8) <= 4);
     try {
       this.renderer = new THREE.WebGLRenderer({
         context: gl,
-        antialias: true,
+        antialias: !lowEnd,
         alpha: true,
+        powerPreference: lowEnd ? 'low-power' : 'high-performance',
       });
     } catch (err) {
       // WebGL 上下文不兼容（如 three r163+ 不再支持 WebGL 1）时，把错误抛给上层
       this.callbacks.onMapError?.(err);
       return;
     }
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    // 像素比封顶：retina 屏 dpr=2/3 时片元量按平方放大，低配机器是卡顿主因；封顶到 2（低配 1）
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, lowEnd ? 1 : 2));
     this.renderer.setSize(width, height, false);
     this.renderer.autoClear = false;
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -267,6 +282,29 @@ export class MapScene {
           if ((child as THREE.Mesh).isMesh) {
             child.castShadow = true;
             child.receiveShadow = true;
+
+            // ⚠️ AMap GLCustomLayer 提供的是 WebGL1 上下文，而 three r162 中
+            // MeshPhysicalMaterial 的 transmission（透射/玻璃）着色器会生成
+            // textureLod / textureSize / isinf 等 GLSL3 专属代码，在 WebGL1 下
+            // 编译失败（Shader Error 1282），导致窗户等材质损坏并拖累整体渲染。
+            // 这里把带 transmission 的材质降级为普通半透明材质：保留玻璃观感，
+            // 但不再走 WebGL2-only 的透射路径。
+            const mats = Array.isArray((child as THREE.Mesh).material)
+              ? (child as THREE.Mesh).material as THREE.Material[]
+              : [(child as THREE.Mesh).material as THREE.Material];
+            for (const mat of mats) {
+              const pm = mat as THREE.MeshPhysicalMaterial;
+              if (pm && (pm as any).isMeshPhysicalMaterial && (pm.transmission ?? 0) > 0) {
+                pm.transmission = 0;
+                pm.thickness = 0;
+                pm.transparent = true;
+                pm.opacity = 0.45;
+                pm.roughness = Math.max(pm.roughness ?? 0.1, 0.12);
+                pm.metalness = pm.metalness ?? 0;
+                pm.depthWrite = false;
+                pm.needsUpdate = true;
+              }
+            }
           }
         });
 
@@ -274,6 +312,7 @@ export class MapScene {
         this.scene!.add(this.modelRoot);
         this.resolveMeshBuildingNames();
 
+        this.markDirty();
         this.callbacks.onModelReady?.();
       },
       (event: ProgressEvent) => {
@@ -290,11 +329,30 @@ export class MapScene {
   private placeModelAtAnchor(): void {
     if (!this.modelRoot) return;
 
-    // 可选：以模型包围盒中心为原点重新居中
+    // 可选：以模型包围盒中心为原点重新居中。
+    // 关键：必须平移「几何本身」(geometry.translate)，不能只改 modelRoot.position——
+    // 因为后面 position 会被 anchorWorld 整体覆盖，若只改 position 做居中会被抹掉，
+    // 导致几何中心并不在原点：一旦模型在建模软件里不是以原点为中心（CAD/BIM 常以真实坐标为原点），
+    // 旋转与定位都会围绕偏离建筑中心的「原点」进行，模型被甩到锚点远处、半进半出视野。
     if (this.config.recenterModel) {
       const box = new THREE.Box3().setFromObject(this.modelRoot);
-      const center = box.getCenter(new THREE.Vector3());
-      this.modelRoot.position.sub(center);
+      if (!box.isEmpty()) {
+        // 只做「水平居中 + 底面落地」：绝不能把整个包围盒中心搬原点，否则建筑底面被压到地面以下 → 模型「钻到地图底部」。
+        // 局部坐标下 Y 为高度方向（modelRotation[90°,0,0] 会把它转到世界 Z 向上），
+        // 故仅平移 X/Z 使水平中心对齐原点，并把底面(minY)抬到 y=0，旋转后即立于地面 z=0。
+        const cx = (box.min.x + box.max.x) / 2;
+        const cz = (box.min.z + box.max.z) / 2;
+        const minY = box.min.y;
+        this.modelRoot.traverse((o) => {
+          const mesh = o as THREE.Mesh;
+          if (mesh.isMesh && mesh.geometry) {
+            mesh.geometry.translate(-cx, -minY, -cz);
+          }
+        });
+        // 几何已水平居中且底面落地，重置 position 以便后续统一在锚点定位
+        this.modelRoot.position.set(0, 0, 0);
+        this.modelRoot.updateMatrixWorld(true);
+      }
     }
 
     // 坐标轴旋转（Y-up → Z-up 等）
@@ -466,6 +524,7 @@ export class MapScene {
       }
     });
     this.highlightedObject = obj;
+    this.markDirty();
   }
 
   /** 清除高亮 */
@@ -479,6 +538,7 @@ export class MapScene {
       }
     });
     this.highlightedObject = null;
+    this.markDirty();
   }
 
   // -------------------------------------------------------------------------
@@ -555,6 +615,7 @@ export class MapScene {
     this.scene.add(this.roomGroup);
     this.currentRoomFloor = minFloor;
     this.applyRoomFloorVisibility();
+    this.markDirty();
   }
 
   /** 切换到指定楼层（只显示该楼层的房间格子） */
@@ -586,6 +647,7 @@ export class MapScene {
         mat.emissiveIntensity = 0;
       }
     });
+    this.markDirty();
   }
 
   /** 分配模式：批量设置选中房间（高亮为青色），其余取消 */
@@ -610,6 +672,7 @@ export class MapScene {
     const mat = mesh.material as THREE.MeshStandardMaterial;
     mat.color.set(ROOM_STATUS_CONFIG[status]?.color ?? '#888888');
     if (mesh.userData.room) (mesh.userData.room as Room).status = status;
+    this.markDirty();
   }
 
   /** 清除楼盘表可视化 */
@@ -630,6 +693,7 @@ export class MapScene {
     this.roomCellMeshes.clear();
     this.roomFloors = [];
     this.hoveredRoomId = null;
+    this.markDirty();
   }
 
   /** 是否处于楼盘表模式 */
@@ -1211,8 +1275,32 @@ export class MapScene {
   // -------------------------------------------------------------------------
   // 渲染循环
   // -------------------------------------------------------------------------
+  /** 标记场景需要重绘（场景内容变化时调用，避免被渲染节流跳过） */
+  private markDirty(): void {
+    this.sceneDirty = true;
+  }
+
   private render(): void {
     if (!this.renderer || !this.scene || !this.camera || !this.customCoords) return;
+
+    // 视角签名：与 syncViewChange 同源，若未变化且场景未脏，整帧跳过，避免无谓重绘。
+    // 注意：AMap 调用本函数时上下文已切到它的 GL 状态，跳过时不需要 resetState。
+    let sig = '';
+    try {
+      const c = this.map?.getCenter?.();
+      sig = [
+        c?.lng,
+        c?.lat,
+        this.map?.getZoom?.(),
+        this.map?.getRotation?.(),
+        this.map?.getPitch?.(),
+      ].join(',');
+    } catch {
+      sig = '';
+    }
+    if (!this.sceneDirty && sig === this.lastRenderSig && !this.captureResolve) return;
+    this.lastRenderSig = sig;
+    this.sceneDirty = false;
 
     this.renderer.resetState();
 

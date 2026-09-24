@@ -85,6 +85,20 @@ export interface SceneConfig {
    * 请在你已与高德签订商用授权、明确允许去除品牌标识后再置为 true。
    */
   hideAMapAttribution: boolean;
+  /**
+   * GLB 节点名 → 真实楼栋名 的别名映射表。
+   *
+   * 背景：点击 3D 模型 / 搜索得到的名字是「GLB 文件里的节点名」（如 RoofShed_Rig / 63 /
+   * Parapet_Obj5），而导入 DXF、查看楼层图用的是 buildingData 里的真实楼栋名（如「教学楼」）。
+   * 当两者不一致时，点模型弹出的属性面板与「查看图纸」会因名字对不上而查不到数据。
+   *
+   * 本表用于手动对齐：key = GLB 节点名（取 resolveMeshBuildingNames 算出的那个），
+   * value = buildingData 里的楼栋名。命中别名的优先级高于「按经纬度就近匹配」。
+   * 不知道对应关系是正常的——可留空，系统会退化为「按点击点经纬度就近匹配已导入楼栋指纹」。
+   *
+   * 例：{ '63': '教学楼', 'RoofShed_Rig': '食堂' }
+   */
+  buildingNameAliases: Record<string, string>;
 }
 
 /**
@@ -103,6 +117,13 @@ export const DEFAULT_SCENE_CONFIG: SceneConfig = {
   roomDataUrl: '/data/rooms.geojson',
   anchor: [110.280328, 19.75491],
   anchorOffset: [0, 0],
+  // 注意：当前 hnjcxy.glb 实测（应用节点变换后的世界坐标包围盒）为
+  //   宽 549 × 高 21 × 深 560（单位，中心基本就在原点，已是 Y-up 站立姿态）。
+  // 模型高度仅 21 单位 → 极可能是「米」为单位（一栋约 21 米高的建筑），故 modelScale 取 1。
+  // ⚠️ 之前误把高度当成 1003（脏数据）而设成 0.01，结果被压成 0.21 米薄片导致「看不见模型」。
+  // 若替换后模型偏大/偏小，只需按真实尺寸调整本值：
+  //   最终高度(米) = 21 × modelScale；最终底边宽度(米) = 549 × modelScale。
+  //   例：若真实楼宽约 60 米 → modelScale ≈ 60/549 ≈ 0.11；若真实楼高约 40 米 → modelScale ≈ 40/21 ≈ 1.9。
   modelScale: 1,
   modelElevation: 0,
   recenterModel: true,
@@ -118,6 +139,7 @@ export const DEFAULT_SCENE_CONFIG: SceneConfig = {
   defaultFloorCount: 4,
   allocationApiUrl: '',
   hideAMapAttribution: false,
+  buildingNameAliases: {},
   mapFeatures: ['bg', 'road', 'building'],
   showLabel: false,
 };

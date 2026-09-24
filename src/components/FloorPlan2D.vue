@@ -801,6 +801,56 @@ const popMode = ref<'edit' | 'maint' | null>(null);
 
 const selectedRoom = computed(() => displayedRooms.value.find((r) => r.id === selectedId.value) ?? null);
 
+/** 选中房间缩略图：用房间自身轮廓生成一张「对应的图片」（无外部图片数据时也能稳定展示） */
+const roomThumb = computed<{ viewBox: string; points: string; fill: string } | null>(() => {
+  const r = selectedRoom.value;
+  if (!r) return null;
+  const poly = polyOf(r);
+  if (poly.length < 3) return null;
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const [x, y] of poly) {
+    if (x < minX) minX = x;
+    if (y < minY) minY = y;
+    if (x > maxX) maxX = x;
+    if (y > maxY) maxY = y;
+  }
+  const w = maxX - minX || 1;
+  const h = maxY - minY || 1;
+  const W = 220;
+  const H = 130;
+  const pad = 10;
+  const scale = Math.min((W - pad * 2) / w, (H - pad * 2) / h);
+  const ox = pad + (W - pad * 2 - w * scale) / 2;
+  const oy = pad + (H - pad * 2 - h * scale) / 2;
+  const points = poly
+    .map(([x, y]) => {
+      const px = ox + (x - minX) * scale;
+      const py = oy + (maxY - y) * scale; // 翻转 Y（SVG 向下为正）
+      return `${px.toFixed(1)},${py.toFixed(1)}`;
+    })
+    .join(' ');
+  return { viewBox: `0 0 ${W} ${H}`, points, fill: colorFor(r) };
+});
+
+/** 弹窗数据：一行两个属性，按 [label, value] 成对排列 */
+const roomInfoPairs = computed<{ label: string; value: string }[]>(() => {
+  const r = selectedRoom.value;
+  if (!r) return [];
+  return [
+    { label: '房间号', value: r.code || '—' },
+    { label: '名称', value: r.name || '—' },
+    { label: '部门', value: r.dept || '—' },
+    { label: '用途', value: r.usePurpose || '—' },
+    { label: '使用面积', value: `${r.useArea > 0 ? r.useArea.toFixed(1) : '—'} ㎡` },
+    { label: '建筑面积', value: `${r.buildArea > 0 ? r.buildArea.toFixed(1) : '—'} ㎡` },
+    { label: '业务状态', value: USE_LABELS[r.useStatus] ?? '—' },
+    { label: '审图状态', value: INSPECT_LABELS[r.inspectStatus] ?? '—' },
+  ];
+});
+
 /** 选中房间变化时，同步加载其维护信息到表单 */
 watch(selectedRoom, (r) => loadMaint(r), { immediate: true });
 
@@ -1062,14 +1112,17 @@ function saveEdit(): void {
               <span class="fpv-pop__title">{{ selectedRoom.code || selectedRoom.name || '未命名房间' }}</span>
               <button class="fpv-pop__x" type="button" @click="selectedId = null">×</button>
             </div>
+            <div v-if="roomThumb" class="fpv-pop__img">
+              <svg :viewBox="roomThumb.viewBox" preserveAspectRatio="xMidYMid meet">
+                <polygon :points="roomThumb.points" :fill="roomThumb.fill" :stroke="darken(roomThumb.fill, 0.45)" stroke-width="2" />
+              </svg>
+              <span class="fpv-pop__img-tag">房间缩略图</span>
+            </div>
+            <div v-else class="fpv-pop__img fpv-pop__img--empty">暂无图形</div>
             <div class="fpv-pop__info">
-              <div><span>名称</span><b>{{ selectedRoom.name || '—' }}</b></div>
-              <div><span>部门</span><b>{{ selectedRoom.dept || '—' }}</b></div>
-              <div><span>用途</span><b>{{ selectedRoom.usePurpose || '—' }}</b></div>
-              <div><span>使用面积</span><b>{{ selectedRoom.useArea.toFixed(1) }} ㎡</b></div>
-              <div><span>建筑面积</span><b>{{ selectedRoom.buildArea.toFixed(1) }} ㎡</b></div>
-              <div><span>业务状态</span><b>{{ USE_LABELS[selectedRoom.useStatus] }}</b></div>
-              <div><span>审图状态</span><b>{{ INSPECT_LABELS[selectedRoom.inspectStatus] }}</b></div>
+              <div v-for="p in roomInfoPairs" :key="p.label" class="fpv-pop__cell">
+                <span>{{ p.label }}</span><b>{{ p.value }}</b>
+              </div>
             </div>
             <div class="fpv-pop__acts">
               <el-button size="small" :type="popMode === 'edit' ? 'primary' : 'default'" @click="popMode = 'edit'">修改信息</el-button>
@@ -1423,10 +1476,14 @@ function saveEdit(): void {
 .fpv-pop__title { font-size: 14px; font-weight: 700; color: #111827; }
 .fpv-pop__x { border: 0; background: transparent; font-size: 18px; line-height: 1; color: #9ca3af; cursor: pointer; padding: 0 2px; }
 .fpv-pop__x:hover { color: #374151; }
-.fpv-pop__info { display: flex; flex-direction: column; gap: 3px; margin-bottom: 8px; }
-.fpv-pop__info div { display: flex; justify-content: space-between; gap: 10px; }
-.fpv-pop__info span { color: #6b7280; }
-.fpv-pop__info b { font-weight: 600; color: #111827; }
+.fpv-pop__img { position: relative; width: 100%; height: 132px; margin-bottom: 10px; background: #f8fafc; border: 1px solid #eef0f3; border-radius: 8px; overflow: hidden; }
+.fpv-pop__img svg { width: 100%; height: 100%; display: block; }
+.fpv-pop__img-tag { position: absolute; left: 6px; bottom: 4px; font-size: 10px; color: #9ca3af; background: rgba(255,255,255,.75); padding: 0 4px; border-radius: 4px; }
+.fpv-pop__img--empty { display: flex; align-items: center; justify-content: center; color: #9ca3af; font-size: 12px; }
+.fpv-pop__info { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 12px; margin-bottom: 8px; }
+.fpv-pop__cell { display: flex; flex-direction: column; gap: 1px; padding: 4px 6px; background: #f8fafc; border-radius: 6px; }
+.fpv-pop__cell span { color: #6b7280; font-size: 11px; }
+.fpv-pop__cell b { font-weight: 600; color: #111827; font-size: 13px; }
 .fpv-pop__acts { display: flex; gap: 8px; margin-bottom: 4px; }
 .fpv-pop__form { border-top: 1px dashed #eef0f3; padding-top: 8px; margin-top: 4px; }
 .fpv-tools__row--embed { margin-left: 10px; min-width: 160px; }

@@ -15,6 +15,15 @@ export interface SceneConfig {
   zoom: number;
   /** 初始倾斜角（3D 视角） */
   pitch: number;
+  /**
+   * 俯仰角上限（度）。旋转地图时只允许「水平 / 俯视旋转」，不允许把地图翻过来。
+   * 拖动旋转若导致俯仰超过本值，会自动拉回本值。默认 = pitch（保持初始俯视角不变）。
+   */
+  maxPitch?: number;
+  /**
+   * 俯仰角下限（度）。默认 0（正上方俯视，最平）。保持 0 可避免地图被「掀起来」。
+   */
+  minPitch?: number;
   /** 高德地图样式（内置：whitesmoke / light / normal / grey / fresh 等；
    *  也可填高德控制台「自定义地图」发布的样式 ID：amap://styles/<styleId>，
    *  以彻底统一底图色系为项目专属配色）。
@@ -146,6 +155,10 @@ export const DEFAULT_SCENE_CONFIG: SceneConfig = {
   center: [110.280328, 19.75491],
   zoom: 16.5,
   pitch: 55,
+  // 旋转限制：地图可水平旋转（绕竖直轴），但俯仰角被锁在 [0, 55] 之间，
+  // 不允许把地图「翻过来」或掀得过高。下限 0 = 正上方俯视。
+  maxPitch: 55,
+  minPitch: 0,
   // 数字孪生底色：浅灰白底图，周边建筑以浅灰「白模」呈现，路网/绿地/水系清晰可见
   mapStyle: 'amap://styles/whitesmoke',
   modelUrl: '/models/hnjcxy.glb',

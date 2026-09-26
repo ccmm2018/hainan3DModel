@@ -174,6 +174,14 @@ export class MapScene {
 
   /** 模型校准（微调对齐）增量参数，叠加在 config 基础定位之上 */
   private calibration: ModelCalibration = { ...DEFAULT_CALIBRATION };
+  /**
+   * 俯仰角锁定（防止地图被「翻过来」）。
+   * 地图旋转（绕竖直轴的 bearing）始终允许，但俯仰角（pitch）被钳制在
+   * [minPitch, maxPitch] 区间内——拖动旋转时只做水平 / 俯视旋转，不会掀翻地图。
+   * suppressPitchEvent 用于避免 setPitch 拉回俯仰时触发递归相机事件。
+   */
+  private suppressPitchEvent = false;
+
   /** 校准持久化的 localStorage key（按模型文件区分，避免不同模型互相串扰） */
   private get calibrationKey(): string {
     return `hnjcxy-calib::${this.config.modelUrl}`;
@@ -252,6 +260,8 @@ export class MapScene {
     this.map.on('mousemove', (e: any) => this.handleMouseMove(e));
     this.map.on('click', (e: any) => this.handleClick(e));
     this.map.on('dblclick', (e: any) => this.handleDoubleClick(e));
+    // 俯仰角锁定：拖动旋转地图时不允许把地图「翻过来」
+    this.map.on('camerachange', this.clampPitch);
   }
 
   private initThree(gl: WebGLRenderingContext): void {
@@ -893,6 +903,24 @@ export class MapScene {
   }
 
   /** 双击建筑进入室内视角（保存当前视角、拉近、半透明化建筑、预留楼层组） */
+  private clampPitch = (): void => {
+    if (this.suppressPitchEvent || !this.map) return;
+    const limit = this.config.maxPitch ?? this.config.pitch;
+    const min = this.config.minPitch ?? 0;
+    const p = this.map.getPitch();
+    if (p > limit + 0.05 || p < min - 0.05) {
+      this.suppressPitchEvent = true;
+      this.map.setPitch(Math.min(Math.max(p, min), limit));
+      Promise.resolve().then(() => { this.suppressPitchEvent = false; });
+    }
+  };
+
+  private setPitchSafe = (p: number): void => {
+    this.suppressPitchEvent = true;
+    this.map?.setPitch(p);
+    Promise.resolve().then(() => { this.suppressPitchEvent = false; });
+  };
+
   enterIndoorView(building: THREE.Object3D): void {
     if (!this.map) return;
     this.savedCamera = {
@@ -907,7 +935,7 @@ export class MapScene {
     const [lng, lat] = this.worldToWgs84(wp);
     const [glng, glat] = wgs84ToGcj02(lng, lat);
     this.map.setZoomAndCenter(this.config.indoorZoom, [glng, glat], false, 500);
-    this.map.setPitch(this.config.indoorPitch);
+    this.setPitchSafe(this.config.indoorPitch);
 
     this.reserveFloorGroups(building, this.config.defaultFloorCount);
     this.setBuildingTranslucent(building, true);
@@ -923,7 +951,7 @@ export class MapScene {
     if (this.savedCamera && this.map) {
       const [glng, glat] = this.savedCamera.center;
       this.map.setZoomAndCenter(this.savedCamera.zoom, [glng, glat], false, 500);
-      this.map.setPitch(this.savedCamera.pitch);
+      this.setPitchSafe(this.savedCamera.pitch);
       this.map.setRotation(this.savedCamera.rotation);
       this.savedCamera = null;
     }
@@ -954,10 +982,10 @@ export class MapScene {
       try { this.map.setViewMode(mode === '2d' ? '2D' : '3D'); } catch { /* ignore */ }
     }
     if (mode === '2d') {
-      this.map.setPitch(0);
+      this.setPitchSafe(0);
       this.map.setRotation(0);
     } else {
-      this.map.setPitch(mode === '2.5d' ? 35 : this.config.pitch);
+      this.setPitchSafe(mode === '2.5d' ? 35 : this.config.pitch);
     }
     this.map.setZoomAndCenter(zoom, center, true);
   }

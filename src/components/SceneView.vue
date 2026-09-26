@@ -50,6 +50,52 @@
         <button class="toolbar__btn toolbar__btn--ghost" @click="stopMeasure">清除</button>
       </div>
       <button class="toolbar__btn" @click="exportOpen = true">打印 / 导出</button>
+      <button class="toolbar__btn" :class="{ active: calibrateMode }" @click="toggleCalibrate">校准</button>
+    </div>
+
+    <!-- 校准面板（微调 GLB 对齐） -->
+    <div v-if="calibrateMode" class="calib-panel">
+      <div class="calib-panel__head">
+        <strong>模型校准（微调对齐）</strong>
+        <button class="calib-panel__close" aria-label="关闭" @click="calibrateMode = false">×</button>
+      </div>
+      <div class="calib-panel__body">
+        <div class="calib-row">
+          <label>东向偏移</label>
+          <input type="range" min="-50" max="50" step="0.5" v-model.number="cal.offsetX" @input="applyCal" />
+          <span class="calib-val">{{ cal.offsetX.toFixed(1) }} m</span>
+        </div>
+        <div class="calib-row">
+          <label>北向偏移</label>
+          <input type="range" min="-50" max="50" step="0.5" v-model.number="cal.offsetY" @input="applyCal" />
+          <span class="calib-val">{{ cal.offsetY.toFixed(1) }} m</span>
+        </div>
+        <div class="calib-row">
+          <label>旋转(朝向)</label>
+          <input type="range" min="-180" max="180" step="0.5" v-model.number="cal.rotationZ" @input="applyCal" />
+          <span class="calib-val">{{ cal.rotationZ.toFixed(1) }}°</span>
+        </div>
+        <div class="calib-row">
+          <label>海拔高度</label>
+          <input type="range" min="-20" max="20" step="0.5" v-model.number="cal.elevation" @input="applyCal" />
+          <span class="calib-val">{{ cal.elevation.toFixed(1) }} m</span>
+        </div>
+        <div class="calib-row">
+          <label>缩&nbsp;&nbsp;&nbsp;&nbsp;放</label>
+          <input type="range" min="0.5" max="2" step="0.01" v-model.number="cal.scale" @input="applyCal" />
+          <span class="calib-val">{{ cal.scale.toFixed(2) }}×</span>
+        </div>
+        <div class="calib-panel__actions">
+          <button class="toolbar__btn" @click="saveCal">保存</button>
+          <button class="toolbar__btn" @click="resetCal">重置</button>
+          <button class="toolbar__btn" @click="copyCalSnippet">复制配置片段</button>
+        </div>
+        <div v-if="calSnippet" class="calib-panel__snippet">
+          <pre>{{ calSnippet }}</pre>
+          <small>把以上字段粘贴进 mapConfig 的 DEFAULT_SCENE_CONFIG 即可「写死」为默认值</small>
+        </div>
+        <div class="calib-panel__tip">提示：微调时可用地图右键旋转 / 滚轮缩放观察对齐；保存后刷新仍生效。</div>
+      </div>
     </div>
 
     <!-- 量算结果面板 -->
@@ -447,10 +493,11 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch, type Ref } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch, type Ref } from 'vue';
 import * as THREE from 'three';
+import { ElMessage } from 'element-plus';
 import { loadAMap } from '../utils/loadAMap';
-import { MapScene, type PickResult, type MeasureResult } from '../core/MapScene';
+import { MapScene, type ModelCalibration, type PickResult, type MeasureResult } from '../core/MapScene';
 import { DEFAULT_SCENE_CONFIG, type SceneConfig } from '../config/mapConfig';
 import {
   SAMPLE_BUILDING_DATA,
@@ -498,6 +545,44 @@ const selectedRoom = ref<Room | null>(null);
 const isIndoorView = ref(false);
 const exportOpen = ref(false);
 const detailOpen = ref(false);
+
+// 模型校准（微调对齐）状态
+const calibrateMode = ref(false);
+const cal = reactive<ModelCalibration>({ offsetX: 0, offsetY: 0, rotationZ: 0, elevation: 0, scale: 1 });
+const calSnippet = ref('');
+
+/** 把当前校准滑块值实时应用到 3D 模型（即时预览） */
+function applyCal(): void {
+  scene?.setCalibration({ ...cal });
+}
+/** 打开/关闭校准模式；打开时从模型读取最新校准值同步到滑块 */
+function toggleCalibrate(): void {
+  calibrateMode.value = !calibrateMode.value;
+  if (calibrateMode.value && scene) Object.assign(cal, scene.getCalibration());
+}
+/** 保存校准到 localStorage（刷新后保持） */
+function saveCal(): void {
+  scene?.saveCalibration();
+  ElMessage.success('校准已保存，刷新后仍生效');
+}
+/** 重置校准为默认（与 config 一致） */
+function resetCal(): void {
+  scene?.resetCalibration();
+  if (scene) Object.assign(cal, scene.getCalibration());
+  calSnippet.value = '';
+  ElMessage.info('已重置为默认对齐');
+}
+/** 复制「写死进 mapConfig」的配置片段 */
+function copyCalSnippet(): void {
+  if (!scene) return;
+  calSnippet.value = scene.exportCalibrationSnippet();
+  if (navigator.clipboard?.writeText) {
+    void navigator.clipboard.writeText(calSnippet.value).then(
+      () => ElMessage.success('配置片段已复制到剪贴板'),
+      () => undefined,
+    );
+  }
+}
 const detailTab = ref('基础信息'); // 楼宇详情弹窗当前 Tab（默认「基础信息」）
 const imageError = ref(false);
 
@@ -1276,6 +1361,8 @@ onMounted(async () => {
         // 把 GLB 里真实存在的建筑节点名（0–25）登记进楼栋表，
         // 否则 DXF 第 6 步「确认归属」候选列表里找不到当前选中的建筑。
         buildingStore.registerBuildings(objectList.value.map((o) => o.name));
+        // 同步已保存的校准值到滑块（若此前已微调过）
+        if (scene) Object.assign(cal, scene.getCalibration());
       },
       onModelError: () => {
         status.value = 'error';
@@ -2333,4 +2420,56 @@ onBeforeUnmount(() => {
   color: #6b7890;
   font-size: 11px;
 }
+
+/* 校准面板（微调 GLB 对齐） */
+.calib-panel {
+  position: absolute;
+  z-index: 160;
+  top: 16px;
+  left: 16px;
+  width: 320px;
+  max-width: calc(100% - 32px);
+  border: 1px solid #24324a;
+  border-radius: 10px;
+  background: rgba(20, 27, 43, 0.96);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.4);
+  backdrop-filter: blur(12px);
+  overflow: hidden;
+}
+.calib-panel__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid #24324a;
+  color: #eaf2ff;
+}
+.calib-panel__head strong { flex: 1; font-size: 13px; font-weight: 600; }
+.calib-panel__close {
+  width: 22px;
+  height: 22px;
+  border: 0;
+  border-radius: 4px;
+  color: #8a97ad;
+  background: transparent;
+  font-size: 17px;
+  cursor: pointer;
+}
+.calib-panel__close:hover { color: #f87171; background: #22314a; }
+.calib-panel__body { padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+.calib-row { display: flex; align-items: center; gap: 8px; }
+.calib-row label { width: 64px; flex: 0 0 auto; color: #a7b4c8; font-size: 12px; white-space: nowrap; }
+.calib-row input[type='range'] { flex: 1 1 auto; accent-color: #38bdf8; min-width: 0; }
+.calib-val { width: 52px; flex: 0 0 auto; text-align: right; color: #38bdf8; font-size: 12px; font-variant-numeric: tabular-nums; }
+.calib-panel__actions { display: flex; gap: 8px; margin-top: 2px; }
+.calib-panel__actions .toolbar__btn { flex: 1; justify-content: center; }
+.calib-panel__snippet {
+  border: 1px solid #24324a;
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: rgba(8, 12, 22, 0.6);
+}
+.calib-panel__snippet pre { margin: 0; color: #9be8c0; font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-all; }
+.calib-panel__snippet small { display: block; margin-top: 6px; color: #6b7890; font-size: 11px; }
+.calib-panel__tip { color: #6b7890; font-size: 11px; line-height: 1.6; }
 </style>

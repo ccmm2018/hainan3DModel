@@ -49,6 +49,31 @@ export interface MeasureResult {
   points: number;
 }
 
+/**
+ * 模型校准（微调对齐）参数。在 config 的基础定位之上叠加，
+ * 全部为「增量」，默认 0/1 表示与 config 一致：
+ * - offsetX / offsetY：东向 / 北向平移（米），叠加在 config.anchorOffset 之上；
+ * - rotationZ：绕竖直轴的朝向微调（度），叠加在 config.modelRotation[2] 之上；
+ * - elevation：海拔高度微调（米），叠加在 config.modelElevation 之上；
+ * - scale：缩放倍率（1 = 不变），最终缩放 = config.modelScale × scale。
+ */
+export interface ModelCalibration {
+  offsetX: number;
+  offsetY: number;
+  rotationZ: number;
+  elevation: number;
+  scale: number;
+}
+
+/** 校准参数默认值（与 config 完全一致，未做任何微调） */
+export const DEFAULT_CALIBRATION: ModelCalibration = {
+  offsetX: 0,
+  offsetY: 0,
+  rotationZ: 0,
+  elevation: 0,
+  scale: 1,
+};
+
 export interface MapSceneCallbacks {
   onModelProgress?: (percent: number) => void;
   onModelReady?: () => void;
@@ -147,6 +172,13 @@ export class MapScene {
   /** 视为「建筑（可点击 / 可选中）」的 GLB 节点名白名单（来自 config.buildingNodeNames） */
   private buildingNames = new Set<string>();
 
+  /** 模型校准（微调对齐）增量参数，叠加在 config 基础定位之上 */
+  private calibration: ModelCalibration = { ...DEFAULT_CALIBRATION };
+  /** 校准持久化的 localStorage key（按模型文件区分，避免不同模型互相串扰） */
+  private get calibrationKey(): string {
+    return `hnjcxy-calib::${this.config.modelUrl}`;
+  }
+
   constructor(container: HTMLDivElement, config: SceneConfig, callbacks: MapSceneCallbacks = {}) {
     this.container = container;
     this.config = config;
@@ -204,6 +236,9 @@ export class MapScene {
       ay + this.config.anchorOffset[1],
       this.config.modelElevation,
     );
+
+    // 读取上次保存的校准微调（若有），模型加载时会自动叠加到锚点之上
+    this.loadSavedCalibration();
 
     this.glLayer = new AMap.GLCustomLayer({
       zIndex: 110,
@@ -407,6 +442,101 @@ export class MapScene {
     this.modelRoot.position.set(this.anchorWorld.x, this.anchorWorld.y, this.anchorWorld.z);
     this.modelRoot.scale.setScalar(this.config.modelScale);
     this.modelRoot.updateMatrixWorld(true);
+
+    // 应用（叠加）校准微调量
+    this.applyCalibration();
+  }
+
+  /**
+   * 把当前 calibration 增量叠加到模型变换上（在 config 基础定位之上）。
+   * 仅在模型已加载（modelRoot 存在）时生效；可在运行时实时调用以实现「拖滑块即时预览」。
+   */
+  private applyCalibration(): void {
+    if (!this.modelRoot) return;
+    const c = this.calibration;
+
+    // 朝向：config.modelRotation[2]（Z 分量 = 绕竖直轴，即正北对齐）叠加微调量
+    const [rx, ry, rz] = this.config.modelRotation;
+    this.modelRoot.rotation.set(
+      THREE.MathUtils.degToRad(rx),
+      THREE.MathUtils.degToRad(ry),
+      THREE.MathUtils.degToRad(rz + c.rotationZ),
+    );
+
+    // 平移：锚点世界坐标叠加 东向/北向/高程 微调（单位均为米，与 config.anchorOffset 同坐标系）
+    this.modelRoot.position.set(
+      this.anchorWorld.x + c.offsetX,
+      this.anchorWorld.y + c.offsetY,
+      this.anchorWorld.z + c.elevation,
+    );
+
+    // 缩放：config.modelScale × 校准倍率
+    this.modelRoot.scale.setScalar(this.config.modelScale * c.scale);
+    this.modelRoot.updateMatrixWorld(true);
+    this.markDirty();
+  }
+
+  /** 设置/微调校准参数（增量叠加到基准，传入部分字段即可） */
+  setCalibration(partial: Partial<ModelCalibration>): void {
+    this.calibration = { ...this.calibration, ...partial };
+    this.applyCalibration();
+  }
+
+  /** 读取当前生效的校准参数 */
+  getCalibration(): ModelCalibration {
+    return { ...this.calibration };
+  }
+
+  /** 重置校准为默认值（与 config 一致） */
+  resetCalibration(): void {
+    this.calibration = { ...DEFAULT_CALIBRATION };
+    this.applyCalibration();
+  }
+
+  /** 把当前校准量烘焙进 config 对应的「绝对定位字段」，返回可直接粘贴进 mapConfig 的片段文本 */
+  exportCalibrationSnippet(): string {
+    const c = this.calibration;
+    const [rx, ry, rz] = this.config.modelRotation;
+    const anchorOffset: [number, number] = [
+      +(this.config.anchorOffset[0] + c.offsetX).toFixed(3),
+      +(this.config.anchorOffset[1] + c.offsetY).toFixed(3),
+    ];
+    const modelRotation: [number, number, number] = [
+      rx,
+      ry,
+      +(rz + c.rotationZ).toFixed(3),
+    ];
+    const modelElevation = +(this.config.modelElevation + c.elevation).toFixed(3);
+    const modelScale = +(this.config.modelScale * c.scale).toFixed(4);
+    return [
+      `anchorOffset: [${anchorOffset[0]}, ${anchorOffset[1]}],`,
+      `modelRotation: [${modelRotation[0]}, ${modelRotation[1]}, ${modelRotation[2]}],`,
+      `modelElevation: ${modelElevation},`,
+      `modelScale: ${modelScale},`,
+    ].join('\n');
+  }
+
+  /** 从 localStorage 读取已保存的校准（按模型文件区分） */
+  loadSavedCalibration(): void {
+    try {
+      const raw = typeof localStorage !== 'undefined' ? localStorage.getItem(this.calibrationKey) : null;
+      if (!raw) return;
+      const saved = JSON.parse(raw) as Partial<ModelCalibration>;
+      this.calibration = { ...DEFAULT_CALIBRATION, ...saved };
+    } catch {
+      /* 解析失败则忽略，使用默认 */
+    }
+  }
+
+  /** 将当前校准写入 localStorage（刷新后保持） */
+  saveCalibration(): void {
+    try {
+      if (typeof localStorage !== 'undefined') {
+        localStorage.setItem(this.calibrationKey, JSON.stringify(this.calibration));
+      }
+    } catch {
+      /* 存储不可用时静默失败 */
+    }
   }
 
   // -------------------------------------------------------------------------

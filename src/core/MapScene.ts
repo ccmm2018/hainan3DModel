@@ -120,13 +120,7 @@ export class MapScene {
   /** 锚点（含微调偏移）在 customCoords 空间的坐标 */
   private anchorWorld = new THREE.Vector3();
 
-  /** 高亮材质（选中/悬停共用，颜色动态设置） */
-  private hlMaterial = new THREE.MeshStandardMaterial({
-    emissiveIntensity: 0.7,
-    transparent: true,
-    opacity: 0.9,
-    depthWrite: true,
-  });
+  /** 当前高亮对象（用于 clearHighlight 还原） */
   private highlightedObject: THREE.Object3D | null = null;
 
   /** 楼盘表：房间格子可视化 */
@@ -662,29 +656,46 @@ export class MapScene {
     return null;
   }
 
-  /** 高亮对象（整棵子树），color 为高亮色 */
+  /**
+   * 高亮对象（整棵子树）。
+   * 采用「克隆原材质 + 叠加 emissive 发光」策略（而非替换为单一纯色材质）：
+   *  - 保留原材质的 side / 透明度 / 贴图，避免开口外壳在 FrontSide 下漏出内部导致「空心」；
+   *  - 保留建筑原有外观细节，仅叠加高亮色发光，选中/悬停反馈清晰且不空洞。
+   */
   highlight(obj: THREE.Object3D | null, color: string): void {
     this.clearHighlight();
     if (!obj) return;
-    this.hlMaterial.color.set(color);
-    this.hlMaterial.emissive.set(color);
+    const tint = new THREE.Color(color);
     obj.traverse((child) => {
       const mesh = child as THREE.Mesh;
-      if (mesh.isMesh) {
-        if (!mesh.userData.__origMaterial) mesh.userData.__origMaterial = mesh.material;
-        mesh.material = this.hlMaterial;
-      }
+      if (!mesh.isMesh) return;
+      if (!mesh.userData.__origMaterial) mesh.userData.__origMaterial = mesh.material;
+      const orig = mesh.userData.__origMaterial;
+      const origArr = Array.isArray(orig) ? orig : [orig];
+      const cloned = origArr.map((m) => {
+        const c = (m as THREE.Material).clone();
+        const anyMat = c as unknown as { emissive?: THREE.Color; emissiveIntensity?: number };
+        if (anyMat.emissive) {
+          anyMat.emissive.copy(tint);
+          anyMat.emissiveIntensity = Math.max(anyMat.emissiveIntensity ?? 0, 0.6);
+        }
+        return c;
+      });
+      mesh.material = Array.isArray(orig) ? cloned : cloned[0];
     });
     this.highlightedObject = obj;
     this.markDirty();
   }
 
-  /** 清除高亮 */
+  /** 清除高亮：还原原材质，并释放克隆材质避免显存泄漏 */
   clearHighlight(): void {
     if (!this.highlightedObject) return;
     this.highlightedObject.traverse((child) => {
       const mesh = child as THREE.Mesh;
       if (mesh.isMesh && mesh.userData.__origMaterial) {
+        const cur = mesh.material;
+        if (Array.isArray(cur)) cur.forEach((m) => m.dispose());
+        else (cur as THREE.Material)?.dispose?.();
         mesh.material = mesh.userData.__origMaterial;
         mesh.userData.__origMaterial = undefined;
       }
@@ -1537,7 +1548,6 @@ export class MapScene {
       });
       this.modelRoot = null;
     }
-    this.hlMaterial.dispose();
 
     this.renderer?.dispose();
     this.renderer?.forceContextLoss?.();

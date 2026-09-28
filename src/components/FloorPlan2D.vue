@@ -4,15 +4,16 @@
  *
  * 渲染规范：
  * - 渲染架构（建筑分层）：① 楼层外轮廓地面 + ② 走廊（外轮廓减房间，由③层房间覆盖得到）
- *   + ③ 房间平铺填充（z=0 地面，无侧面）+ ④ 墙侧面（外墙线/内墙线拉伸成 wallHeight 米高，先画）
+ *   + ③ 房间盒子（z=H 顶面 + 朝向观察者的可见侧墙）+ ④ 墙侧面（外墙线/内墙线拉伸成 wallHeight 米高，先画）
  *   + ⑤ 墙顶面（后画）+ ⑥ 文字标签。墙体高度由「墙高(米)」滑杆驱动。
- * - 2.5D 投影（纯正交俯视压缩，无旋转 / 无剪切 / 无 3D 引擎依赖）：仅对深度 y 做等比压缩 k=cos(纵向俯仰角)，
+ * - 2.5D 投影（斜投影 / 正交等距类，纯仿射：对角 + 剪切，无透视除法、无 3D 引擎依赖）：对深度 y 同时做竖向压缩 SY=cos(纵向俯仰角) 与「极轻」水平错切 SX=sin(纵向俯仰角)×0.08，
+ *   使楼面读成一个「几乎直立的正常长方体盒子、仅带极轻斜度」，规避明显平行四边形/梯形观感、也避免房间格子被斜切看扁。
  *   楼层按 DXF 真实朝向渲染，轴对齐矩形恒为矩形、阳角 90°；立体感来自暗色墙侧面 + 亮色顶面 + 按屏幕 Y 升序遮挡。
- *   纵向俯仰角由「纵向旋转」滑杆控制、默认 55°（k≈0.574，落在 0.55~0.65 推荐区间）。
- *     screenX = x                          （水平方向原样，房间宽度不变）
- *     screenY = y * k - z * Z_EXAG         （k=cos(俯仰)：深度等比压缩；z 为墙高抬升，向上为正）
- *   对角矩阵（screenX 只含 x、screenY 只含 y 与 z）：轴对齐矩形恒为矩形、阳角严格 90°，绝不退化成平行四边形/梯形（那需要旋转或透视除法，二者皆无）。
- *   screenX 不含任何 y 项；墙体保持竖直，墙体高度按 cos(Pitch) 投影，立体感来自底面后倾 + 墙高；
+ *   纵向俯仰角由「纵向旋转」滑杆控制、默认 55°（SY≈0.574、SX≈sin55°×0.08≈0.066；俯仰越小越接近正俯视矩形、越大深度越向水平展开）。
+ *     screenX = x + (y - yc) * SX        （水平宽度原样；深度 y 相对楼层中心 yc 错切 SX=sin(俯仰)×0.08 → 极轻斜度底面，绕中心居中保持左右对称）
+ *     screenY = y * SY - z * Z_EXAG      （SY=cos(俯仰)：深度竖向压缩；z 为墙高抬升，向上为正）
+ *   纯仿射（保平行性）：轴对齐矩形恒为轻微斜平行四边形、阳角对应平行、墙体恒为竖直侧壁；刻意极小 SX 使其看上去就是「直立长方体」而非扁平行四边形。
+ *   墙体一律「向内偏移一个墙厚」绘制（见 wallFaces 的 inwardShift），最外缘压在楼层外轮廓线上、不向外伸出（修复最外层横向墙体两头冒出）。
  *   缩放/居中由 fit 对整层（含墙顶 z=wallHeight）的投影包围盒计算；按墙体地面中点屏幕 Y 排序保证遮挡正确。
  * - 房间中央文字：房间号码(14px 粗) / 房间名称(10px) / 部门(9px 灰) / 使用面积(9px 白底圆角)。
  * - 配色（按审图状态）：normal=#AED6F1，highlight=#C0392B，warning=#8E44AD，
@@ -80,30 +81,53 @@ const panY = ref(0);
 const stageRef = ref<HTMLElement | null>(null);
 const MIN_ZOOM = 0.3;
 const MAX_ZOOM = 6;
-/** 墙体高度（米）：从墙线竖直拉伸出的墙体高度，由侧栏「墙高(米)」滑杆控制（默认 1.0m，立体感与可读性平衡；滑杆可调）。
- *  墙体沿 z 轴竖直抬升（screenY 减小=向上），构成每个房间格子的长方体侧壁；高度越大长方体越立体。 */
-const wallHeight = ref(1.0);
+/** 墙体高度（米）：从墙线竖直拉伸出的墙体高度，由侧栏「墙高(米)」滑杆控制（默认 0.5m；滑杆可调 0.5~5m）。
+ *  墙体沿 z 轴竖直抬升（screenY 减小=向上），构成每个房间格子的长方体侧壁；高度越大长方体越立体。
+ *  注：Z_EXAG=1，即 0.5m 为真实视觉高度（不做夸张），靠两面明暗着色呈现立体感。 */
+const wallHeight = ref(0.5);
 
-/** 2.5D 投影（纯正交俯视压缩 + 源楼层「转正」对齐，无视图 yaw 旋转 / 无剪切 / 无 3D 引擎）：
- *  关键教训：任何「视图 yaw 旋转 + 非等比 Y 压缩」叠加都会产生错切(shear)，把矩形压成平行四边形——
- *  仿射变换保平行性，纯 SVG 仿射只能得到平行四边形、做不出真梯形（那需要透视除法）。
- *  解决「斜画矩形」的正确顺序是：先把源矩形「转正到坐标轴」(纯旋转，按最长边方向绕质心转 -θ)，
- *  再做纯 Y 压缩 k（k = cos(纵向俯仰角)，0.55~0.65），旋转与压缩不耦合 → 底面恒为矩形、阳角严格 90°。
- *    alignSource(x,y) → (ax, ay)                  （源转正：使矩形长边水平）
- *    screenX = ax                                  （水平方向原样，房间宽度不变）
- *    screenY = ay * k - z * Z_EXAG                （深度压缩 + 墙高抬升）
- *  视图层面不含任何旋转（水平旋转滑杆已移除），故任意俯仰下底面都保持直角矩形。
- *  立体感不靠剪切，而靠：① 每个房间/墙线向下拉伸出半透明灰侧面多边形（模拟墙厚/格子内壁）② 顶面白色/侧面灰半透明分层 ③ 按屏幕 Y 升序绘制（近处遮挡远处）。 */
+/** 渐进式渲染阶段（用于分步交付、每步确认）：
+ *  1 = 仅画整栋楼的「盒子」（顶面地板 + 朝观察者的连续前墙），不画房间/走廊/文字；
+ *  2 = + 顶面上一条横向走廊带（浅灰、无侧墙无边框，仅作区域标记）；
+ *  3 = + 走廊两侧共 12 个房间色块分区（普通统一浅蓝、特殊醒目色，无立体无侧墙）；
+ *  4 = + 每个房间正中心四行文字（号码/名称/部门/两面积）。
+ *  当前交付进度停在 4（含文字标签）。 */
+const renderStage = ref(4);
+
+/** 2.5D 投影（斜投影 = 源楼层「转正」对齐 + 深度「竖向压缩 SY + 水平错切 SX」，纯仿射、无视图 yaw 旋转、无 3D 引擎）：
+ *  关键认知：仿射变换保平行性——矩形经「纯 Y 压缩」只会得到矩形；要得到经典 2.5D 的平行四边形楼面，必须主动引入
+ *  水平错切 SX（=sin(俯仰)）让深度方向在屏幕上向右偏移；纯 SVG 仿射只能得到平行四边形、做不出真梯形（那需要透视除法）。
+ *  正确顺序是：先把源矩形「转正到坐标轴」(纯旋转，按最长边方向绕质心转 -θ) 使长边水平，
+ *  再做「竖向压缩 SY=cos(俯仰) + 水平错切 SX=sin(俯仰)」，旋转与压缩/错切不耦合 → 底面恒为平行四边形、阳角对应平行。
+ *    alignSource(x,y) → (ax, ay)                  （源转正：使矩形长边水平，作为屏幕水平轴）
+ *    screenX = ax + (ay - ayc) * SX               （水平宽度原样 + 深度绕中心 ayc 错切 SX=sin(俯仰)×0.16 → 平行四边形，居中不右倾）
+ *    screenY = ay * SY - z * Z_EXAG               （深度竖向压缩 + 墙高抬升）
+ *  立体感来自：① 墙线竖直抬升出的半透明灰侧面多边形（模拟墙厚）② 顶面白色/侧面灰半透明分层 ③ 按屏幕 Y 升序绘制（近处遮挡远处）。 */
 /** 纵向俯仰角（度）：由「纵向旋转」滑杆控制，默认 55°（→ k=cos55°≈0.574，落在推荐的 0.55~0.65 区间，给底面适度俯视压缩、保留明显立体感）。
  *  仅作为深度压缩系数 k=cos(俯仰)，不引入任何旋转；范围 0°(k=1 正俯视无压缩) ~ 80°(k≈0.17 压得很扁)。 */
 const pitchDeg = ref(55);
 const PITCH = computed(() => (pitchDeg.value * Math.PI) / 180);
-/** 深度方向压缩系数 k = cos(纵向俯仰角)：纯对角矩阵的 Y 缩放，无旋转项。屏幕 Y 按此压缩、墙高按 Z_EXAG 抬升。 */
+/** 深度方向竖向压缩系数 SY = cos(纵向俯仰角)：屏幕 Y 按此压缩、墙高按 Z_EXAG 抬升。 */
 const K = computed(() => Math.cos(PITCH.value));
+/** 深度方向水平错切系数 SX：用户明确要求「顶面 = 长方形（上下边水平且等长、左右边竖直）」，
+ *  故本项目采用【零错切 SX=0 + 纯竖向压缩 SY=cos(俯仰)】的投影——轴对齐矩形经投影后仍是矩形，绝不退化成平行四边形 / 梯形。
+ *  立体感仅靠「顶面 + 朝观察者的一整条连续前墙」表达：前墙由 z=0→H 竖向拉伸、颜色比顶面明显更暗。
+ *  纵向俯仰角仅作为深度压缩系数 K=cos(俯仰)（俯仰越小越不扁），不再引入任何水平错切。 */
+const SX = computed(() => 0);
 /** 高度夸张系数（1 = 与楼层平面同真实比例，墙体即真实 wallHeight 米高）。 */
 const Z_EXAG = 1;
-/** 墙体厚度（米）：把一条墙线拉伸成有体积的墙体时赋予的真实厚度。 */
-const WALL_THICK = 0.3;
+/** 墙体厚度（米）：把一条墙线拉伸成有体积的墙体时赋予的真实厚度（0.22，较此前 0.3 再减薄，避免厚墙吃掉格子/外冒）。
+ *  关键：墙体一律「向内偏移一个墙厚」绘制（见 wallFaces 的 inwardShift），使最外缘正好压在楼层外轮廓线上、
+ *  绝不向外伸出（修复「最外层横向墙体两头冒出来」的外冒问题），且内墙也同步内收、不侵占房间格子。 */
+const WALL_THICK = 0.22;
+/** 楼栋盒子（第 1 步渐进渲染）的视觉厚度（米）：仅为让「整栋楼=一块躺下去的地板」在图上清晰可读而设，
+ *  非真实层高；楼栋盒子比房间盒子(墙高滑杆)更高更厚，呈「容器/底板」观感。 */
+const BUILDING_H = 3.0;
+/** 房间之间的「隔墙」平面厚度（米）：隔墙在楼面平面上的物理粗细，决定俯视图里墙的宽窄。 */
+const WALL_T = 0.3;
+/** 隔墙「抬升高度」（米）：房间是平铺在地板(BUILDING_H)上的色块，房间之间用一条抬升 WALL_H 的隔墙分隔 →
+ *  房间平、隔墙凸、走廊凹，形成凹凸感。用户明确要求 0.5 米高。 */
+const WALL_H = 0.5;
 
 function clamp(v: number, lo: number, hi: number): number {
   return Math.min(hi, Math.max(lo, v));
@@ -395,10 +419,10 @@ function colorFor(room: RoomLike): string {
   }
 }
 
-// ---- 源楼层「转正」对齐（关键修复：DXF 里斜画的矩形必须先转正到坐标轴，再做纯 Y 压缩，否则会被压成平行四边形）----
-//   任何「旋转 + 非等比 Y 压缩」叠加都产生错切 → 平行四边形；但正确顺序是「先把矩形转正到坐标轴(纯旋转)」再「纯 Y 压缩」：
-//   旋转作用在已对齐的矩形上、压缩只沿对齐后的 y 轴，二者不耦合 → 不会剪切，底面恒为矩形、阳角严格 90°。
-//   做法：取源楼层外轮廓（兜底用所有房间）最长边方向 θ，绕质心旋转 -θ 使矩形长边水平 → 轴对齐；之后 scale(1,k) 仅压缩深度。
+// ---- 源楼层「转正」对齐（关键修复：DXF 里斜画的矩形必须先转正到坐标轴，再做斜投影，否则会被画成竖向斜片、与 fit 包围盒错位）----
+//   正确顺序是「先把矩形转正到坐标轴(纯旋转)」再「斜投影（竖向压缩 SY + 水平错切 SX）」：
+//   旋转使矩形长边水平作为屏幕水平轴，之后斜投影的错切只沿对齐后的 y 轴（深度），二者不耦合 → 底面恒为平行四边形、阳角对应平行。
+//   做法：取源楼层外轮廓（兜底用所有房间）最长边方向 θ，绕质心旋转 -θ 使矩形长边水平 → 轴对齐。
 //   此旋转是「把斜画矩形扶正」的数据预处理，不是视图 yaw 旋转（视图 yaw 旋转 + 压缩才是产生错切的根因，已彻底移除）。
 //   alignToAxisEnabled 关闭时按 DXF 真实朝向渲染（斜矩形会如实呈平行四边形，属几何预期，非 bug）。 ----
 
@@ -443,13 +467,57 @@ function alignSource(p: [number, number]): [number, number] {
   return [dx * c - dy * s + cx, dx * s + dy * c + cy];
 }
 
+/** 投影中心：取本层全部点（外轮廓 + 房间）「源对齐转正」后的质心，用作错切的居中基准，
+ *  使整栋建筑绕自身中心错切、不再整体向右偏移（避免右侧边被过度拉开成「右倾」）。 */
+const projectionCenter = computed(() => {
+  const pts: [number, number][] = [];
+  const outline =
+    (props.embedded && props.preview ? props.preview.outline : currentFloor.value?.outline) ?? [];
+  for (const p of outline) pts.push(p);
+  for (const r of displayedRooms.value) for (const p of polyOf(r)) pts.push(p);
+  if (!pts.length) return { x: 0, y: 0 };
+  let sx = 0;
+  let sy = 0;
+  for (const p of pts) {
+    const [ax, ay] = alignSource(p);
+    sx += ax;
+    sy += ay;
+  }
+  return { x: sx / pts.length, y: sy / pts.length };
+});
+
+/** 楼层质心（源坐标，未对齐前）：取外轮廓（兜底用全部房间）的几何质心，用作「墙体向内偏移」的朝向基准，
+ *  使每道墙都向楼层中心收一个墙厚（最外缘正好压在外轮廓线上，不外伸）。 */
+const buildingCentroid = computed(() => {
+  let pts: [number, number][] = (props.embedded && props.preview ? props.preview.outline : currentFloor.value?.outline) ?? [];
+  if (!pts || pts.length < 3) {
+    pts = [];
+    for (const r of displayedRooms.value) for (const p of polyOf(r)) pts.push(p);
+  }
+  if (!pts.length) return { x: 0, y: 0 };
+  let cx = 0, cy = 0;
+  for (const p of pts) { cx += p[0]; cy += p[1]; }
+  return { x: cx / pts.length, y: cy / pts.length };
+});
+
+/** 2.5D 斜投影核心（纯仿射：对角 + 剪切，无透视除法 → 恒为平行四边形，绝不退化成梯形）。
+ *  输入为「源对齐转正」后的 (ax, ay) 与抬升高度 z：
+ *    ix = ax + (ay - ayc) * SX   —— 水平宽度原样保留；深度 ay 相对楼层中心 ayc 错切 SX，形成斜投影的平行四边形底面（绕中心居中，避免整栋向右偏）
+ *    iy = ay * SY - z * Z_EXAG    —— 深度按 SY=cos(俯仰) 竖向压缩；墙高 z 竖直抬升（屏幕 Y 向上为负）
+ *  该变换保平行性：矩形楼面恒为平行四边形、墙体恒为平行四边形侧壁，杜绝「上窄下宽」的梯形错觉。 */
+function projectXY(ax: number, ay: number, z: number): [number, number] {
+  const ayc = projectionCenter.value.y;
+  const ix = ax + (ay - ayc) * SX.value;
+  const iy = ay * K.value - z * Z_EXAG;
+  return [ix, iy];
+}
+
 const fit = computed(() => {
   // 先按投影算整层（含墙顶 z=wallHeight）的屏幕包围盒，再求缩放与居中
   let minIX = Infinity, maxIX = -Infinity, minIY = Infinity, maxIY = -Infinity;
   const consider = (x: number, y: number, z: number) => {
     const [ax, ay] = alignSource([x, y]);
-    const ix = ax;
-    const iy = ay * K.value - z * Z_EXAG;
+    const [ix, iy] = projectXY(ax, ay, z);
     if (ix < minIX) minIX = ix;
     if (ix > maxIX) maxIX = ix;
     if (iy < minIY) minIY = iy;
@@ -459,7 +527,8 @@ const fit = computed(() => {
     (props.embedded && props.preview ? props.preview.outline : currentFloor.value?.outline) ?? [];
   for (const pt of outline) {
     consider(pt[0], pt[1], 0);
-    consider(pt[0], pt[1], wallHeight.value);
+    consider(pt[0], pt[1], BUILDING_H); // 楼栋盒子顶面（第 1 步）须纳入包围盒，避免被裁切
+    consider(pt[0], pt[1], BUILDING_H + WALL_H); // 房间之间隔墙顶面（抬升 0.5m）亦须纳入，避免被裁切
   }
   for (const r of displayedRooms.value) {
     for (const pt of polyOf(r)) {
@@ -479,24 +548,287 @@ const fit = computed(() => {
   return { scale, padX, padY };
 });
 
+/** 第 1 步：整栋楼「盒子」——一块躺下去的地板（零错切：顶面=长方形，前墙=连续整条）。
+ *  顶面(z=BUILDING_H, 近白 #f4f7fb：模拟从斜上方俯视看进去的楼板) + 朝观察者的一整条前墙(z=0→BUILDING_H, 明显更暗的灰)。
+ *  零错切下只有外法线指向 +y 的前墙可见；背墙剔除、左右侧墙投影退化不可见。
+ *  不画任何房间、走廊、文字。 */
+const buildingBox = computed<{ top: string; sides: Face[] } | null>(() => {
+  const poly = outlinePoints.value;
+  if (!poly || poly.length < 3) return null;
+  const H = BUILDING_H;
+  const P = (p: [number, number], z: number) => project(p[0], p[1], z);
+  const q = (p: [number, number]) => `${p[0].toFixed(1)},${p[1].toFixed(1)}`;
+  const top = poly.map((p) => q(P(p, H))).join(' ');
+  const apoly = poly.map((p) => alignSource(p));
+  const acx = apoly.reduce((s, p) => s + p[0], 0) / apoly.length;
+  const acy = apoly.reduce((s, p) => s + p[1], 0) / apoly.length;
+  const sides: Face[] = [];
+  for (let i = 0; i < apoly.length; i++) {
+    const a = apoly[i]!;
+    const b = apoly[(i + 1) % apoly.length]!;
+    const dx = b[0] - a[0];
+    const dy = b[1] - a[1];
+    const len = Math.hypot(dx, dy);
+    if (len < 1e-6) continue;
+    let nx = dy / len;
+    let ny = -dx / len;
+    const mx = (a[0] + b[0]) / 2;
+    const my = (a[1] + b[1]) / 2;
+    // 外法线应指向房间外侧
+    if (nx * (acx - mx) + ny * (acy - my) > 0) {
+      nx = -nx;
+      ny = -ny;
+    }
+    // 可见性（零错切投影）：只有「外法线指向 +y（朝向观察者）」的墙才可见 = 前墙（连续一整条）；
+    // 背墙(-y)剔除，左右侧墙法线为 ±x（ny=0，且投影后宽度退化为 0、不可见）。
+    if (ny <= 0) continue;
+    const srcA = poly[i]!;
+    const srcB = poly[(i + 1) % poly.length]!;
+    const Pa0 = P(srcA, 0);
+    const Pb0 = P(srcB, 0);
+    const PaH = P(srcA, H);
+    const PbH = P(srcB, H);
+    // 前墙：比顶面明显更暗的灰，强化长方体厚度感（顶面为 #f4f7fb 近白）
+    const fill = 'rgba(128,136,150,0.98)';
+    sides.push({ points: `${q(Pa0)} ${q(Pb0)} ${q(PbH)} ${q(PaH)}`, fill });
+  }
+  return { top, sides };
+});
+
+/** 第 2 步：在顶面上「画出来」的一条走廊带（不是独立盒子，无侧墙/无边框凸起）。
+ *  在「源对齐转正」坐标系下取楼层包围盒：横向(x)贯穿整栋、纵向(y)取中线 ± 进深/12（带宽 = 进深/6），
+ *  与顶面同处 z=BUILDING_H 平面，画在顶面之上即呈现为楼板上的一条浅灰带子。颜色比顶面(#f4f7fb)深一点。 */
+const corridorBand = computed<string | null>(() => {
+  const poly = outlinePoints.value;
+  if (!poly || poly.length < 3) return null;
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  for (const p of poly) {
+    const [ax, ay] = alignSource(p);
+    if (ax < minX) minX = ax;
+    if (ax > maxX) maxX = ax;
+    if (ay < minY) minY = ay;
+    if (ay > maxY) maxY = ay;
+  }
+  if (!isFinite(minX)) return null;
+  const depth = Math.max(maxY - minY, 1e-6);
+  const midY = (minY + maxY) / 2;
+  const half = depth / 12; // 带宽 = 进深/6
+  const z = BUILDING_H;
+  const f = fit.value;
+  const P = (ax: number, ay: number) => {
+    const [ix, iy] = projectXY(ax, ay, z);
+    return `${(ix * f.scale + f.padX).toFixed(1)},${(iy * f.scale + f.padY).toFixed(1)}`;
+  };
+  return [P(minX, midY - half), P(maxX, midY - half), P(maxX, midY + half), P(minX, midY + half)].join(' ');
+});
+
+/** 第 3+4 步：在走廊两侧划分 12 个房间（上排 6 + 下排 6），每个房间=平铺在地板(BUILDING_H)上的「彩色矩形色块」——不做任何立体、不画侧墙。
+ *  - 源对齐转正坐标系下取楼层包围盒；横向(x)贯穿整栋、纵向(y)以中线为界，上排 [minY, midY-half]、下排 [midY+half, maxY]；
+ *  - 每排横向均分 6 份（ROOM_COLS），相邻房间共用边界 → 紧贴无空隙、顶到左右两边无外边距；不覆盖中间走廊带；
+ *  - 房间平铺、保留颜色与四行文字；凹凸感改由「房间之间的隔墙(roomWalls)」表达（房间平、隔墙凸、走廊凹）。
+ *  - 颜色：所有普通房间统一浅蓝(NORMAL_TOP)、不做渐变；少数特殊房间醒目色标出（颜色只区分普通/特殊）。 */
+const ROOM_COLS = 6;
+/** 普通房间统一顶面色（浅蓝）；不区分排、不按列渐变。 */
+const NORMAL_TOP = '#cfe2f3';
+/** 普通房间前墙色（同色深色版本，制造明暗对比）。 */
+const NORMAL_SIDE = '#a9c7e0';
+const NORMAL_STROKE = '#7c8392';
+/** 特殊房间（id 形如 `r{排}_{列}`）：醒目色标出「需注意」的房间；side 为其深色版本。 */
+const SPECIAL: Record<string, { fill: string; side: string; stroke: string; number: string; name: string; dept: string; area: string }> = {
+  '0_2': { fill: '#d6453f', side: '#b5372f', stroke: '#a32e2a', number: '103', name: '配电室', dept: '后勤处', area: '42.10㎡ / 42.10㎡' },
+  '0_5': { fill: '#d6453f', side: '#b5372f', stroke: '#a32e2a', number: '106', name: '消防控制室', dept: '安保处', area: '38.55㎡ / 38.55㎡' },
+  '1_3': { fill: '#8e5bd1', side: '#6f43a8', stroke: '#6b3fa6', number: '204', name: '档案涉密室', dept: '档案科', area: '51.20㎡ / 51.20㎡' },
+};
+/** 普通房间的样例数据（按 排×列 生成，仅用于预览展示）。 */
+const ROOM_SAMPLE: { names: string[]; depts: string[]; areas: string[] } = {
+  names: ['办公室', '会议室', '实验室', '资料室', '设备间', '休息室'],
+  depts: ['侦查系', '刑技系', '治安系', '交管系', '网安系', '法化系'],
+  areas: ['69.84㎡ / 108.25㎡', '74.30㎡ / 112.60㎡', '82.15㎡ / 120.40㎡', '58.90㎡ / 95.30㎡', '45.20㎡ / 71.10㎡', '63.75㎡ / 98.40㎡'],
+};
+const roomBlocks = computed<RoomBlock[]>(() => {
+  const poly = outlinePoints.value;
+  if (!poly || poly.length < 3) return [];
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  for (const p of poly) {
+    const [ax, ay] = alignSource(p);
+    if (ax < minX) minX = ax;
+    if (ax > maxX) maxX = ax;
+    if (ay < minY) minY = ay;
+    if (ay > maxY) maxY = ay;
+  }
+  if (!isFinite(minX)) return [];
+  const width = Math.max(maxX - minX, 1e-6);
+  const depth = Math.max(maxY - minY, 1e-6);
+  const midY = (minY + maxY) / 2;
+  const half = depth / 12; // 走廊半宽 = 进深/12（带宽 = 进深/6）
+  const zBase = BUILDING_H;             // 地板高度（房间/走廊均平铺在此平面）
+  const zTop = BUILDING_H;              // 房间=平铺色块，不再整体抬升；凹凸感由 roomWalls 隔墙表达
+  const f = fit.value;
+  const P = (ax: number, ay: number, z: number): [number, number] => {
+    const [ix, iy] = projectXY(ax, ay, z);
+    return [ix * f.scale + f.padX, iy * f.scale + f.padY];
+  };
+  const bands: { y0: number; y1: number; prefix: number }[] = [
+    { y0: minY, y1: midY - half, prefix: 1 },
+    { y0: midY + half, y1: maxY, prefix: 2 },
+  ];
+  const blocks: RoomBlock[] = [];
+  bands.forEach((band, bi) => {
+    for (let c = 0; c < ROOM_COLS; c++) {
+      const x0 = minX + (width * c) / ROOM_COLS;
+      const x1 = minX + (width * (c + 1)) / ROOM_COLS;
+      const y0 = band.y0;
+      const y1 = band.y1; // 较大的 ay = 朝向观察者的前边
+      // 顶面四个角（z=zTop，亮色）
+      const t0 = P(x0, y0, zTop);
+      const t1 = P(x1, y0, zTop);
+      const t2 = P(x1, y1, zTop);
+      const t3 = P(x0, y1, zTop);
+      // 房间已改为平铺色块（不整体抬升），不再生成前墙侧壁；凹凸感由 roomWalls 隔墙表达。
+      const s0 = P(x0, y1, zBase);
+      const s1 = P(x1, y1, zBase);
+      const s2 = P(x1, y1, zTop);
+      const s3 = P(x0, y1, zTop);
+      const topPoints = `${t0[0].toFixed(1)},${t0[1].toFixed(1)} ${t1[0].toFixed(1)},${t1[1].toFixed(1)} ${t2[0].toFixed(1)},${t2[1].toFixed(1)} ${t3[0].toFixed(1)},${t3[1].toFixed(1)}`;
+      const sidePoints = ''; // 平铺色块无侧壁
+      const cx = (t0[0] + t1[0] + t2[0] + t3[0]) / 4;
+      const cy = (t0[1] + t1[1] + t2[1] + t3[1]) / 4;
+      const roomHpx = Math.abs(t0[1] - t3[1]); // 房间顶面屏幕竖向像素高度
+      // 四行文字自适应字号（房间越高字越大，但夹紧在可读/可放范围内）
+      const gap = Math.max(roomHpx * 0.21, 8);
+      const sizeNumber = Math.min(Math.max(gap * 0.95, 10), 16);
+      const sizeOther = Math.min(Math.max(gap * 0.62, 7.5), 11);
+      const top = cy - gap * 1.5;
+      const sp = SPECIAL[`${bi}_${c}`];
+      const isSpecial = !!sp;
+      const number = sp ? sp.number : `${band.prefix}${String(c + 1).padStart(2, '0')}`;
+      const name = sp ? sp.name : ROOM_SAMPLE.names[c]!;
+      const dept = sp ? sp.dept : ROOM_SAMPLE.depts[c]!;
+      const area = sp ? sp.area : ROOM_SAMPLE.areas[c]!;
+      blocks.push({
+        id: `r${bi}_${c}`,
+        topPoints,
+        sidePoints,
+        topFill: isSpecial ? sp.fill : NORMAL_TOP,
+        sideFill: isSpecial ? sp.side : NORMAL_SIDE,
+        stroke: isSpecial ? sp.stroke : NORMAL_STROKE,
+        cx,
+        cy,
+        number,
+        name,
+        dept,
+        area,
+        special: isSpecial,
+        textColor: isSpecial ? '#ffffff' : '#2d3a47',
+        yNumber: top,
+        yName: top + gap,
+        yDept: top + gap * 2,
+        yArea: top + gap * 3,
+        sizeNumber,
+        sizeOther,
+      });
+    }
+  });
+  return blocks;
+});
+
+/** 房间之间的「隔墙」（第 5 步，表达凹凸感）：平铺的房间色块之间，用一条抬升 WALL_H(0.5米) 的矮墙分隔。
+ *  - 仅在内部绘制：每排房间之间 5 道纵向隔墙 + 上下两排与走廊之间各 1 道横向隔墙（共 12 道）；楼栋外圈已由第 1 步盒子提供，不重复。
+ *  - 房间平铺、隔墙凸出 → 房间平、墙凸、走廊凹，凹凸感成立；墙是站在同一块地板上的连续矮墙（非悬浮）。
+ *  - 投影 SX=0（顶面保持长方形）：纵向隔墙靠「顶面抬升 + 轻微右上位移(WALL_PX*0.5)」露出墙体侧面；横向隔墙靠纯竖直抬升露出前脸。 */
+const roomWalls = computed<WallBox[]>(() => {
+  const poly = outlinePoints.value;
+  if (!poly || poly.length < 3) return [];
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  for (const p of poly) {
+    const [ax, ay] = alignSource(p);
+    if (ax < minX) minX = ax;
+    if (ax > maxX) maxX = ax;
+    if (ay < minY) minY = ay;
+    if (ay > maxY) maxY = ay;
+  }
+  if (!isFinite(minX)) return [];
+  const width = Math.max(maxX - minX, 1e-6);
+  const depth = Math.max(maxY - minY, 1e-6);
+  const midY = (minY + maxY) / 2;
+  const half = depth / 12;
+  const z = BUILDING_H;
+  const f = fit.value;
+  const P = (ax: number, ay: number): [number, number] => {
+    const [ix, iy] = projectXY(ax, ay, z);
+    return [ix * f.scale + f.padX, iy * f.scale + f.padY];
+  };
+  const wallPx = WALL_H * Z_EXAG * f.scale; // 0.5 米在屏幕上的抬升像素
+  // 隔墙中线集合
+  const segs: { horiz: boolean; a: [number, number]; b: [number, number] }[] = [];
+  const rows: { y0: number; y1: number }[] = [
+    { y0: minY, y1: midY - half },
+    { y0: midY + half, y1: maxY },
+  ];
+  // 每排房间之间的纵向隔墙（c=1..5）
+  for (const row of rows) {
+    for (let c = 1; c < ROOM_COLS; c++) {
+      const xc = minX + (width * c) / ROOM_COLS;
+      segs.push({ horiz: false, a: [xc, row.y0], b: [xc, row.y1] });
+    }
+  }
+  // 上下两排与走廊之间的横向隔墙（各 1 道）
+  segs.push({ horiz: true, a: [minX, midY - half], b: [maxX, midY - half] });
+  segs.push({ horiz: true, a: [minX, midY + half], b: [maxX, midY + half] });
+
+  const q = (p: [number, number]) => `${p[0].toFixed(1)},${p[1].toFixed(1)}`;
+  const walls: WallBox[] = [];
+  segs.forEach((seg, idx) => {
+    // 平面占位矩形（WALL_T 厚度）的四角（按顺时针）
+    let basePlan: [number, number][];
+    if (seg.horiz) {
+      const yc = seg.a[1];
+      basePlan = [
+        [seg.a[0], yc - WALL_T / 2],
+        [seg.b[0], yc - WALL_T / 2],
+        [seg.b[0], yc + WALL_T / 2],
+        [seg.a[0], yc + WALL_T / 2],
+      ];
+    } else {
+      const xc = seg.a[0];
+      basePlan = [
+        [xc - WALL_T / 2, seg.a[1]],
+        [xc + WALL_T / 2, seg.a[1]],
+        [xc + WALL_T / 2, seg.b[1]],
+        [xc - WALL_T / 2, seg.b[1]],
+      ];
+    }
+    const b = basePlan.map(([x, y]) => P(x, y));
+    // 顶面：在屏幕坐标上整体抬升 wallPx；纵向隔墙额外轻微右移，露出墙体侧面（SX=0 下竖向墙否则不可见）
+    const dispX = seg.horiz ? 0 : wallPx * 0.5;
+    const dispY = -wallPx;
+    const t = b.map(([sx, sy]) => [sx + dispX, sy + dispY] as [number, number]);
+    const sides: string[] = [];
+    for (let i = 0; i < 4; i++) {
+      const j = (i + 1) % 4;
+      sides.push(`${q(b[i]!)} ${q(b[j]!)} ${q(t[j]!)} ${q(t[i]!)}`);
+    }
+    const top = `${q(t[0]!)} ${q(t[1]!)} ${q(t[2]!)} ${q(t[3]!)}`;
+    walls.push({ id: `w${idx}`, sides, top, stroke: '#8a93a3' });
+  });
+  return walls;
+});
+
 function toScreen(p: [number, number]): [number, number] {
   return project(p[0], p[1], 0);
 }
 
-/** 2.5D 投影（纯正交俯视压缩，无旋转项）：平面点 (x,y) 抬升 z 米后的屏幕坐标。
- *    screenX = x                         （水平方向原样，房间格子宽度不变）
- *    screenY = y * k - z * Z_EXAG        （k = cos(纵向俯仰角)：深度方向等比压缩；z 为墙高抬升，向上为正）
- *  对角矩阵（screenX 只含 x、screenY 只含 y 与 z）→ 轴对齐矩形恒为矩形、阳角严格 90°、墙体竖直；
- *  绝不退化成平行四边形/梯形（那需要旋转+yaw 或透视除法，本实现两者皆无）。
+/** 2.5D 投影（斜投影，纯仿射：无旋转项，但有水平错切）：平面点 (x,y) 抬升 z 米后的屏幕坐标。
+ *    screenX = x + (y - yc) * SX        （水平宽度原样 + 深度绕楼层中心 yc 错切 SX=sin(俯仰)×0.16 → 平行四边形底面，居中不右倾）
+ *    screenY = y * SY - z * Z_EXAG      （SY=cos(俯仰)：深度方向竖向压缩；z 为墙高抬升，向上为正）
+ *  纯仿射（保平行性）→ 轴对齐矩形恒为平行四边形、阳角对应平行、墙体竖直；绝不退化成上窄下宽的梯形（那需要透视除法）。
  *  立体感来自墙体侧面暗色多边形 + 顶面亮色 + 按屏幕 Y 升序绘制（见 wallFaces / wallSideFaces）。 */
 function project(x: number, y: number, z: number): [number, number] {
   const f = fit.value;
-  // 关键修复：渲染路径必须与 fit 一致地先「源对齐转正」再投影，否则斜画的 DXF 矩形会被原样
-  // 画出（常常呈竖向斜片），而 fit 却按转正后的包围盒去缩放/居中 → 内容错位、整体竖向斜置。
-  // 这里对齐后再做纯 Y 压缩 k=cos(俯仰)，旋转与压缩不耦合 → 底面恒为矩形、长边水平、阳角严格 90°。
+  // 渲染路径必须与 fit 一致地先「源对齐转正」再投影（否则斜画 DXF 矩形会被原样画出、与 fit 包围盒错位）。
+  // 对齐后做斜投影（竖向压缩 SY=cos(俯仰) + 水平错切 SX=sin(俯仰)）：底面呈平行四边形、墙体竖直抬升成平行四边形侧壁。
   const [ax, ay] = alignSource([x, y]);
-  const ix = ax;
-  const iy = ay * K.value - z * Z_EXAG;
+  const [ix, iy] = projectXY(ax, ay, z);
   return [ix * f.scale + f.padX, iy * f.scale + f.padY];
 }
 
@@ -516,15 +848,62 @@ interface Face {
   fill: string;
 }
 
+/** 第 3 步：房间只是「顶面上的色块分区」——一块平铺在顶面(z=BUILDING_H)平面上的彩色矩形，
+ *  带一条细分隔线(描边)表示墙；不做任何立体、不画侧墙（整栋楼只有第 1 步那一圈侧墙）。 */
+interface RoomBlock {
+  id: string;
+  /** 顶面多边形（z=BUILDING_H+ROOM_THICK，亮色） */
+  topPoints: string;
+  /** 朝向观察者的前墙多边形（z=BUILDING_H→BUILDING_H+ROOM_THICK，同色深色版本） */
+  sidePoints: string;
+  topFill: string;
+  sideFill: string;
+  stroke: string;
+  /** 房间顶面的屏幕几何中心，文字锚点 */
+  cx: number;
+  cy: number;
+  /** 第 1 行：房间号码（最大、加粗） */
+  number: string;
+  /** 第 2 行：房间名称 */
+  name: string;
+  /** 第 3 行：部门名称 */
+  dept: string;
+  /** 第 4 行：两个面积 */
+  area: string;
+  /** 是否特殊房间（用醒目色标出） */
+  special: boolean;
+  /** 文字颜色：普通房间深色、特殊房间白色以保证对比 */
+  textColor: string;
+  /** 四行文字的 y 坐标与各自字号（已按房间屏幕高度自适应） */
+  yNumber: number;
+  yName: number;
+  yDept: number;
+  yArea: number;
+  sizeNumber: number;
+  sizeOther: number;
+}
+
+/** 房间之间的「隔墙」（抬升 0.5m 的矮墙，表达凹凸感）：一个墙体盒子 = 4 个侧面 + 1 个顶面。 */
+interface WallBox {
+  id: string;
+  /** 4 个侧面 quad（屏幕坐标多边形字符串），按方向填充暗色 → 露出墙体厚度 */
+  sides: string[];
+  /** 顶面 quad（屏幕坐标多边形字符串），比侧面亮 */
+  top: string;
+  stroke: string;
+}
+
 /** 单个房间的平铺填充（z=0 地面，无侧面）+ 其文字标签 */
 interface RoomFill {
   id: string;
   room: RoomLike;
-  /** 房间轮廓（屏幕坐标，z=0） */
+  /** 房间顶面（屏幕坐标，z=H） */
   points: string;
   fill: string;
   stroke: string;
   dimmed: boolean;
+  /** 朝向观察者的可见侧墙（z=0→H，较顶面更暗） */
+  sides: Face[];
   lines: LabelLine[];
   labelX: number;
 }
@@ -666,26 +1045,53 @@ const wallSegments = computed<{ a: [number, number]; b: [number, number] }[]>(()
 /** 把一段墙线 (a,b) 拉伸成高 wallHeight 米的墙体：4 个竖直侧面 + 1 个顶面。 */
 function wallFaces(seg: { a: [number, number]; b: [number, number] }): { sides: Face[]; top: Face } {
   const { a, b } = seg;
-  const dx = b[0] - a[0];
-  const dy = b[1] - a[1];
+  // 两面明暗着色必须基于「源对齐转正后」的墙段方向分类，而非原始 DXF 方向——
+  // 否则斜画楼栋经 alignSource 旋转后，源方向分类会错位，导致左右侧壁明暗不一致、盒子读不出。
+  const [aax, aay] = alignSource(a);
+  const [bax, bay] = alignSource(b);
+  const dx = bax - aax;
+  const dy = bay - aay;
   const len = Math.hypot(dx, dy) || 1;
   const nx = -dy / len;
   const ny = dx / len;
   const t = WALL_THICK / 2;
-  const A1: [number, number] = [a[0] + nx * t, a[1] + ny * t];
-  const B1: [number, number] = [b[0] + nx * t, b[1] + ny * t];
-  const A2: [number, number] = [a[0] - nx * t, a[1] - ny * t];
-  const B2: [number, number] = [b[0] - nx * t, b[1] - ny * t];
+  let A1: [number, number] = [a[0] + nx * t, a[1] + ny * t];
+  let B1: [number, number] = [b[0] + nx * t, b[1] + ny * t];
+  let A2: [number, number] = [a[0] - nx * t, a[1] - ny * t];
+  let B2: [number, number] = [b[0] - nx * t, b[1] - ny * t];
+  // 向内偏移一个墙厚：把整道墙朝「楼层质心」方向平移 t，使最外缘正好压在源墙线上（外轮廓墙不再向外伸出 → 修复「最外层横向墙体两头冒出来」）。
+  // 平移后墙体完全落在源线内侧、厚度不变（仍为 WALL_THICK），既消除外冒、又不侵占房间格子。
+  {
+    const midX = (a[0] + b[0]) / 2;
+    const midY = (a[1] + b[1]) / 2;
+    let inx = buildingCentroid.value.x - midX;
+    let iny = buildingCentroid.value.y - midY;
+    const il = Math.hypot(inx, iny) || 1;
+    inx /= il;
+    iny /= il;
+    const shx = inx * t;
+    const shy = iny * t;
+    A1 = [A1[0] + shx, A1[1] + shy];
+    B1 = [B1[0] + shx, B1[1] + shy];
+    A2 = [A2[0] + shx, A2[1] + shy];
+    B2 = [B2[0] + shx, B2[1] + shy];
+  }
   const H = wallHeight.value;
   const P = (p: [number, number], z: number): [number, number] => project(p[0], p[1], z);
   const q = (p: [number, number]) => `${p[0].toFixed(1)},${p[1].toFixed(1)}`;
-  const sideFill = 'rgba(138,138,138,0.5)'; // 格子内壁：灰(半透明)（用户规范）
-  const topFill = '#ffffff'; // 拉伸的墙(顶部的面)：白色（用户规范）
+  // 2.5D 两面明暗着色：沿对齐后 X 轴（水平/正面）的墙=较亮，沿 Y 轴（深度/侧面）的墙=较暗。
+  // 基于「对齐后」方向分类，保证左右两侧壁（均为深度墙）明暗一致，盒子立体感对称清晰。
+  const isXWall = Math.abs(dx) >= Math.abs(dy);
+  const frontFill = 'rgba(158,166,180,0.92)'; // 正面墙：较亮灰
+  const sideFill = 'rgba(112,120,136,0.92)'; // 侧面墙：较暗灰（深度方向，强化立体）
+  const longFill = isXWall ? frontFill : sideFill;
+  const endFill = isXWall ? sideFill : frontFill;
+  const topFill = '#e3e8ef'; // 楼顶(拉伸墙顶部面)：浅灰，区别于白色房间地面，呈现「盖子」悬浮感
   const sides: Face[] = [
-    { points: `${q(P(A1, 0))} ${q(P(B1, 0))} ${q(P(B1, H))} ${q(P(A1, H))}`, fill: sideFill },
-    { points: `${q(P(A2, 0))} ${q(P(B2, 0))} ${q(P(B2, H))} ${q(P(A2, H))}`, fill: sideFill },
-    { points: `${q(P(A1, 0))} ${q(P(A2, 0))} ${q(P(A2, H))} ${q(P(A1, H))}`, fill: sideFill },
-    { points: `${q(P(B1, 0))} ${q(P(B2, 0))} ${q(P(B2, H))} ${q(P(B1, H))}`, fill: sideFill },
+    { points: `${q(P(A1, 0))} ${q(P(B1, 0))} ${q(P(B1, H))} ${q(P(A1, H))}`, fill: longFill },
+    { points: `${q(P(A2, 0))} ${q(P(B2, 0))} ${q(P(B2, H))} ${q(P(A2, H))}`, fill: longFill },
+    { points: `${q(P(A1, 0))} ${q(P(A2, 0))} ${q(P(A2, H))} ${q(P(A1, H))}`, fill: endFill },
+    { points: `${q(P(B1, 0))} ${q(P(B2, 0))} ${q(P(B2, H))} ${q(P(B1, H))}`, fill: endFill },
   ];
   const top: Face = {
     points: `${q(P(A1, H))} ${q(P(B1, H))} ${q(P(B2, H))} ${q(P(A2, H))}`,
@@ -717,42 +1123,110 @@ const wallTopFaces = computed<Face[]>(() =>
 );
 
 const LINE_GAP = 13;
-/** ③ 房间平铺填充（z=0 地面，无侧面），含文字标签 */
-const roomFills = computed<RoomFill[]>(() =>
-  displayedRooms.value.map((room) => {
-    const base = polyOf(room).map(toScreen);
-    const points = base.map((p) => `${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(' ');
-    const color = '#ffffff'; // 格子底部：白色（用户规范）
-    const stroke = '#c4cbd4'; // 浅灰描边：区分相邻房间、呈现格子边界
-    // 标签锚点：直接用「房间多边形自身在屏幕上的几何质心」，而非依赖 room.centroid 字段。
-    // 原因：真实 App 用的是 store 持久化的 Room 数据，若持久化时未写入 centroid，
-    // toScreen(undefined) 会返回 [NaN,NaN]，文字被画到画布外不可见（而多边形用的是 polyOf，照常显示）→ 表现为「格子在、里面没字」。
-    // 由多边形顶点反推质心永远成立，杜绝该问题。
+/** 房间几何质心（源坐标），由多边形顶点反推（不依赖 room.centroid 字段，杜绝持久化缺失导致的 NaN）。 */
+function centroidOf(room: RoomLike): [number, number] {
+  const poly = polyOf(room);
+  if (!poly.length) return room.centroid ?? [0, 0];
+  let x = 0;
+  let y = 0;
+  for (const p of poly) {
+    x += p[0];
+    y += p[1];
+  }
+  return [x / poly.length, y / poly.length];
+}
+/** ③ 房间盒子渲染（取代原先 z=0 平铺卡片）：每个房间=有高度的长方体——
+ *  顶面(z=H, 较亮) + 朝向观察者的可见侧墙(z=0→H, 较暗)；由远及近排序绘制使近处盒子盖住远处；
+ *  盒子之间未被覆盖的底板(①层 light 灰)即自然露出「走廊」。 */
+const roomFills = computed<RoomFill[]>(() => {
+  const blocks = displayedRooms.value.map((room) => {
+    const poly = polyOf(room);
+    const H = wallHeight.value;
+    // 房间盒子向内收一点(INSET)：在相邻房间、上下两排之间留出可见的走廊/隔墙缝；
+    // 仅相对各自质心收缩，房间中心位置与 6列×2排 的排布均不变。
+    const INSET = 0.06;
+    let icx = 0;
+    let icy = 0;
+    for (const p of poly) {
+      icx += p[0];
+      icy += p[1];
+    }
+    icx /= poly.length;
+    icy /= poly.length;
+    const ipoly = poly.map(
+      (p) => [icx + (p[0] - icx) * (1 - INSET), icy + (p[1] - icy) * (1 - INSET)] as [number, number],
+    );
+    // 对齐后多边形（法线/可见性判定须与 project 内部的 alignSource 一致）
+    const apoly = ipoly.map((p) => alignSource(p));
+    const acx = apoly.reduce((s, p) => s + p[0], 0) / apoly.length;
+    const acy = apoly.reduce((s, p) => s + p[1], 0) / apoly.length;
+    // 顶面（z=H，较亮）
+    const topPts = ipoly.map((p) => project(p[0], p[1], H));
+    const points = topPts.map((p) => `${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(' ');
+    // 可见侧墙：仅画「朝向观察者」的边（外法线 n 满足 n·v<0，v=(-SX,1) 为竖向深度方向）
+    const sides: Face[] = [];
+    const q = (p: [number, number]) => `${p[0].toFixed(1)},${p[1].toFixed(1)}`;
+    for (let i = 0; i < apoly.length; i++) {
+      const a = apoly[i]!;
+      const b = apoly[(i + 1) % apoly.length]!;
+      const dx = b[0] - a[0];
+      const dy = b[1] - a[1];
+      const len = Math.hypot(dx, dy);
+      if (len < 1e-6) continue;
+      let nx = dy / len;
+      let ny = -dx / len;
+      // 外法线：应指向房间外侧
+      const mx = (a[0] + b[0]) / 2;
+      const my = (a[1] + b[1]) / 2;
+      if (nx * (acx - mx) + ny * (acy - my) > 0) {
+        nx = -nx;
+        ny = -ny;
+      }
+      // 可见性：n·v < 0（v=(-SX,1)），背向观察者的边剔除，避免背面墙穿出盖住顶面
+      if (nx * -SX.value + ny * 1 >= 0) continue;
+      // 底面 z=0 → 顶面 z=H 的竖向侧壁 quad
+      const srcA = ipoly[i]!;
+      const srcB = ipoly[(i + 1) % ipoly.length]!;
+      const Pa0 = project(srcA[0], srcA[1], 0);
+      const Pb0 = project(srcB[0], srcB[1], 0);
+      const PaH = project(srcA[0], srcA[1], H);
+      const PbH = project(srcB[0], srcB[1], H);
+      // 前墙(法线偏 ±y)稍亮、侧墙(法线偏 ±x)更暗，强化长方体立体
+      const isFront = Math.abs(ny) >= Math.abs(nx);
+      const fill = isFront ? 'rgba(150,158,172,0.96)' : 'rgba(112,120,136,0.96)';
+      sides.push({ points: `${q(Pa0)} ${q(Pb0)} ${q(PbH)} ${q(PaH)}`, fill });
+    }
+    // 标签锚点：顶面质心（z=H），文字落在盒子顶面上
     const c: [number, number] =
-      base.length > 0
+      topPts.length > 0
         ? [
-            base.reduce((s, p) => s + p[0], 0) / base.length,
-            base.reduce((s, p) => s + p[1], 0) / base.length,
+            topPts.reduce((s, p) => s + p[0], 0) / topPts.length,
+            topPts.reduce((s, p) => s + p[1], 0) / topPts.length,
           ]
         : toScreen(room.centroid ?? [0, 0]);
     const baseLines = buildLabelLines(room);
     const startY = c[1] - ((baseLines.length - 1) * LINE_GAP) / 2;
-    const lines: LabelLine[] = baseLines.map((ln, i) => {
-      const y = startY + i * LINE_GAP;
-      return { ...ln, y };
-    });
+    const lines: LabelLine[] = baseLines.map((ln, i) => ({ ...ln, y: startY + i * LINE_GAP }));
     return {
       id: room.id,
       room,
       points,
-      fill: color,
-      stroke,
+      fill: '#ffffff',
+      stroke: '#c4cbd4',
       dimmed: room.selected === false,
+      sides,
       lines,
       labelX: c[0],
     };
-  }),
-);
+  });
+  // 由远及近排序：对齐质心 ay 升序（小 ay=远=先画），近处盒子盖住远处盒子，纵深成立
+  blocks.sort((p, q) => {
+    const cp = alignSource(centroidOf(p.room));
+    const cq = alignSource(centroidOf(q.room));
+    return cp[1] - cq[1];
+  });
+  return blocks;
+});
 
 /** 楼层外轮廓（预览模式绘制为虚线参照） */
 const outlinePath = computed<string>(() => {
@@ -1035,25 +1509,87 @@ function saveEdit(): void {
               </linearGradient>
             </defs>
             <g>
-            <!-- ① 地面(楼板) + ② 走廊：楼层外轮廓填充；房间在③层覆盖其上，自然得到「外轮廓减房间」的走廊区 -->
-            <path v-if="outlinePath" :d="outlinePath" fill="#eef1f5" stroke="#c4cbd4" stroke-width="1.5" pointer-events="none" />
-            <!-- ③ 房间平铺填充（z=0 地面，无侧面） -->
-            <g
+            <!-- 楼栋盒子（第 1 步）：整栋楼=一块躺下去的地板。先画朝观察者的侧墙(暗)，再画顶面地板(亮) -->
+            <template v-if="buildingBox">
+              <polygon
+                v-for="(s, si) in buildingBox.sides"
+                :key="'bbs' + si"
+                :points="s.points"
+                :fill="s.fill"
+                stroke="#9aa3b2"
+                stroke-width="0.5"
+                pointer-events="none"
+              />
+              <polygon :points="buildingBox.top" fill="#f4f7fb" stroke="#8a8a8a" stroke-width="1" pointer-events="none" />
+            </template>
+            <!-- 走廊带（第 2 步）：顶面上画出来的一条横向浅灰带子，无侧墙/无边框，仅作区域标记；与顶面同平面、画在顶面之上 -->
+            <polygon
+              v-if="renderStage >= 2 && corridorBand"
+              :points="corridorBand"
+              fill="#d8e0e9"
+              stroke="none"
+              pointer-events="none"
+            />
+            <!-- ③ 房间平铺色块（第 3 步）：每个房间=平铺在地板(BUILDING_H)上的彩色矩形，不做立体、不画侧墙；凹凸感由隔墙表达 -->
+            <template
+              v-if="renderStage >= 3"
+              v-for="rb in roomBlocks"
+              :key="rb.id"
+            >
+              <polygon :points="rb.topPoints" :fill="rb.topFill" :stroke="rb.stroke" stroke-width="1" pointer-events="none" />
+            </template>
+            <!-- ③b 房间之间的隔墙（第 5 步）：平铺房间之间抬升 0.5m 的矮墙，房间平、墙凸 → 凹凸感；先画暗色侧面再画亮色顶面 -->
+            <template
+              v-if="renderStage >= 3"
+              v-for="w in roomWalls"
+              :key="w.id"
+            >
+              <polygon v-for="(s, si) in w.sides" :key="'ws' + si" :points="s" fill="rgba(140,148,162,0.97)" :stroke="w.stroke" stroke-width="0.5" pointer-events="none" />
+              <polygon :points="w.top" fill="#cdd5df" :stroke="w.stroke" stroke-width="0.5" pointer-events="none" />
+            </template>
+            <!-- ⑥ 房间文字（第 4 步）：每个房间顶面正中心四行（号码最大加粗 / 名称 / 部门 / 两面积），水平绘制不倾斜；
+                 普通房间深色字、特殊房间白色字保证对比 -->
+            <g v-if="renderStage >= 4" class="fpv-labels" pointer-events="none">
+              <g v-for="rb in roomBlocks" :key="'L' + rb.id">
+                <text :x="rb.cx" :y="rb.yNumber" text-anchor="middle" :font-size="rb.sizeNumber" font-weight="700" :fill="rb.textColor" dominant-baseline="middle">{{ rb.number }}</text>
+                <text :x="rb.cx" :y="rb.yName" text-anchor="middle" :font-size="rb.sizeOther" :fill="rb.textColor" dominant-baseline="middle">{{ rb.name }}</text>
+                <text :x="rb.cx" :y="rb.yDept" text-anchor="middle" :font-size="rb.sizeOther" :fill="rb.textColor" dominant-baseline="middle">{{ rb.dept }}</text>
+                <text :x="rb.cx" :y="rb.yArea" text-anchor="middle" :font-size="rb.sizeOther" :fill="rb.textColor" dominant-baseline="middle">{{ rb.area }}</text>
+              </g>
+            </g>
+            <!-- ① 地面(楼板) + ② 走廊：保留给后续阶段（第 4 步起）；当前第 3 步楼板已由第 1 步盒顶面提供 -->
+            <path v-if="renderStage >= 5 && outlinePath" :d="outlinePath" fill="#eef1f5" stroke="#c4cbd4" stroke-width="1.5" pointer-events="none" />
+            <!-- ③ 房间盒子（第 5 步起显示，预留）：先画朝向观察者的可见侧墙(较暗)，再画顶面(较亮) -->
+            <template
+              v-if="renderStage >= 5"
               v-for="rf in roomFills"
               :key="rf.id"
-              class="fpv-room"
-              :opacity="rf.dimmed ? 0.18 : 1"
-              @click="onSelect(rf.room, $event)"
             >
-              <polygon
-                :points="rf.points"
-                :fill="rf.fill"
-                :stroke="rf.stroke"
-                stroke-width="1"
-              />
-            </g>
-            <!-- ④ 墙侧面（先画，仅作视觉，不拦截点击） -->
+              <g
+                class="fpv-room"
+                :opacity="rf.dimmed ? 0.18 : 1"
+                @click="onSelect(rf.room, $event)"
+              >
+                <polygon
+                  v-for="(s, si) in rf.sides"
+                  :key="'rs' + si"
+                  :points="s.points"
+                  :fill="s.fill"
+                  stroke="#9aa3b2"
+                  stroke-width="0.5"
+                  pointer-events="none"
+                />
+                <polygon
+                  :points="rf.points"
+                  :fill="rf.fill"
+                  :stroke="rf.stroke"
+                  stroke-width="1"
+                />
+              </g>
+            </template>
+            <!-- ④ 墙侧面（第 5 步起显示，预留，先画，仅作视觉，不拦截点击） -->
             <polygon
+              v-if="renderStage >= 5"
               v-for="(f, i) in wallSideFaces"
               :key="'s' + i"
               :points="f.points"
@@ -1061,8 +1597,9 @@ function saveEdit(): void {
               stroke="none"
               pointer-events="none"
             />
-            <!-- ⑤ 墙顶面（后画，盖在侧面上）：浅灰实心面，非白线，不拦截点击 -->
+            <!-- ⑤ 墙顶面（第 5 步起显示，预留，后画，盖在侧面上）：浅灰实心面，非白线，不拦截点击 -->
             <polygon
+              v-if="renderStage >= 5"
               v-for="(f, i) in wallTopFaces"
               :key="'t' + i"
               :points="f.points"
@@ -1071,8 +1608,8 @@ function saveEdit(): void {
               stroke-width="0.5"
               pointer-events="none"
             />
-            <!-- ⑥ 文字（最上层） -->
-            <g class="fpv-labels" pointer-events="none">
+            <!-- ⑥ 文字（第 5 步起显示，预留，最上层） -->
+            <g v-if="renderStage >= 5" class="fpv-labels" pointer-events="none">
               <template v-for="rf in roomFills" :key="'L' + rf.id">
                 <g v-for="(ln, i) in rf.lines" :key="i">
                   <text
@@ -1201,7 +1738,7 @@ function saveEdit(): void {
                 <el-checkbox v-model="alignToAxisEnabled" size="small">源对齐(转正为水平矩形)</el-checkbox>
               </div>
               <div class="fpv-tools__row">
-                <span class="fpv-tools__hint">左键拖拽平移图层；滚轮缩放。底面经源对齐转正为水平矩形，仅做俯视压缩保持直角；墙体竖直抬升形成长方体</span>
+                <span class="fpv-tools__hint">整栋楼「盒子」(亮顶面+连续暗色前墙) + 横向走廊带 + 12 个房间(普通统一浅蓝、少数特殊醒目色，平铺色块) + 房间之间 0.5m 抬升隔墙(灰，表达凹凸感：房间平、墙凸、走廊凹) + 每间正中心四行文字(号码/名称/部门/两面积)。颜色只区分「普通/特殊」，无深浅渐变。左键拖拽平移；滚轮缩放；纵向旋转可调俯视角。</span>
               </div>
               <div class="fpv-tools__row">
                 <el-button-group>
@@ -1260,25 +1797,86 @@ function saveEdit(): void {
               </linearGradient>
             </defs>
         <g>
-        <!-- ① 地面(楼板) + ② 走廊：楼层外轮廓填充；房间在③层覆盖其上，自然得到「外轮廓减房间」的走廊区 -->
-        <path v-if="outlinePath" :d="outlinePath" fill="#eef1f5" stroke="#c4cbd4" stroke-width="1.5" pointer-events="none" />
-        <!-- ③ 房间平铺填充（z=0 地面，无侧面） -->
-        <g
+        <!-- 楼栋盒子（第 1 步）：整栋楼=一块躺下去的地板。先画朝观察者的侧墙(暗)，再画顶面地板(亮) -->
+        <template v-if="buildingBox">
+          <polygon
+            v-for="(s, si) in buildingBox.sides"
+            :key="'bbs' + si"
+            :points="s.points"
+            :fill="s.fill"
+            stroke="#9aa3b2"
+            stroke-width="0.5"
+            pointer-events="none"
+          />
+          <polygon :points="buildingBox.top" fill="#f4f7fb" stroke="#8a8a8a" stroke-width="1" pointer-events="none" />
+        </template>
+        <!-- 走廊带（第 2 步）：顶面上画出来的一条横向浅灰带子，无侧墙/无边框；与顶面同平面、画在顶面之上 -->
+        <polygon
+          v-if="renderStage >= 2 && corridorBand"
+          :points="corridorBand"
+          fill="#d8e0e9"
+          stroke="none"
+          pointer-events="none"
+        />
+        <!-- ③ 房间平铺色块（第 3 步）：每个房间=平铺在地板(BUILDING_H)上的彩色矩形，不做立体、不画侧墙；凹凸感由隔墙表达 -->
+        <template
+          v-if="renderStage >= 3"
+          v-for="rb in roomBlocks"
+          :key="rb.id"
+        >
+          <polygon :points="rb.topPoints" :fill="rb.topFill" :stroke="rb.stroke" stroke-width="1" pointer-events="none" />
+        </template>
+        <!-- ③b 房间之间的隔墙（第 5 步）：平铺房间之间抬升 0.5m 的矮墙，房间平、墙凸 → 凹凸感 -->
+        <template
+          v-if="renderStage >= 3"
+          v-for="w in roomWalls"
+          :key="w.id"
+        >
+          <polygon v-for="(s, si) in w.sides" :key="'ws' + si" :points="s" fill="rgba(140,148,162,0.97)" :stroke="w.stroke" stroke-width="0.5" pointer-events="none" />
+          <polygon :points="w.top" fill="#cdd5df" :stroke="w.stroke" stroke-width="0.5" pointer-events="none" />
+        </template>
+        <!-- ⑥ 房间文字（第 4 步）：每个房间顶面正中心四行（号码最大加粗 / 名称 / 部门 / 两面积），水平不倾斜 -->
+        <g v-if="renderStage >= 4" class="fpv-labels" pointer-events="none">
+          <g v-for="rb in roomBlocks" :key="'L' + rb.id">
+            <text :x="rb.cx" :y="rb.yNumber" text-anchor="middle" :font-size="rb.sizeNumber" font-weight="700" :fill="rb.textColor" dominant-baseline="middle">{{ rb.number }}</text>
+            <text :x="rb.cx" :y="rb.yName" text-anchor="middle" :font-size="rb.sizeOther" :fill="rb.textColor" dominant-baseline="middle">{{ rb.name }}</text>
+            <text :x="rb.cx" :y="rb.yDept" text-anchor="middle" :font-size="rb.sizeOther" :fill="rb.textColor" dominant-baseline="middle">{{ rb.dept }}</text>
+            <text :x="rb.cx" :y="rb.yArea" text-anchor="middle" :font-size="rb.sizeOther" :fill="rb.textColor" dominant-baseline="middle">{{ rb.area }}</text>
+          </g>
+        </g>
+        <!-- ① 地面(楼板) + ② 走廊：保留给后续阶段（第 4 步起） -->
+        <path v-if="renderStage >= 5 && outlinePath" :d="outlinePath" fill="#eef1f5" stroke="#c4cbd4" stroke-width="1.5" pointer-events="none" />
+        <!-- ③ 房间盒子（第 5 步起显示，预留）：先画可见侧墙(较暗)，再画顶面(较亮) -->
+        <template
+          v-if="renderStage >= 5"
           v-for="rf in roomFills"
           :key="rf.id"
-          class="fpv-room"
-          :opacity="rf.dimmed ? 0.18 : 1"
-          @click="onSelect(rf.room, $event)"
-            >
-              <polygon
-                :points="rf.points"
-                :fill="rf.fill"
-                :stroke="rf.stroke"
-                stroke-width="1"
-              />
-            </g>
-        <!-- ④ 墙侧面（先画，仅作视觉，不拦截点击） -->
+        >
+          <g
+            class="fpv-room"
+            :opacity="rf.dimmed ? 0.18 : 1"
+            @click="onSelect(rf.room, $event)"
+          >
+            <polygon
+              v-for="(s, si) in rf.sides"
+              :key="'rs' + si"
+              :points="s.points"
+              :fill="s.fill"
+              stroke="#9aa3b2"
+              stroke-width="0.5"
+              pointer-events="none"
+            />
+            <polygon
+              :points="rf.points"
+              :fill="rf.fill"
+              :stroke="rf.stroke"
+              stroke-width="1"
+            />
+          </g>
+        </template>
+        <!-- ④ 墙侧面（第 5 步起显示，预留，先画，仅作视觉，不拦截点击） -->
         <polygon
+          v-if="renderStage >= 5"
           v-for="(f, i) in wallSideFaces"
           :key="'s' + i"
           :points="f.points"
@@ -1286,8 +1884,9 @@ function saveEdit(): void {
           stroke="none"
           pointer-events="none"
         />
-        <!-- ⑤ 墙顶面（后画，盖在侧面上）：浅灰实心面，非白线，不拦截点击 -->
+        <!-- ⑤ 墙顶面（第 5 步起显示，预留，后画，盖在侧面上）：浅灰实心面，非白线，不拦截点击 -->
         <polygon
+          v-if="renderStage >= 5"
           v-for="(f, i) in wallTopFaces"
           :key="'t' + i"
           :points="f.points"
@@ -1296,8 +1895,8 @@ function saveEdit(): void {
           stroke-width="0.5"
           pointer-events="none"
         />
-        <!-- ⑥ 文字（最上层） -->
-        <g class="fpv-labels" pointer-events="none">
+        <!-- ⑥ 文字（第 5 步起显示，预留，最上层） -->
+        <g v-if="renderStage >= 5" class="fpv-labels" pointer-events="none">
           <template v-for="rf in roomFills" :key="'L' + rf.id">
             <g v-for="(ln, i) in rf.lines" :key="i">
               <text

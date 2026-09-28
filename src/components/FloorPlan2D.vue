@@ -27,7 +27,7 @@
  * - 预览嵌入模式（embedded + preview）：不渲染 el-dialog，仅渲染 SVG stage，
  *   数据源为入库前候选（ParsedRoom[]），点击房间 emit('room-click') 交由导入向导编辑。
  */
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import { ElMessage } from 'element-plus';
 import { CircleCloseFilled, WarningFilled } from '@element-plus/icons-vue';
 import { useBuildingStore } from '../stores/building';
@@ -79,6 +79,9 @@ const zoom = ref(1);
 const panX = ref(0);
 const panY = ref(0);
 const stageRef = ref<HTMLElement | null>(null);
+/** 弹窗的直接定位祖先（.fpv-main，已设为 position:relative）。弹窗的 left/top 是相对它的，
+ *  故 onSelect / fitPopupInStage 都以它的包围盒为基准计算，避免「相对 stage 计算、却相对 viewport 渲染」的错位。 */
+const mainRef = ref<HTMLElement | null>(null);
 const MIN_ZOOM = 0.3;
 const MAX_ZOOM = 6;
 /** 墙体高度（米）：从墙线竖直拉伸出的墙体高度，由侧栏「墙高(米)」滑杆控制（默认 0.5m；滑杆可调 0.5~5m）。
@@ -1299,6 +1302,33 @@ const popMode = ref<'edit' | 'maint' | null>(null);
 /** 当前选中房间（弹窗数据来源）。直接由 onSelect 赋值（真实或合成 RoomLike），避免仅从 displayedRooms 派生导致合成房间无法被选中。 */
 const selectedRoom = ref<RoomLike | null>(null);
 
+/** 弹窗 DOM 引用，用于测量真实尺寸后夹取在舞台内（展开子面板后尺寸变化也能重新适配） */
+const popupEl = ref<HTMLElement | null>(null);
+
+/** 按弹窗真实尺寸，把它夹取在舞台可视范围内（防止展开子面板后按钮超出界面） */
+function fitPopupInStage(): void {
+  const stage = mainRef.value ?? stageRef.value;
+  const el = popupEl.value;
+  if (!stage || !el) return;
+  const r = stage.getBoundingClientRect();
+  const pr = el.getBoundingClientRect();
+  if (pr.width <= 0 || pr.height <= 0) return;
+  // 当前左上角相对舞台的偏移
+  let x = pr.left - r.left;
+  let y = pr.top - r.top;
+  const pad = 8;
+  // 右侧/底部溢出 → 向左/上回拉
+  if (pr.right > r.right) x -= pr.right - r.right + pad;
+  if (pr.bottom > r.bottom) y -= pr.bottom - r.bottom + pad;
+  // 左侧/顶部溢出 → 向右/下推入
+  if (pr.left < r.left) x += r.left - pr.left + pad;
+  if (pr.top < r.top) y += r.top - pr.top + pad;
+  // 最终夹取，保证整张卡片可见
+  x = Math.min(Math.max(x, pad), Math.max(pad, r.width - pr.width - pad));
+  y = Math.min(Math.max(y, pad), Math.max(pad, r.height - pr.height - pad));
+  popupPos.value = { x, y };
+}
+
 /** 选中房间缩略图：用房间自身轮廓生成一张「对应的图片」（无外部图片数据时也能稳定展示） */
 const roomThumb = computed<{ viewBox: string; points: string; fill: string } | null>(() => {
   const r = selectedRoom.value;
@@ -1352,6 +1382,9 @@ const roomInfoPairs = computed<{ label: string; value: string }[]>(() => {
 /** 选中房间变化时，同步加载其维护信息到表单 */
 watch(selectedRoom, (r) => loadMaint(r), { immediate: true });
 
+/** 展开 / 收起子面板（修改信息、维护房间信息）会改变弹窗高度，重新夹取位置避免超出界面 */
+watch(popMode, () => nextTick(fitPopupInStage));
+
 function onSelect(room: RoomLike, ev?: MouseEvent): void {
   if (props.embedded) {
     emit('room-click', room as ParsedRoom);
@@ -1369,24 +1402,27 @@ function onSelect(room: RoomLike, ev?: MouseEvent): void {
   selectedRoom.value = selectedId.value ? room : null;
   if (!selectedId.value) return;
   popMode.value = null;
-  const stage = stageRef.value;
+  const stage = mainRef.value ?? stageRef.value;
   if (!stage) return;
   const r = stage.getBoundingClientRect();
   let x: number;
   let y: number;
   if (ev) {
-    // 以点击点为锚，向右下偏移，避免遮挡房间
-    x = ev.clientX - r.left + 14;
-    y = ev.clientY - r.top + 14;
+    // 以点击点为锚：弹窗左上角贴在点击点（向右下展开）。坐标系相对 .fpv-main（弹窗的真实定位祖先），
+    // 与 :style 的 left/top 基准一致，避免「相对 stage 算、却相对 viewport 渲染」导致的错位。
+    // 展开子面板时再按真实尺寸夹取回可视范围内，保证「修改信息 / 维护房间信息」按钮不超出界面。
+    x = ev.clientX - r.left + 10;
+    y = ev.clientY - r.top + 10;
   } else {
     // 由房间列表等无坐标来源触发时，居中偏上
     x = r.width / 2 - 130;
     y = 24;
   }
-  // 夹取在舞台内，防止弹出卡片被裁切
+  // 先给一个初步夹取值，渲染后由 fitPopupInStage 按真实尺寸二次校正
   x = Math.min(Math.max(x, 8), Math.max(8, r.width - 268));
   y = Math.min(Math.max(y, 8), Math.max(8, r.height - 248));
   popupPos.value = { x, y };
+  nextTick(() => fitPopupInStage());
 }
 
 /** 该房间是否为真实入库房间（存在于 displayedRooms），决定后续是写 store 还是走本地覆盖 */
@@ -1540,7 +1576,7 @@ function saveEdit(): void {
           <el-button type="warning" plain @click="startFill">继续补填</el-button>
         </div>
 
-        <div class="fpv-main">
+        <div class="fpv-main" ref="mainRef">
           <div class="fpv-stage" ref="stageRef" @wheel.prevent="onWheel" @mousedown="onStageMouseDown" @mouseleave="onStageMouseLeave">
           <svg
             :viewBox="`0 0 ${VIEW_W} ${VIEW_H}`"
@@ -1686,6 +1722,7 @@ function saveEdit(): void {
 
           <div
             v-if="selectedRoom"
+            ref="popupEl"
             class="fpv-pop"
             :style="{ left: popupPos.x + 'px', top: popupPos.y + 'px' }"
             @mousedown.stop
@@ -1707,8 +1744,8 @@ function saveEdit(): void {
               </div>
             </div>
             <div class="fpv-pop__acts">
-              <el-button size="small" :type="popMode === 'edit' ? 'primary' : 'default'" @click="popMode = 'edit'">修改信息</el-button>
-              <el-button size="small" :type="popMode === 'maint' ? 'primary' : 'default'" @click="popMode = 'maint'">维护房间信息</el-button>
+              <el-button size="small" :type="popMode === 'edit' ? 'primary' : 'default'" @click="popMode = popMode === 'edit' ? null : 'edit'">修改信息</el-button>
+              <el-button size="small" :type="popMode === 'maint' ? 'primary' : 'default'" @click="popMode = popMode === 'maint' ? null : 'maint'">维护房间信息</el-button>
             </div>
             <div v-if="popMode === 'edit'" class="fpv-pop__form">
               <div class="fpv-edit__row"><label>房间号</label><el-input v-model="editRoom.code" size="small" /></div>
@@ -1719,6 +1756,7 @@ function saveEdit(): void {
               <div class="fpv-edit__row"><label>建筑面积</label><el-input v-model="editRoom.buildArea" size="small" type="number" /></div>
               <div class="fpv-info__actions">
                 <el-button type="primary" size="small" @click="saveEdit">保存</el-button>
+                <el-button size="small" @click="popMode = null">返回</el-button>
               </div>
               <div class="fpv-info__actions">
                 <el-button size="small" @click="setUseStatus('occupied')">使用中</el-button>
@@ -1736,6 +1774,7 @@ function saveEdit(): void {
               <div class="fpv-edit__row"><label>备注</label><el-input v-model="maintForm.note" size="small" type="textarea" :rows="2" /></div>
               <div class="fpv-info__actions">
                 <el-button type="primary" size="small" @click="saveMaint">保存维护信息</el-button>
+                <el-button size="small" @click="popMode = null">返回</el-button>
               </div>
             </div>
           </div>
@@ -2061,7 +2100,7 @@ function saveEdit(): void {
 .fpv-detail dt { color: #6b7280; }
 .fpv-detail dd { margin: 0; color: #111827; }
 .fpv-showall { margin-top: 8px; }
-.fpv-main { display: flex; gap: 12px; align-items: stretch; }
+.fpv-main { display: flex; gap: 12px; align-items: stretch; position: relative; }
 .fpv-stage { position: relative; flex: 1; border: 1px solid #e5e7eb; border-radius: 10px; overflow: hidden; background: linear-gradient(180deg, #8fc1ec 0%, #bfdcf4 55%, #eef6fc 100%); }
 .fpv-svg { display: block; width: 100%; height: 60vh; }
 .fpv-room { cursor: pointer; }

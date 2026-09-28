@@ -733,7 +733,9 @@ const roomBlocks = computed<RoomBlock[]>(() => {
 });
 
 /** 房间之间的「隔墙」（第 5 步，表达凹凸感）：平铺的房间色块之间，用一条抬升 WALL_H(0.5米) 的矮墙分隔。
- *  - 仅在内部绘制：每排房间之间 5 道纵向隔墙 + 上下两排与走廊之间各 1 道横向隔墙（共 12 道）；楼栋外圈已由第 1 步盒子提供，不重复。
+ *  - 内部隔墙：每排房间之间 5 道纵向隔墙 + 上下两排与走廊之间各 1 道横向隔墙（共 12 道）。
+ *  - 外圈隔墙（用户明确要求补齐）：最上(y=minY)/最下(y=maxY)两条横向外边 + 最左(x=minX)/最右(x=maxX)两条纵向外边，
+ *    使整栋楼四周都立起 0.5m 高的外墙，与内部隔墙同款（房间平、墙凸、走廊凹，凹凸感贯通全楼）。
  *  - 房间平铺、隔墙凸出 → 房间平、墙凸、走廊凹，凹凸感成立；墙是站在同一块地板上的连续矮墙（非悬浮）。
  *  - 投影 SX=0（顶面保持长方形）：纵向隔墙靠「顶面抬升 + 轻微右上位移(WALL_PX*0.5)」露出墙体侧面；横向隔墙靠纯竖直抬升露出前脸。 */
 const roomWalls = computed<WallBox[]>(() => {
@@ -775,6 +777,11 @@ const roomWalls = computed<WallBox[]>(() => {
   // 上下两排与走廊之间的横向隔墙（各 1 道）
   segs.push({ horiz: true, a: [minX, midY - half], b: [maxX, midY - half] });
   segs.push({ horiz: true, a: [minX, midY + half], b: [maxX, midY + half] });
+  // 外圈隔墙（补齐四周外墙）：最上 / 最下两条横向外边 + 最左 / 最右两条纵向外边，贯穿整栋楼
+  segs.push({ horiz: true, a: [minX, minY], b: [maxX, minY] }); // 最上横线
+  segs.push({ horiz: true, a: [minX, maxY], b: [maxX, maxY] }); // 最下横线
+  segs.push({ horiz: false, a: [minX, minY], b: [minX, maxY] }); // 最左竖线（外墙，贯穿全深）
+  segs.push({ horiz: false, a: [maxX, minY], b: [maxX, maxY] }); // 最右竖线（外墙，贯穿全深）
 
   const q = (p: [number, number]) => `${p[0].toFixed(1)},${p[1].toFixed(1)}`;
   const walls: WallBox[] = [];

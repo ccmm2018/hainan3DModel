@@ -1295,12 +1295,10 @@ const legend = computed(() => {
 
 // ---- 交互：仅点击选中弹出小卡片（已移除 hover tooltip，避免遮挡与误触）----
 const selectedId = ref<string | null>(null);
-/** 点击房间弹出的小卡片位置（stage 内像素坐标）与展开模式 */
-const popupPos = ref({ x: 0, y: 0 });
 const popMode = ref<'edit' | 'maint' | null>(null);
 
 /** 弹窗相对 .fpv-main 的锚点（点击点在 main 内的像素坐标）。弹窗从该锚点向左上展开，
- *  使点击点落在弹窗右下角附近 —— 即「在点击的左上角显示」，且因展开后统一夹取进舞台而保证整卡可见。 */
+ *  使点击点落在弹窗右下角附近 —— 即「在点击的左上角显示」。 */
 const popupAnchor = ref({ x: 0, y: 0 });
 
 /** 当前选中房间（弹窗数据来源）。直接由 onSelect 赋值（真实或合成 RoomLike），避免仅从 displayedRooms 派生导致合成房间无法被选中。 */
@@ -1309,24 +1307,50 @@ const selectedRoom = ref<RoomLike | null>(null);
 /** 弹窗 DOM 引用，用于测量真实尺寸后夹取在舞台内（展开子面板后尺寸变化也能重新适配） */
 const popupEl = ref<HTMLElement | null>(null);
 
-/** 按弹窗真实尺寸定位：期望弹窗右下角落在锚点(点击点)左上方一点，即向左上展开；
- *  随后夹取进舞台可视范围，保证整张卡片（含底部「修改信息/维护房间信息」按钮）始终可见、不超界。 */
+/** 弹窗的「未变换」基准左上角（相对 .fpv-main，pan=0、zoom=1 时）。
+ *  真正渲染位置由 popupPos 计算属性按当前 panX/panY/zoom 实时变换得到，
+ *  因此拖动 / 缩放 2.5D 图层时弹窗会跟随房间一起移动。 */
+const popupBase = ref({ x: 0, y: 0 });
+
+/** 缓存弹窗与舞台尺寸，避免在 pan 拖动过程中反复 getBoundingClientRect 造成卡顿。 */
+const popupSize = ref({ w: 260, h: 300 });
+const stageSize = ref({ w: 0, h: 0 });
+
+/** 弹窗最终屏幕位置：以 popupBase 为基准，叠加当前图层变换(pan+zoom)实时跟随房间；
+ *  并夹取进舞台可视范围，保证整张卡片（含底部「修改信息/维护房间信息」按钮）始终可见、不超界。 */
+const popupPos = computed(() => {
+  const { w, h } = popupSize.value;
+  const r = stageSize.value;
+  const pad = 8;
+  let x = popupBase.value.x * zoom.value + panX.value;
+  let y = popupBase.value.y * zoom.value + panY.value;
+  if (r.w > 0 && r.h > 0 && w > 0 && h > 0) {
+    x = Math.min(Math.max(x, pad), Math.max(pad, r.w - w - pad));
+    y = Math.min(Math.max(y, pad), Math.max(pad, r.h - h - pad));
+  }
+  return { x, y };
+});
+
+/** 把弹窗摆到「锚点向左上展开 + 夹取进舞台」的位置，并写回 popupBase（未变换坐标）。
+ *  在弹窗渲染后调用（nextTick）以拿到真实尺寸。 */
 function fitPopupInStage(): void {
-  const stage = mainRef.value ?? stageRef.value;
+  const main = mainRef.value ?? stageRef.value;
   const el = popupEl.value;
-  if (!stage || !el) return;
-  const r = stage.getBoundingClientRect();
+  if (!main || !el) return;
+  const r = main.getBoundingClientRect();
   const pr = el.getBoundingClientRect();
   if (pr.width <= 0 || pr.height <= 0) return;
+  popupSize.value = { w: pr.width, h: pr.height };
+  stageSize.value = { w: r.width, h: r.height };
   const pad = 8;
   const a = popupAnchor.value;
   // 期望：弹窗右下角在点击点左上方 (10,10)，整体向左上展开
-  let x = a.x - pr.width - 10;
-  let y = a.y - pr.height - 10;
-  // 夹取进舞台，溢出则贴边，保证整卡可见
-  x = Math.min(Math.max(x, pad), Math.max(pad, r.width - pr.width - pad));
-  y = Math.min(Math.max(y, pad), Math.max(pad, r.height - pr.height - pad));
-  popupPos.value = { x, y };
+  let sx = a.x - pr.width - 10;
+  let sy = a.y - pr.height - 10;
+  sx = Math.min(Math.max(sx, pad), Math.max(pad, r.width - pr.width - pad));
+  sy = Math.min(Math.max(sy, pad), Math.max(pad, r.height - pr.height - pad));
+  // 转回「未变换」基准坐标存储，使 popupPos 计算属性可随 pan/zoom 实时跟随
+  popupBase.value = { x: (sx - panX.value) / zoom.value, y: (sy - panY.value) / zoom.value };
 }
 
 /** 选中房间缩略图：用房间自身轮廓生成一张「对应的图片」（无外部图片数据时也能稳定展示） */
@@ -1412,8 +1436,11 @@ function onSelect(room: RoomLike, ev?: MouseEvent): void {
     // 由房间列表等无坐标来源触发时，以舞台中心为锚，居中显示
     popupAnchor.value = { x: r.width / 2, y: r.height / 2 };
   }
-  // 先给一个临时位置（锚点处），渲染后由 fitPopupInStage 按真实尺寸二次校正为「向左上展开 + 夹取进舞台」
-  popupPos.value = { x: popupAnchor.value.x, y: popupAnchor.value.y };
+  // 先给一个粗略未变换基准（向左上展开），渲染后由 fitPopupInStage 用真实尺寸二次校正
+  popupBase.value = {
+    x: (popupAnchor.value.x - 270) / zoom.value,
+    y: (popupAnchor.value.y - 300) / zoom.value,
+  };
   nextTick(() => fitPopupInStage());
 }
 

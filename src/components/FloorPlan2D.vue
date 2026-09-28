@@ -526,8 +526,7 @@ const fit = computed(() => {
   const outline =
     (props.embedded && props.preview ? props.preview.outline : currentFloor.value?.outline) ?? [];
   for (const pt of outline) {
-    consider(pt[0], pt[1], 0);
-    consider(pt[0], pt[1], BUILDING_H); // 楼栋盒子顶面（第 1 步）须纳入包围盒，避免被裁切
+    consider(pt[0], pt[1], BUILDING_H); // 楼板顶面（第 1 步地板）须纳入包围盒，避免被裁切
     consider(pt[0], pt[1], BUILDING_H + WALL_H); // 房间之间隔墙顶面（抬升 0.5m）亦须纳入，避免被裁切
   }
   for (const r of displayedRooms.value) {
@@ -548,9 +547,10 @@ const fit = computed(() => {
   return { scale, padX, padY };
 });
 
-/** 第 1 步：整栋楼「盒子」——一块躺下去的地板（零错切：顶面=长方形，前墙=连续整条）。
- *  顶面(z=BUILDING_H, 近白 #f4f7fb：模拟从斜上方俯视看进去的楼板) + 朝观察者的一整条前墙(z=0→BUILDING_H, 明显更暗的灰)。
- *  零错切下只有外法线指向 +y 的前墙可见；背墙剔除、左右侧墙投影退化不可见。
+/** 第 1 步（精简）：地板的「楼板顶面」——一块躺下去的长方形地板（零错切，顶面=水平长方形）。
+ *  仅保留顶面(z=BUILDING_H, 近白 #f4f7fb：从斜上方俯视看进去的楼板)，不再绘制整楼连续前墙。
+ *  理由：现在房间平铺在此楼板上、且房间四周已有 0.5m 抬升的隔墙(含最外圈外墙)勾出整栋楼轮廓，
+ *  再画一条 3m 高的整楼前墙会沦为「底部一大块灰色」、与内部矮墙风格冲突，故去掉。
  *  不画任何房间、走廊、文字。 */
 const buildingBox = computed<{ top: string; sides: Face[] } | null>(() => {
   const poly = outlinePoints.value;
@@ -559,39 +559,8 @@ const buildingBox = computed<{ top: string; sides: Face[] } | null>(() => {
   const P = (p: [number, number], z: number) => project(p[0], p[1], z);
   const q = (p: [number, number]) => `${p[0].toFixed(1)},${p[1].toFixed(1)}`;
   const top = poly.map((p) => q(P(p, H))).join(' ');
-  const apoly = poly.map((p) => alignSource(p));
-  const acx = apoly.reduce((s, p) => s + p[0], 0) / apoly.length;
-  const acy = apoly.reduce((s, p) => s + p[1], 0) / apoly.length;
+  // 不再生成侧面（前墙）多边形：楼板顶面即地板，外圈由 0.5m 隔墙勾勒。
   const sides: Face[] = [];
-  for (let i = 0; i < apoly.length; i++) {
-    const a = apoly[i]!;
-    const b = apoly[(i + 1) % apoly.length]!;
-    const dx = b[0] - a[0];
-    const dy = b[1] - a[1];
-    const len = Math.hypot(dx, dy);
-    if (len < 1e-6) continue;
-    let nx = dy / len;
-    let ny = -dx / len;
-    const mx = (a[0] + b[0]) / 2;
-    const my = (a[1] + b[1]) / 2;
-    // 外法线应指向房间外侧
-    if (nx * (acx - mx) + ny * (acy - my) > 0) {
-      nx = -nx;
-      ny = -ny;
-    }
-    // 可见性（零错切投影）：只有「外法线指向 +y（朝向观察者）」的墙才可见 = 前墙（连续一整条）；
-    // 背墙(-y)剔除，左右侧墙法线为 ±x（ny=0，且投影后宽度退化为 0、不可见）。
-    if (ny <= 0) continue;
-    const srcA = poly[i]!;
-    const srcB = poly[(i + 1) % poly.length]!;
-    const Pa0 = P(srcA, 0);
-    const Pb0 = P(srcB, 0);
-    const PaH = P(srcA, H);
-    const PbH = P(srcB, H);
-    // 前墙：比顶面明显更暗的灰，强化长方体厚度感（顶面为 #f4f7fb 近白）
-    const fill = 'rgba(128,136,150,0.98)';
-    sides.push({ points: `${q(Pa0)} ${q(Pb0)} ${q(PbH)} ${q(PaH)}`, fill });
-  }
   return { top, sides };
 });
 

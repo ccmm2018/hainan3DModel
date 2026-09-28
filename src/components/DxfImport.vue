@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /**
- * DxfImport：DXF 楼层平面图导入向导（7 步）。
- *   0 上传 → 1 校验 → 2 解析 → 3 预览确认 → 4 坐标配准 → 5 确认归属 → 6 完成
+ * DxfImport：DXF 楼层平面图导入（单页式，不再分步）。
+ *   上传 → 后台自动校验/解析/配准/匹配 → 结果清单（异常文件高亮） → 一键导入
  *
  * 步骤 1（上传）规范：
  *   - el-upload 拖拽，accept=".dxf"，多选批量；
@@ -15,7 +15,7 @@
  *   + 指纹回写 buildingDataMap + emit('imported', { buildingName, floorIds })，已按规范实现。
  *
  * 本向导严格执行 README「注意事项（必须遵守）」的 9 条硬约束，关键落点：
- *   [约束1] 步骤6 禁止自动绑定楼栋，必须人工点【确认绑定】；匹配"对不上"优先怀疑坐标系，不自动新建楼栋；
+ *   [约束1] 禁止自动绑定楼栋、绝不自动新建楼栋；归属由系统预选（强匹配/批量沿用/入口楼栋），最终以「导入」动作确认；
  *   [约束5] 步骤5 局部图纸必须经 AnchorPicker 配准（解出 transform）才可放行入库，禁止未配准局部坐标入库；
  *   [约束8] 步骤2/3 的编码/单位/坐标/字段自动推断结果均在界面明示并支持人工纠正；
  *   解析（步骤1→3）全部在 dxf.worker.ts 执行 [约束7]，主线程无 >100ms 同步解析。
@@ -56,8 +56,8 @@ const emit = defineEmits<{
 const store = useBuildingStore();
 
 // ---- 向导状态 ----
-const STEP_TITLES = ['上传', '校验', '解析', '预览确认', '坐标配准', '确认归属', '完成'] as const;
-const step = ref(0);
+// 步骤制导航已移除，改为「上传 → 结果清单 → 一键导入」单页式：
+// 校验/解析/配准/匹配在后台自动跑通，仅在文件有疑问（错误/需配准/需选楼栋）时高亮处理。
 
 const encoding = ref<string>('auto');
 /** 是否展开块参照（INSERT/ATTRIB）。默认 false：整体跳过块参照（家具/洁具/门窗等多为块，是噪音来源） */
@@ -71,13 +71,8 @@ const expandBlocks = ref<boolean>(false);
 const prefillBuilding = ref('');
 const prefillFloor = ref(1);
 
-/**
- * 步骤 6（确认归属）归属态。
- * 注意：禁止自动绑定 —— 即使强匹配已预选楼栋，也必须用户点【确认绑定】才生效；
- * 切换文件 / 离开步骤会清空。
- */
-const attributionConfirmed = ref(false);
-const manualPick = ref(false); // none 状态下是否展开「手动指定已有楼栋」选择框
+// 归属默认由系统按「强匹配 / 批量沿用 / 入口楼栋」预选，用户可在清单中直接修改；
+// 最终以「导入」动作确认（不再要求单独点【确认绑定】），但绝不自动新建楼栋。
 
 // ---- 步骤 7（入库）楼层号冲突处理 ----
 /**
@@ -129,7 +124,7 @@ watch(
 /**
  * 归属楼栋：用户选中的值优先；为空时取「默认候选」。
  * 默认候选 = 批量沿用楼栋（第二个文件起）优先，否则若强匹配命中则取该候选（首个文件）。
- * 该计算属性只读、不改写 item，避免 computed 内产生副作用；真正的写入发生在 confirmBind / onConfirm。
+ * 该计算属性只读、不改写 item，避免 computed 内产生副作用；真正的写入发生在 importOne / importAll（ensureAttribution）。
  */
 const attributionDefaultBld = computed(() => {
   if (prefillBuilding.value) return prefillBuilding.value; // 第二个文件起：沿用第一次选中的楼栋
@@ -160,14 +155,6 @@ const attributionStatus = computed<'strong' | 'weak' | 'none' | 'manual'>(() => 
 });
 
 const importedFloors = computed(() => store.floorsOf(effectiveBuildingName.value));
-
-/** 步骤 7 预览：当前所选（楼栋, 楼层）是否已存在（用于冲突提示） */
-const conflictFloor = computed<Floor | null>(() => {
-  const bld = effectiveBuildingName.value;
-  const flr = effectiveFloorNo.value;
-  if (!bld) return null;
-  return store.getFloor(bld, flr) ?? null;
-});
 
 // ---- 步骤 2 校验（C1–C6）：区分 error / warn / info，仅 error 阻断 ----
 const validation = computed<DxfValidation | null>(() => {
@@ -233,18 +220,9 @@ const utmCenterOffset = computed<number | null>(() => {
   return Math.hypot(co[0] - cf[0], co[1] - cf[1]);
 });
 
-const matchResult = computed<MatchResult | null>(() => {
-  const it = activeItem.value;
-  const p = it?.result;
-  if (!p || !p.floorOutline || it?.coordSource !== 'utm') return null;
-  const fpRaw = fingerprintFromOutline(p.floorOutline.polygon);
-  if (!fpRaw.centerUtm) return null;
-  return store.matchByFingerprint({
-    centerUtm: fpRaw.centerUtm,
-    area: fpRaw.footprintArea ?? 0,
-    azimuth: fpRaw.azimuth ?? 0,
-  });
-});
+const matchResult = computed<MatchResult | null>(() =>
+  activeItem.value ? matchResultOf(activeItem.value) : null,
+);
 
 function applyMatch() {
   const r = matchResult.value;
@@ -259,7 +237,6 @@ watch(
   () => props.modelValue,
   (open) => {
     if (open) {
-      step.value = 0;
       items.value = [];
       activeId.value = null;
       encoding.value = 'auto';
@@ -267,8 +244,6 @@ watch(
       // 批量沿用偏好也一并清空（每个会话从零开始）
       prefillBuilding.value = '';
       prefillFloor.value = 1;
-      attributionConfirmed.value = false;
-      manualPick.value = false;
       // 若从「某栋楼」入口打开（已带 defaultBuilding），且它已存在于楼栋表，
       // 则预选为归属楼栋，避免第 6 步还要手动找。
       if (props.defaultBuilding && store.buildingNames.includes(props.defaultBuilding)) {
@@ -523,7 +498,6 @@ const roomFieldStats = computed(() => {
 });
 
 /** 用户确认「提取结果无误」后才允许进入下一步 */
-const previewConfirmed = ref(false);
 const editingRoom = ref<ParsedRoom | null>(null);
 const drawerOpen = ref(false);
 
@@ -539,17 +513,9 @@ function toggleExclude(room: ParsedRoom, excluded: boolean): void {
   room.selected = !excluded;
 }
 
-// 离开步骤 4 / 切换激活文件时，清除预览确认状态（需重新确认）
-watch([step, activeId], ([s]) => {
-  if (s !== 3) previewConfirmed.value = false;
-  // 注意：归属确认态（attributionConfirmed）不在离开步骤时清空，仅在「切换文件」时清空
-  // （见下方 watch(activeId)），避免用户在步骤间往返时刚确认的绑定被意外抹掉、红色「未匹配」误报
-});
-watch(activeId, () => {
-  previewConfirmed.value = false;
-  attributionConfirmed.value = false;
-  manualPick.value = false;
-});
+// 切换激活文件时无需重置归属 / 预览：
+// 归属默认按系统预选值（强匹配 / 批量沿用 / 入口楼栋），用户手动改后才落进 item；
+// 预览房间的勾选状态存在 room.selected 上，跟随文件本身，不随切换清空。
 
 // ---- 步骤 3 解析结果摘要（extractRooms 输出 DxfParseResult） ----
 const parseResult = computed(() => activeItem.value?.result ?? null);
@@ -573,55 +539,98 @@ const bboxLabel = computed(() => {
   return `${w.toFixed(1)} × ${h.toFixed(1)}（源单位）`;
 });
 
-// ---- 向导导航 ----
-const canNext = computed(() => {
-  if (step.value === 0) return doneItems.value.length > 0;
-  // 步骤 2 校验：存在硬错误（仅 C1）则阻断前进
-  if (step.value === 1) return Boolean(activeItem.value?.result) && !validation.value?.hasError;
-  // 步骤 4 预览确认：必须用户显式确认提取结果无误
-  if (step.value === 3) return Boolean(activeItem.value?.result) && previewConfirmed.value;
-  // 步骤 5 坐标配准：local 必须完成手动配准（解出变换）；utm 自动匹配可继续
-  if (step.value === 4) {
-    const it = activeItem.value;
-    if (!it?.result) return false;
-    return effectiveCoordSource.value === 'local' ? Boolean(it.transform) : true;
-  }
-  // 步骤 6 确认归属：必经，禁止自动绑定 —— 必须点【确认绑定】
-  if (step.value === 5) return Boolean(activeItem.value?.attributionConfirmed);
-  return Boolean(activeItem.value?.result);
-});
+// ---- 单页式：每个文件的就绪状态（驱动「导入」按钮可用性与高亮） ----
+type Readiness = 'parsing' | 'error' | 'need-calib' | 'need-attr' | 'ready';
 
-function next(): void {
-  if (step.value < STEP_TITLES.length - 1) step.value += 1;
+/** 计算某文件的匹配结果（独立于 activeItem 的版本，供批量就绪判断） */
+function matchResultOf(it: UploadItem): MatchResult | null {
+  const p = it.result;
+  if (!p || !p.floorOutline || it.coordSource !== 'utm') return null;
+  const fpRaw = fingerprintFromOutline(p.floorOutline.polygon);
+  if (!fpRaw.centerUtm) return null;
+  return store.matchByFingerprint({
+    centerUtm: fpRaw.centerUtm,
+    area: fpRaw.footprintArea ?? 0,
+    azimuth: fpRaw.azimuth ?? 0,
+  });
 }
-function prev(): void {
-  if (step.value > 0) step.value -= 1;
+
+/** 计算某文件的归属楼栋（与 effectiveBuildingName 同口径，但作用于任意 item） */
+function buildingFor(it: UploadItem): string {
+  if (it.buildingName) return it.buildingName;
+  if (prefillBuilding.value) return prefillBuilding.value;
+  const mr = matchResultOf(it);
+  if (mr && mr.status === 'strong' && mr.candidates.length === 1) return mr.candidates[0];
+  return '';
+}
+function floorFor(it: UploadItem): number {
+  if (it.floorNo != null) return it.floorNo;
+  return prefillBuilding.value ? prefillFloor.value + 1 : 1;
+}
+
+/** 文件就绪判定：错误阻断 / 局部需配准 / 无楼栋需选 / 其余可直接导入 */
+function itemReadiness(it: UploadItem): Readiness {
+  if (!it.result || it.status !== 'done') return it.status === 'error' ? 'error' : 'parsing';
+  const v = validateDxf(it.result, { buffer: it.buffer, coordSourceOverride: it.coordSource });
+  if (v.hasError) return 'error';
+  if (it.coordSource === 'local' && !it.transform) return 'need-calib';
+  if (!buildingFor(it)) return 'need-attr';
+  return 'ready';
+}
+
+const readyItems = computed(() => items.value.filter((i) => itemReadiness(i) === 'ready'));
+
+/** 入库前补全归属（系统预选值落进 item），供 importOne / importAll 使用 */
+function ensureAttribution(it: UploadItem): void {
+  if (!it.buildingName) it.buildingName = buildingFor(it);
+  if (it.floorNo == null) it.floorNo = floorFor(it);
+}
+
+/** 单文件导入：冲突时弹框三选一 */
+function importOne(it: UploadItem): void {
+  ensureAttribution(it);
+  const bld = it.buildingName!;
+  const flr = it.floorNo!;
+  const existing = store.getFloor(bld, flr);
+  if (existing) {
+    conflictItem.value = it;
+    conflictExisting.value = existing;
+    conflictVisible.value = true;
+    return;
+  }
+  doImport(it, bld, flr, 1);
+}
+
+/** 一键导入全部可导入文件；冲突的留在列表单独处理 */
+function importAll(): void {
+  const ready = items.value.filter((i) => itemReadiness(i) === 'ready');
+  if (!ready.length) {
+    ElMessage.warning('当前没有可直接导入的文件，请先处理标有「需配准 / 需选楼栋 / 错误」的文件');
+    return;
+  }
+  let imported = 0;
+  let skipped = 0;
+  for (const it of ready) {
+    ensureAttribution(it);
+    const bld = it.buildingName!;
+    const flr = it.floorNo!;
+    const existing = store.getFloor(bld, flr);
+    if (existing) {
+      skipped++;
+      continue;
+    }
+    doImport(it, bld, flr, 1);
+    imported++;
+  }
+  if (skipped) {
+    ElMessage.info(`${skipped} 个文件与现有楼层冲突，已跳过，请单独点击「导入」处理`);
+  }
 }
 
 // ---- 步骤 6 确认归属：强/弱/无匹配 + 手动指定 + 新建（二次确认） ----
 /** 在候选单选列表中选中某楼栋 */
 function onPickCandidate(name: string): void {
   effectiveBuildingName.value = name;
-}
-
-/** 进入「手动指定已有楼栋」：展开选择框 */
-function focusSelect(): void {
-  manualPick.value = true;
-}
-
-/** 【确认绑定】—— 必经，禁止自动绑定；把当前选择落进 item，并标记已确认 */
-function confirmBind(): void {
-  const it = activeItem.value;
-  if (!it) return;
-  if (!effectiveBuildingName.value) {
-    ElMessage.warning('请先选择归属楼栋');
-    return;
-  }
-  it.buildingName = effectiveBuildingName.value;
-  it.floorNo = effectiveFloorNo.value;
-  it.attributionConfirmed = true;
-  attributionConfirmed.value = true;
-  ElMessage.success(`已确认归属：${effectiveBuildingName.value} ${effectiveFloorNo.value}F`);
 }
 
 /** 【新建楼栋】—— 二次确认，避免把「对不上」误当新楼 */
@@ -689,35 +698,10 @@ function doImport(it: UploadItem, bld: string, flr: number, version: number): vo
 function finishItem(it: UploadItem): void {
   items.value = items.value.filter((i) => i.id !== it.id);
   activeId.value = doneItems.value[0]?.id ?? null;
-  step.value = 0;
   if (items.value.length === 0) visible.value = false;
 }
 
-async function onConfirm(): Promise<void> {
-  const it = activeItem.value;
-  if (!it?.result || !it.buffer) {
-    ElMessage.warning('请先上传并解析 DXF 图纸');
-    return;
-  }
-  const bld = effectiveBuildingName.value;
-  const flr = effectiveFloorNo.value;
-  if (!bld) {
-    ElMessage.warning('请先确认归属楼栋');
-    return;
-  }
-  // 把归属选择落进 item（覆盖默认值），确保后续持久化/展示一致
-  it.buildingName = bld;
-  it.floorNo = flr;
-  // 楼层号冲突：同楼已存在该楼层（v1）→ 弹框三选一
-  const existing = store.getFloor(bld, flr);
-  if (existing) {
-    conflictItem.value = it;
-    conflictExisting.value = existing;
-    conflictVisible.value = true;
-    return;
-  }
-  doImport(it, bld, flr, 1);
-}
+// 单文件 / 批量入库逻辑见上方 importOne / importAll；冲突处理见 resolveConflict。
 
 /** 冲突弹框三选一：覆盖原图纸 / 另存为新版本 / 跳过 */
 async function resolveConflict(choice: 'overwrite' | 'newversion' | 'skip'): Promise<void> {
@@ -765,13 +749,9 @@ onBeforeUnmount(() => {
     width="680px"
     @close="clearAll"
   >
-    <el-steps :active="step" finish-status="success" align-center class="dxf-steps">
-      <el-step v-for="t in STEP_TITLES" :key="t" :title="t" />
-    </el-steps>
-
     <div class="dxf-body">
-      <!-- 步骤 0 上传 -->
-      <section v-if="step === 0" class="dxf-panel">
+      <!-- 上传区（始终可见） -->
+      <section class="dxf-panel dxf-panel--upload">
         <el-upload
           class="dxf-uploader"
           drag
@@ -789,11 +769,16 @@ onBeforeUnmount(() => {
         </el-upload>
 
         <div v-if="items.length" class="dxf-filelist">
-          <div v-for="item in items" :key="item.id" class="dxf-fileitem">
+          <div v-for="item in items" :key="item.id" class="dxf-fileitem" :class="{ 'is-active': item.id === activeId }" @click="activeId = item.id">
             <div class="dxf-fileitem__head">
               <span class="dxf-fileitem__name">{{ item.name }}</span>
               <el-tag :type="statusTagType(item.status)" size="small">{{ STATUS_TEXT[item.status] }}</el-tag>
-              <el-button link type="danger" size="small" @click="removeItem(item.id)">移除</el-button>
+              <el-tag v-if="itemReadiness(item) === 'ready'" type="success" size="small" effect="plain">可导入</el-tag>
+              <el-tag v-else-if="itemReadiness(item) === 'need-calib'" type="warning" size="small" effect="plain">需配准</el-tag>
+              <el-tag v-else-if="itemReadiness(item) === 'need-attr'" type="warning" size="small" effect="plain">需选楼栋</el-tag>
+              <el-tag v-else-if="itemReadiness(item) === 'error'" type="danger" size="small" effect="plain">错误</el-tag>
+              <el-button link type="primary" size="small" :disabled="itemReadiness(item) !== 'ready'" @click.stop="importOne(item)">导入</el-button>
+              <el-button link type="danger" size="small" @click.stop="removeItem(item.id)">移除</el-button>
             </div>
             <el-progress
               :percentage="statusOf(item)"
@@ -808,15 +793,15 @@ onBeforeUnmount(() => {
         </div>
 
         <div v-if="doneItems.length > 1" class="dxf-activepick">
-          <span class="dxf-label">当前处理：</span>
-          <el-select v-model="activeId" placeholder="选择要配准的文件" class="dxf-control">
+          <span class="dxf-label">当前查看：</span>
+          <el-select v-model="activeId" placeholder="选择要查看的文件" class="dxf-control">
             <el-option v-for="i in doneItems" :key="i.id" :label="i.name" :value="i.id" />
           </el-select>
         </div>
       </section>
 
-      <!-- 步骤 1 校验（C1–C6：区分 error 硬错误 / warn 软警告 / info 提示；仅 error 阻断） -->
-      <section v-else-if="step === 1 && activeItem?.result" class="dxf-panel">
+      <!-- 校验选项 + 校验结果（C1–C6：区分 error 硬错误 / warn 软警告 / info 提示；仅 error 阻断） -->
+      <section v-if="activeItem?.result" class="dxf-panel">
         <div class="dxf-row dxf-row--wrap">
           <label class="dxf-label">坐标来源</label>
           <el-radio-group :model-value="activeItem.coordSource" @change="onCoordSourceChange">
@@ -867,8 +852,8 @@ onBeforeUnmount(() => {
         </div>
       </section>
 
-      <!-- 步骤 3 解析（Worker 内 extractRooms 输出 DxfParseResult：warnings / bbox / coordSource / unit） -->
-      <section v-else-if="step === 2 && activeItem?.result" class="dxf-panel">
+      <!-- 解析结果摘要 + 解析告警 -->
+      <section v-if="activeItem?.result" class="dxf-panel">
         <!-- 解析结果摘要：rooms / unit / coordSource / bbox / layers -->
         <div class="dxf-parse-summary">
           <div class="dxf-parse-summary__title">解析结果（extractRooms 输出）</div>
@@ -942,8 +927,8 @@ onBeforeUnmount(() => {
         </div>
       </section>
 
-      <!-- 步骤 4 预览确认（用 FloorPlan2D 渲染提取结果；左侧清单剔除/补填，右侧 2.5D 预览） -->
-      <section v-else-if="step === 3 && activeItem?.result" class="dxf-panel dxf-panel--preview4">
+      <!-- 房间预览（左侧清单剔除/补填，右侧 2.5D 预览；不再强制勾选确认） -->
+      <section v-if="activeItem?.result" class="dxf-panel dxf-panel--preview4">
         <!-- 顶部统计 -->
         <div class="dxf-stat">
           <span>识别房间 <b>{{ roomFieldStats.N }}</b> 间</span>
@@ -984,11 +969,6 @@ onBeforeUnmount(() => {
             />
           </div>
         </div>
-
-        <!-- 确认门控：必须勾选后才允许进入下一步 -->
-        <el-checkbox v-model="previewConfirmed" class="dxf-confirm">
-          我已确认提取结果无误（已剔除的房间将不入库，字段已补填 / 核对）
-        </el-checkbox>
 
         <!-- 6 字段补填 / 修正抽屉 -->
         <el-drawer
@@ -1046,8 +1026,8 @@ onBeforeUnmount(() => {
         </el-drawer>
       </section>
 
-      <!-- 步骤 5 坐标配准 -->
-      <section v-else-if="step === 4 && activeItem?.result" class="dxf-panel">
+      <!-- 坐标配准（UTM 自动匹配 / 局部坐标手动配准） -->
+      <section v-if="activeItem?.result" class="dxf-panel">
         <!-- 局部坐标：手动配准（上节 AnchorPicker） -->
         <template v-if="effectiveCoordSource === 'local'">
           <el-alert
@@ -1147,27 +1127,17 @@ onBeforeUnmount(() => {
         </template>
       </section>
 
-      <!-- 步骤 6 确认归属（必经，不可跳过，禁止自动绑定） -->
-      <section v-else-if="step === 5 && activeItem?.result" class="dxf-panel">
-        <!-- 已确认绑定：优先展示成功态，覆盖未匹配的红色告警 -->
+      <!-- 确认归属（系统按强匹配 / 批量沿用 / 入口楼栋预选，可直接修改；以「导入」动作确认，绝不自动新建楼栋） -->
+      <section v-if="activeItem?.result" class="dxf-panel">
+        <!-- 匹配 / 归属状态提示 -->
         <el-alert
-          v-if="attributionConfirmed"
+          v-if="attributionStatus === 'strong' && matchResult?.candidates.length"
           class="dxf-preview"
           type="success"
           :closable="false"
-          :title="`已确认归属：${effectiveBuildingName} ${effectiveFloorNo}F`"
+          :title="`已自动匹配：${matchResult.candidates[0]}（相似度 ${matchResult.score ?? 0}%），可直接导入或在下方修改`"
         >
-          <template #default>{{ attributionStatus === 'none' ? '已手动指定楼栋并完成绑定' : '已采用系统匹配结果并完成绑定' }}（可点击下方「下一步」继续）</template>
-        </el-alert>
-        <!-- 匹配状态告警（未确认前展示） -->
-        <el-alert
-          v-else-if="attributionStatus === 'strong' && matchResult?.candidates.length"
-          class="dxf-preview"
-          type="success"
-          :closable="false"
-          :title="`已匹配：${matchResult.candidates[0]}（相似度 ${matchResult.score ?? 0}%）`"
-        >
-          <template #default>强匹配命中，请点击下方【确认绑定】完成归属（仍需手动确认，不会自动绑定）</template>
+          <template #default>强匹配命中，归属已预填，导入时按此落库</template>
         </el-alert>
         <el-alert
           v-else-if="attributionStatus === 'weak' && matchResult?.candidates.length"
@@ -1181,11 +1151,11 @@ onBeforeUnmount(() => {
           </template>
         </el-alert>
         <el-alert
-          v-else-if="attributionStatus === 'none' && !attributionConfirmed"
+          v-else-if="attributionStatus === 'none'"
           class="dxf-preview"
           type="error"
           :closable="false"
-          title="未匹配到楼栋"
+          title="未匹配到楼栋，请在下方选择归属（或与现有楼栋坐标对不上，可改用局部手动配准）"
         >
           <template #default>
             <div v-for="(rs, i) in (matchResult?.reasons ?? ['无匹配候选'])" :key="i" class="dxf-match__reason">{{ rs }}</div>
@@ -1207,14 +1177,8 @@ onBeforeUnmount(() => {
           </el-radio-group>
         </div>
 
-        <!-- none：按钮在前（手动指定已有楼栋 / 新建楼栋二次确认） -->
-        <div v-if="attributionStatus === 'none'" class="dxf-btns">
-          <el-button @click="focusSelect">手动指定已有楼栋</el-button>
-          <el-button type="primary" plain @click="createNewBuilding">新建楼栋</el-button>
-        </div>
-
-        <!-- 楼栋选择（核心控件，必须可筛选搜索） -->
-        <div v-show="attributionStatus !== 'none' || manualPick" class="dxf-attr">
+        <!-- 归属选择（核心控件，必须可筛选搜索；已按系统预选值，可随时修改） -->
+        <div class="dxf-attr">
           <div class="dxf-row dxf-row--wrap">
             <label class="dxf-label">楼栋（可搜索）</label>
             <el-select
@@ -1225,6 +1189,7 @@ onBeforeUnmount(() => {
             >
               <el-option v-for="b in store.buildingNames" :key="b" :label="b" :value="b" />
             </el-select>
+            <el-button type="primary" plain @click="createNewBuilding">新建楼栋</el-button>
           </div>
           <div class="dxf-row">
             <label class="dxf-label">楼层</label>
@@ -1240,13 +1205,10 @@ onBeforeUnmount(() => {
           批量模式：本文件默认沿用「{{ prefillBuilding }}」、楼层自动递增为 {{ floorDefaultNo }}F，可逐文件修改
         </div>
 
-        <!-- 确认绑定（必经，禁止自动绑定） -->
+        <!-- 当前归属预览（导入即按此落库） -->
         <div class="dxf-bind">
-          <el-button type="primary" :disabled="!effectiveBuildingName" @click="confirmBind">确认绑定</el-button>
-          <span v-if="attributionConfirmed" class="dxf-bind__ok">
-            ✓ 已绑定 {{ effectiveBuildingName }} {{ effectiveFloorNo }}F
-          </span>
-          <span v-else class="dxf-bind__tip">未确认绑定前无法进入下一步</span>
+          <span class="dxf-bind__ok">当前归属：{{ effectiveBuildingName || '未选择' }} {{ effectiveFloorNo }}F</span>
+          <span class="dxf-bind__tip">（点击「导入」即按此归属落库，可在上方随时修改）</span>
         </div>
 
         <div v-if="importedFloors.length" class="dxf-list">
@@ -1261,45 +1223,14 @@ onBeforeUnmount(() => {
         </div>
       </section>
 
-      <!-- 步骤 7 入库（确认归属 + 落库） -->
-      <section v-else-if="step === 6 && activeItem?.result" class="dxf-panel">
-        <el-result
-          icon="success"
-          title="待入库确认"
-          :sub-title="conflictFloor ? '该楼层已存在，点击「确认入库」将提示冲突处理' : '点击下方「确认入库」完成本次导入'"
-        >
-          <template #extra>
-            <div class="dxf-final">
-              <div>文件：{{ activeItem.name }}</div>
-              <div>归属：{{ effectiveBuildingName }} {{ effectiveFloorNo }}F</div>
-              <div>房间：{{ selectedCount }} / {{ activeItem.result.rooms.length }} 间</div>
-              <div>坐标来源：{{ activeItem.coordSource === 'utm' ? 'UTM 49N' : '局部坐标' }}</div>
-              <div v-if="activeItem.result.warnings.length" class="is-warn">
-                解析告警 {{ activeItem.result.warnings.length }} 条（将随楼层一并持久化）
-              </div>
-            </div>
-          </template>
-        </el-result>
-        <el-alert
-          v-if="conflictFloor"
-          class="dxf-preview"
-          type="warning"
-          :closable="false"
-          :title="`楼栋「${effectiveBuildingName}」已存在 ${effectiveFloorNo}F（${conflictFloor.status}，${conflictFloor.roomCount} 间），确认入库时会弹出「覆盖 / 另存新版本 / 跳过」选择`"
-        />
-      </section>
+      <div v-if="!activeItem?.result" class="dxf-empty">上传 DXF 文件后，这里会显示解析结果、坐标配准与归属信息</div>
     </div>
 
     <template #footer>
       <el-button @click="visible = false">取消</el-button>
-      <el-button v-if="step > 0" @click="prev">上一步</el-button>
-      <el-button
-        v-if="step < STEP_TITLES.length - 1"
-        type="primary"
-        :disabled="!canNext"
-        @click="next"
-      >下一步</el-button>
-      <el-button v-else type="primary" @click="onConfirm">确认入库</el-button>
+      <el-button type="primary" :disabled="readyItems.length === 0" @click="importAll">
+        一键导入全部（{{ readyItems.length }}）
+      </el-button>
     </template>
   </el-dialog>
 
@@ -1338,7 +1269,7 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .dxf-steps { margin-bottom: 18px; }
-.dxf-body { min-height: 280px; }
+.dxf-body { min-height: 280px; display: flex; flex-direction: column; gap: 14px; }
 .dxf-panel { display: flex; flex-direction: column; gap: 14px; }
 .dxf-row { display: flex; align-items: center; gap: 12px; }
 .dxf-row--col { flex-direction: column; align-items: stretch; gap: 8px; }
@@ -1608,4 +1539,16 @@ onBeforeUnmount(() => {
 .dxf-conflict p { font-size: 14px; color: #303133; line-height: 1.7; margin: 0 0 12px; }
 .dxf-conflict b { color: #111827; }
 .dxf-conflict__hint { font-size: 12px; color: #909399; margin: 12px 0 0; }
+
+/* 单页式布局：详情区块卡片化，上传区无边框 */
+.dxf-body > section.dxf-panel:not(.dxf-panel--upload) {
+  background: #fff;
+  border: 1px solid #ebeef5;
+  border-radius: 10px;
+  padding: 14px;
+}
+.dxf-panel--upload { background: transparent; border: none; padding: 0; }
+.dxf-fileitem { cursor: pointer; transition: border-color 0.15s, box-shadow 0.15s; }
+.dxf-fileitem.is-active { border-color: #409eff; box-shadow: 0 0 0 2px rgba(64, 158, 255, 0.12); }
+.dxf-empty { padding: 44px 12px; text-align: center; color: #9ca3af; font-size: 13px; }
 </style>

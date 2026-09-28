@@ -1299,13 +1299,18 @@ const selectedId = ref<string | null>(null);
 const popupPos = ref({ x: 0, y: 0 });
 const popMode = ref<'edit' | 'maint' | null>(null);
 
+/** 弹窗相对 .fpv-main 的锚点（点击点在 main 内的像素坐标）。弹窗从该锚点向左上展开，
+ *  使点击点落在弹窗右下角附近 —— 即「在点击的左上角显示」，且因展开后统一夹取进舞台而保证整卡可见。 */
+const popupAnchor = ref({ x: 0, y: 0 });
+
 /** 当前选中房间（弹窗数据来源）。直接由 onSelect 赋值（真实或合成 RoomLike），避免仅从 displayedRooms 派生导致合成房间无法被选中。 */
 const selectedRoom = ref<RoomLike | null>(null);
 
 /** 弹窗 DOM 引用，用于测量真实尺寸后夹取在舞台内（展开子面板后尺寸变化也能重新适配） */
 const popupEl = ref<HTMLElement | null>(null);
 
-/** 按弹窗真实尺寸，把它夹取在舞台可视范围内（防止展开子面板后按钮超出界面） */
+/** 按弹窗真实尺寸定位：期望弹窗右下角落在锚点(点击点)左上方一点，即向左上展开；
+ *  随后夹取进舞台可视范围，保证整张卡片（含底部「修改信息/维护房间信息」按钮）始终可见、不超界。 */
 function fitPopupInStage(): void {
   const stage = mainRef.value ?? stageRef.value;
   const el = popupEl.value;
@@ -1313,17 +1318,12 @@ function fitPopupInStage(): void {
   const r = stage.getBoundingClientRect();
   const pr = el.getBoundingClientRect();
   if (pr.width <= 0 || pr.height <= 0) return;
-  // 当前左上角相对舞台的偏移
-  let x = pr.left - r.left;
-  let y = pr.top - r.top;
   const pad = 8;
-  // 右侧/底部溢出 → 向左/上回拉
-  if (pr.right > r.right) x -= pr.right - r.right + pad;
-  if (pr.bottom > r.bottom) y -= pr.bottom - r.bottom + pad;
-  // 左侧/顶部溢出 → 向右/下推入
-  if (pr.left < r.left) x += r.left - pr.left + pad;
-  if (pr.top < r.top) y += r.top - pr.top + pad;
-  // 最终夹取，保证整张卡片可见
+  const a = popupAnchor.value;
+  // 期望：弹窗右下角在点击点左上方 (10,10)，整体向左上展开
+  let x = a.x - pr.width - 10;
+  let y = a.y - pr.height - 10;
+  // 夹取进舞台，溢出则贴边，保证整卡可见
   x = Math.min(Math.max(x, pad), Math.max(pad, r.width - pr.width - pad));
   y = Math.min(Math.max(y, pad), Math.max(pad, r.height - pr.height - pad));
   popupPos.value = { x, y };
@@ -1405,23 +1405,15 @@ function onSelect(room: RoomLike, ev?: MouseEvent): void {
   const stage = mainRef.value ?? stageRef.value;
   if (!stage) return;
   const r = stage.getBoundingClientRect();
-  let x: number;
-  let y: number;
   if (ev) {
-    // 以点击点为锚：弹窗左上角贴在点击点（向右下展开）。坐标系相对 .fpv-main（弹窗的真实定位祖先），
-    // 与 :style 的 left/top 基准一致，避免「相对 stage 算、却相对 viewport 渲染」导致的错位。
-    // 展开子面板时再按真实尺寸夹取回可视范围内，保证「修改信息 / 维护房间信息」按钮不超出界面。
-    x = ev.clientX - r.left + 10;
-    y = ev.clientY - r.top + 10;
+    // 记录点击点相对 .fpv-main 的坐标作为锚点；弹窗将向左上展开（点击点落在弹窗右下角附近）。
+    popupAnchor.value = { x: ev.clientX - r.left, y: ev.clientY - r.top };
   } else {
-    // 由房间列表等无坐标来源触发时，居中偏上
-    x = r.width / 2 - 130;
-    y = 24;
+    // 由房间列表等无坐标来源触发时，以舞台中心为锚，居中显示
+    popupAnchor.value = { x: r.width / 2, y: r.height / 2 };
   }
-  // 先给一个初步夹取值，渲染后由 fitPopupInStage 按真实尺寸二次校正
-  x = Math.min(Math.max(x, 8), Math.max(8, r.width - 268));
-  y = Math.min(Math.max(y, 8), Math.max(8, r.height - 248));
-  popupPos.value = { x, y };
+  // 先给一个临时位置（锚点处），渲染后由 fitPopupInStage 按真实尺寸二次校正为「向左上展开 + 夹取进舞台」
+  popupPos.value = { x: popupAnchor.value.x, y: popupAnchor.value.y };
   nextTick(() => fitPopupInStage());
 }
 

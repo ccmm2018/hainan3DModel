@@ -263,6 +263,11 @@ function saveMaint(): void {
   const f = currentFloor.value;
   const r = selectedRoom.value;
   if (!f || !r) return;
+  if (!isRealRoom(r)) {
+    // 合成预览房间不入库，仅给出提示，不写 store
+    ElMessage.info('当前为预览房间，维护信息未写入数据库');
+    return;
+  }
   store.updateRoom(f.id, r.id, {
     maintenance: {
       responsibleDept: maintForm.responsibleDept.trim() || undefined,
@@ -614,6 +619,9 @@ const ROOM_SAMPLE: { names: string[]; depts: string[]; areas: string[] } = {
   depts: ['侦查系', '刑技系', '治安系', '交管系', '网安系', '法化系'],
   areas: ['69.84㎡ / 108.25㎡', '74.30㎡ / 112.60㎡', '82.15㎡ / 120.40㎡', '58.90㎡ / 95.30㎡', '45.20㎡ / 71.10㎡', '63.75㎡ / 98.40㎡'],
 };
+/** 预览态（无真实入库房间）下，弹窗内对合成房间的本地覆盖（业务状态 / 隐藏等），保证交互可闭环；真实房间走 store。 */
+const synthOverrides = reactive<Record<string, Partial<RoomLike>>>({});
+
 const roomBlocks = computed<RoomBlock[]>(() => {
   const poly = outlinePoints.value;
   if (!poly || poly.length < 3) return [];
@@ -653,13 +661,7 @@ const roomBlocks = computed<RoomBlock[]>(() => {
       const t1 = P(x1, y0, zTop);
       const t2 = P(x1, y1, zTop);
       const t3 = P(x0, y1, zTop);
-      // 房间已改为平铺色块（不整体抬升），不再生成前墙侧壁；凹凸感由 roomWalls 隔墙表达。
-      const s0 = P(x0, y1, zBase);
-      const s1 = P(x1, y1, zBase);
-      const s2 = P(x1, y1, zTop);
-      const s3 = P(x0, y1, zTop);
       const topPoints = `${t0[0].toFixed(1)},${t0[1].toFixed(1)} ${t1[0].toFixed(1)},${t1[1].toFixed(1)} ${t2[0].toFixed(1)},${t2[1].toFixed(1)} ${t3[0].toFixed(1)},${t3[1].toFixed(1)}`;
-      const sidePoints = ''; // 平铺色块无侧壁
       const cx = (t0[0] + t1[0] + t2[0] + t3[0]) / 4;
       const cy = (t0[1] + t1[1] + t2[1] + t3[1]) / 4;
       const roomHpx = Math.abs(t0[1] - t3[1]); // 房间顶面屏幕竖向像素高度
@@ -668,19 +670,60 @@ const roomBlocks = computed<RoomBlock[]>(() => {
       const sizeNumber = Math.min(Math.max(gap * 0.95, 10), 16);
       const sizeOther = Math.min(Math.max(gap * 0.62, 7.5), 11);
       const top = cy - gap * 1.5;
+
+      const idx = bi * ROOM_COLS + c;
+      const real = displayedRooms.value[idx] ?? null;
       const sp = SPECIAL[`${bi}_${c}`];
       const isSpecial = !!sp;
-      const number = sp ? sp.number : `${band.prefix}${String(c + 1).padStart(2, '0')}`;
-      const name = sp ? sp.name : ROOM_SAMPLE.names[c]!;
-      const dept = sp ? sp.dept : ROOM_SAMPLE.depts[c]!;
-      const area = sp ? sp.area : ROOM_SAMPLE.areas[c]!;
+      const number = real?.code || (sp ? sp.number : `${band.prefix}${String(c + 1).padStart(2, '0')}`);
+      const name = real?.name || (sp ? sp.name : ROOM_SAMPLE.names[c]!);
+      const dept = real?.dept || (sp ? sp.dept : ROOM_SAMPLE.depts[c]!);
+      const area = real
+        ? `${real.useArea > 0 ? real.useArea.toFixed(2) : '—'}㎡ / ${real.buildArea > 0 ? real.buildArea.toFixed(2) : '—'}㎡`
+        : sp
+          ? sp.area
+          : ROOM_SAMPLE.areas[c]!;
+
+      // 该格子对应的房间对象：优先使用真实入库房间，否则合成一个占位 ParsedRoom 供弹窗展示/编辑
+      let room: RoomLike;
+      if (real) {
+        room = real;
+      } else {
+        const m = area.match(/([\d.]+)\s*㎡\s*\/\s*([\d.]+)\s*㎡/);
+        const base: ParsedRoom = {
+          id: `r${bi}_${c}`,
+          buildingName: props.buildingName ?? '',
+          floorNo: selectedFloor.value,
+          code: number,
+          number,
+          name,
+          dept,
+          usePurpose: '',
+          useArea: m ? parseFloat(m[1]) : 0,
+          buildArea: m ? parseFloat(m[2]) : 0,
+          polygon: [[x0, y0], [x1, y0], [x1, y1], [x0, y1]],
+          centroid: [(x0 + x1) / 2, (y0 + y1) / 2],
+          area: Math.abs((x1 - x0) * (y1 - y0)),
+          inspectStatus: 'normal',
+          useStatus: '' as UseStatus,
+          selected: true,
+          layers: [],
+          unmatchedTexts: [],
+        };
+        const ov = synthOverrides[base.id];
+        room = ov ? ({ ...base, ...ov } as ParsedRoom) : base;
+      }
+      // 隐藏（预览态剔除 / 真实态 store 已剔除）的房间不渲染格子
+      if ((room as ParsedRoom).selected === false) return;
+
       blocks.push({
-        id: `r${bi}_${c}`,
+        id: room.id,
+        room,
         topPoints,
-        sidePoints,
-        topFill: isSpecial ? sp.fill : NORMAL_TOP,
-        sideFill: isSpecial ? sp.side : NORMAL_SIDE,
-        stroke: isSpecial ? sp.stroke : NORMAL_STROKE,
+        sidePoints: '', // 平铺色块无侧壁
+        topFill: isSpecial ? sp!.fill : NORMAL_TOP,
+        sideFill: isSpecial ? sp!.side : NORMAL_SIDE,
+        stroke: isSpecial ? sp!.stroke : NORMAL_STROKE,
         cx,
         cy,
         number,
@@ -828,6 +871,8 @@ interface Face {
  *  带一条细分隔线(描边)表示墙；不做任何立体、不画侧墙（整栋楼只有第 1 步那一圈侧墙）。 */
 interface RoomBlock {
   id: string;
+  /** 该格子对应的房间数据（真实 Room / ParsedRoom，或预览合成的占位对象）；点击时交由弹窗展示与编辑 */
+  room: RoomLike;
   /** 顶面多边形（z=BUILDING_H+ROOM_THICK，亮色） */
   topPoints: string;
   /** 朝向观察者的前墙多边形（z=BUILDING_H→BUILDING_H+ROOM_THICK，同色深色版本） */
@@ -1249,7 +1294,8 @@ const selectedId = ref<string | null>(null);
 const popupPos = ref({ x: 0, y: 0 });
 const popMode = ref<'edit' | 'maint' | null>(null);
 
-const selectedRoom = computed(() => displayedRooms.value.find((r) => r.id === selectedId.value) ?? null);
+/** 当前选中房间（弹窗数据来源）。直接由 onSelect 赋值（真实或合成 RoomLike），避免仅从 displayedRooms 派生导致合成房间无法被选中。 */
+const selectedRoom = ref<RoomLike | null>(null);
 
 /** 选中房间缩略图：用房间自身轮廓生成一张「对应的图片」（无外部图片数据时也能稳定展示） */
 const roomThumb = computed<{ viewBox: string; points: string; fill: string } | null>(() => {
@@ -1318,6 +1364,7 @@ function onSelect(room: RoomLike, ev?: MouseEvent): void {
   }
   const isSame = selectedId.value === room.id;
   selectedId.value = isSame ? null : room.id;
+  selectedRoom.value = selectedId.value ? room : null;
   if (!selectedId.value) return;
   popMode.value = null;
   const stage = stageRef.value;
@@ -1340,16 +1387,33 @@ function onSelect(room: RoomLike, ev?: MouseEvent): void {
   popupPos.value = { x, y };
 }
 
+/** 该房间是否为真实入库房间（存在于 displayedRooms），决定后续是写 store 还是走本地覆盖 */
+function isRealRoom(r: RoomLike | null): boolean {
+  return !!r && displayedRooms.value.some((x) => x.id === r.id);
+}
+
 function setUseStatus(status: UseStatus): void {
-  const f = currentFloor.value;
-  if (!f || !selectedRoom.value) return;
-  store.setRoomUseStatus(f.id, selectedRoom.value.id, status);
+  const r = selectedRoom.value;
+  if (!r) return;
+  if (isRealRoom(r)) {
+    const f = currentFloor.value;
+    if (f) store.setRoomUseStatus(f.id, r.id, status);
+  } else {
+    // 合成预览房间：写入本地覆盖，弹窗即时反映
+    synthOverrides[r.id] = { ...(synthOverrides[r.id] ?? {}), useStatus: status } as Partial<RoomLike>;
+  }
 }
 function hideRoom(): void {
-  const f = currentFloor.value;
-  if (!f || !selectedRoom.value) return;
-  store.setRoomSelected(f.id, selectedRoom.value.id, false);
+  const r = selectedRoom.value;
+  if (!r) return;
+  if (isRealRoom(r)) {
+    const f = currentFloor.value;
+    if (f) store.setRoomSelected(f.id, r.id, false);
+  } else {
+    synthOverrides[r.id] = { ...(synthOverrides[r.id] ?? {}), selected: false } as Partial<RoomLike>;
+  }
   selectedId.value = null;
+  selectedRoom.value = null;
 }
 
 /** 预览模式下：剔除 / 恢复房间（直接改 preview.rooms 上的 selected） */
@@ -1506,13 +1570,21 @@ function saveEdit(): void {
               stroke="none"
               pointer-events="none"
             />
-            <!-- ③ 房间平铺色块（第 3 步）：每个房间=平铺在地板(BUILDING_H)上的彩色矩形，不做立体、不画侧墙；凹凸感由隔墙表达 -->
+            <!-- ③ 房间平铺色块（第 3 步）：每个房间=平铺在地板(BUILDING_H)上的彩色矩形，不做立体、不画侧墙；凹凸感由隔墙表达。
+                 整块可点击：点击触发 onSelect 打开房间信息弹窗（真实或合成房间均可）。 -->
             <template
               v-if="renderStage >= 3"
               v-for="rb in roomBlocks"
               :key="rb.id"
             >
-              <polygon :points="rb.topPoints" :fill="rb.topFill" :stroke="rb.stroke" stroke-width="1" pointer-events="none" />
+              <g
+                class="fpv-room"
+                :class="{ 'fpv-room--sel': rb.id === selectedId }"
+                @click="onSelect(rb.room, $event)"
+                style="cursor: pointer"
+              >
+                <polygon :points="rb.topPoints" :fill="rb.topFill" :stroke="rb.stroke" stroke-width="1" />
+              </g>
             </template>
             <!-- ③b 房间之间的隔墙（第 5 步）：平铺房间之间抬升 0.5m 的矮墙，房间平、墙凸 → 凹凸感；先画暗色侧面再画亮色顶面 -->
             <template
@@ -1794,13 +1866,20 @@ function saveEdit(): void {
           stroke="none"
           pointer-events="none"
         />
-        <!-- ③ 房间平铺色块（第 3 步）：每个房间=平铺在地板(BUILDING_H)上的彩色矩形，不做立体、不画侧墙；凹凸感由隔墙表达 -->
+        <!-- ③ 房间平铺色块（第 3 步）：每个房间=平铺在地板上的彩色矩形；整块可点击触发 onSelect（嵌入预览模式 emit room-click） -->
         <template
           v-if="renderStage >= 3"
           v-for="rb in roomBlocks"
           :key="rb.id"
         >
-          <polygon :points="rb.topPoints" :fill="rb.topFill" :stroke="rb.stroke" stroke-width="1" pointer-events="none" />
+          <g
+            class="fpv-room"
+            :class="{ 'fpv-room--sel': rb.id === selectedId }"
+            @click="onSelect(rb.room, $event)"
+            style="cursor: pointer"
+          >
+            <polygon :points="rb.topPoints" :fill="rb.topFill" :stroke="rb.stroke" stroke-width="1" />
+          </g>
         </template>
         <!-- ③b 房间之间的隔墙（第 5 步）：平铺房间之间抬升 0.5m 的矮墙，房间平、墙凸 → 凹凸感 -->
         <template
@@ -1977,6 +2056,7 @@ function saveEdit(): void {
 .fpv-stage { position: relative; flex: 1; border: 1px solid #e5e7eb; border-radius: 10px; overflow: hidden; background: linear-gradient(180deg, #8fc1ec 0%, #bfdcf4 55%, #eef6fc 100%); }
 .fpv-svg { display: block; width: 100%; height: 60vh; }
 .fpv-room { cursor: pointer; }
+.fpv-room--sel polygon { stroke: #1f6feb; stroke-width: 2.5; }
 .fpv-tip { line-height: 1.6; }
 .fpv-tip__no { font-weight: 700; margin-bottom: 2px; }
 .fpv-tip__row { font-size: 12px; white-space: nowrap; }

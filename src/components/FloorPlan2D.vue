@@ -797,8 +797,12 @@ const roomWalls = computed<WallBox[]>(() => {
   // 外圈隔墙（补齐四周外墙）：最上 / 最下两条横向外边 + 最左 / 最右两条纵向外边，贯穿整栋楼
   segs.push({ horiz: true, a: [minX, minY], b: [maxX, minY] }); // 最上横线
   segs.push({ horiz: true, a: [minX, maxY], b: [maxX, maxY] }); // 最下横线
-  segs.push({ horiz: false, a: [minX, minY], b: [minX, maxY] }); // 最左竖线（外墙，贯穿全深）
-  segs.push({ horiz: false, a: [maxX, minY], b: [maxX, maxY] }); // 最右竖线（外墙，贯穿全深）
+  // 最左 / 最右竖线（外墙）：拆成「上排段 + 下排段」两段，中间留出走廊缺口（midY±half），
+  // 避免外墙把上下两排在走廊处直接连起来（走廊两端应保持通透、不被横向外墙封堵）。
+  segs.push({ horiz: false, a: [minX, minY], b: [minX, midY - half] }); // 最左·上排段
+  segs.push({ horiz: false, a: [minX, midY + half], b: [minX, maxY] }); // 最左·下排段
+  segs.push({ horiz: false, a: [maxX, minY], b: [maxX, midY - half] }); // 最右·上排段
+  segs.push({ horiz: false, a: [maxX, midY + half], b: [maxX, maxY] }); // 最右·下排段
 
   const q = (p: [number, number]) => `${p[0].toFixed(1)},${p[1].toFixed(1)}`;
   const walls: WallBox[] = [];

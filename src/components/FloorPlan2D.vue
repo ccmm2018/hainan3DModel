@@ -167,8 +167,12 @@ function resetView(): void {
 const isDragging = ref(false);
 const dragMoved = ref(false);
 let dragStart = { x: 0, y: 0, panX: 0, panY: 0 };
+let downOnRoom = false;
 function onStageMouseDown(e: MouseEvent): void {
   if (e.button !== 0) return;
+  const t = e.target as Element | null;
+  // 记录按下点是否落在某个房间上：落在房间上的点击由 onSelect 处理（保留/切换弹窗），不要在此处关闭
+  downOnRoom = !!(t && t.closest && t.closest('.fpv-room'));
   isDragging.value = true;
   dragMoved.value = false;
   dragStart = { x: e.clientX, y: e.clientY, panX: panX.value, panY: panY.value };
@@ -183,8 +187,16 @@ function onStageMouseMove(e: MouseEvent): void {
   panX.value = dragStart.panX + dx;
   panY.value = dragStart.panY + dy;
 }
-function onStageMouseUp(): void {
+function onStageMouseUp(e?: MouseEvent): void {
   isDragging.value = false;
+  // 在「未拖动」的前提下，点击空白处（非房间、非弹窗）即关闭已打开的房间弹窗；
+  // 点击房间由 onSelect 处理，点击/操作弹窗内部由 @mouseup.stop 拦截，都不会走到这里。
+  const t = e && (e.target as Element | null);
+  const onPop = !!(t && t.closest && t.closest('.fpv-pop'));
+  if (!dragMoved.value && !downOnRoom && !onPop && selectedRoom.value) {
+    closePop();
+  }
+  downOnRoom = false;
 }
 function onStageMouseLeave(): void {
   isDragging.value = false;
@@ -1749,6 +1761,7 @@ function saveEdit(): void {
             class="fpv-pop"
             :style="{ left: popupPos.x + 'px', top: popupPos.y + 'px' }"
             @mousedown.stop
+            @mouseup.stop
           >
             <div class="fpv-pop__hd">
               <span class="fpv-pop__title">{{ selectedRoom.code || selectedRoom.name || '未命名房间' }}</span>

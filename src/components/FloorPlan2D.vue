@@ -243,6 +243,8 @@ const floorSummary = computed(() =>
 function selectFloor(n: number): void {
   selectedFloor.value = n;
   selectedId.value = null;
+  selectedRoom.value = null;
+  popMode.value = null;
   fillMode.value = false;
 }
 
@@ -1416,6 +1418,13 @@ function hideRoom(): void {
   selectedRoom.value = null;
 }
 
+/** 关闭房间弹窗（同时清空选中 id 与房间对象，确保 v-if="selectedRoom" 失效）。 */
+function closePop(): void {
+  selectedId.value = null;
+  selectedRoom.value = null;
+  popMode.value = null;
+}
+
 /** 预览模式下：剔除 / 恢复房间（直接改 preview.rooms 上的 selected） */
 function previewToggleSelected(room: ParsedRoom, selected: boolean): void {
   if (!props.preview) return;
@@ -1683,7 +1692,7 @@ function saveEdit(): void {
           >
             <div class="fpv-pop__hd">
               <span class="fpv-pop__title">{{ selectedRoom.code || selectedRoom.name || '未命名房间' }}</span>
-              <button class="fpv-pop__x" type="button" @click="selectedId = null">×</button>
+              <button class="fpv-pop__x" type="button" @click="closePop">×</button>
             </div>
             <div v-if="roomThumb" class="fpv-pop__img">
               <svg :viewBox="roomThumb.viewBox" preserveAspectRatio="xMidYMid meet">

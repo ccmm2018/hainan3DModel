@@ -398,15 +398,16 @@ export class MapScene {
         // WebGL1 下「NPOT 尺寸贴图 + mipmap」会被驱动直接丢弃，导致部分建筑材质渲染失败（黑色/空白），
         // 观感即「材质丢失」。主动降级为「无 mipmap + 线性过滤 + 边缘钳制」使其可正常显示（WebGL2 跳过）。
         const npotFixed = this.makeTexturesWebGL1Safe(this.modelRoot);
-        // GLB 文件本身存在「渲染后近全黑」的占位/损坏立面贴图（导出/烘焙失败所致），
-        // 这些贴图会让对应楼栋渲染成黑墙、观感即「材质丢失」。无法凭空还原真实立面，
-        // 这里在加载后将「解码均亮度过低的贴图」自动替换为程序化生成的建筑立面纹理。
-        const blackFixed = this.fixBlackTextures(this.modelRoot);
+        // GLB 文件本身存在「渲染后纯黑」的损坏立面贴图（导出/烘焙失败所致），会让对应楼栋渲染成黑墙，
+        // 观感即「材质丢失」。离线逐张解码已实证共 6 张（mean≈0/std≈0），加载后做启发式检测并替换为
+        // 程序化立面纹理。此一类修复经用户确认有效（「墙面发黑问题已修复」），不再做其它运行时材质改写，
+        // 以免误伤楼栋原本正常的材质/屋顶/地面。
+        const materialFixed = this.fixMaterialTextures(this.modelRoot);
         const caps = this.renderer?.capabilities;
         // eslint-disable-next-line no-console
         console.info(
           `[MapScene] GLB 加载完成：isWebGL2=${caps?.isWebGL2 ?? '?'}，MAX_TEXTURE_SIZE=${caps?.maxTextureSize ?? '?'}，` +
-            `超限缩放=${clampedCount} 张，NPOT 材质降级=${npotFixed} 张，黑图替换=${blackFixed} 张`,
+            `超限缩放=${clampedCount} 张，NPOT 材质降级=${npotFixed} 张，黑图替换=${materialFixed} 张`,
         );
 
         this.markDirty();
@@ -523,9 +524,11 @@ export class MapScene {
           const w = img?.width ?? 0;
           const h = img?.height ?? 0;
           const isPOT = w > 0 && h > 0 && (w & (w - 1)) === 0 && (h & (h - 1)) === 0;
-          const allClamp =
-            tex.wrapS === THREE.ClampToEdgeWrapping && tex.wrapT === THREE.ClampToEdgeWrapping;
-          if (isPOT && allClamp) continue;
+          // WebGL1 仅对「非 2 的幂(NPOT)」纹理必须降级：NPOT + mipmap 在 WebGL1 下非法，会被驱动丢弃。
+          // 但 POT 纹理（无论 wrap 是 Repeat 还是 Clamp）在 WebGL1 中均完全合法，必须原样保留——
+          // 否则会破坏本用于平铺(Repeat)的立面贴图：强制 ClampToEdge 后墙面只采样到贴图边缘像素，
+          // 整面渲染成纯色，观感即「材质丢失」。
+          if (isPOT) continue;
           tex.generateMipmaps = false;
           tex.minFilter = THREE.LinearFilter;
           tex.wrapS = THREE.ClampToEdgeWrapping;
@@ -539,19 +542,25 @@ export class MapScene {
   }
 
   /**
-   * GLB 文件本身存在「渲染后近全黑」的占位/损坏立面贴图（导出或贴图烘焙失败所致），
-   * 这些贴图会让对应楼栋渲染成黑墙，观感即「材质丢失 / 整栋没材质」。无法凭空还原真实立面照片，
-   * 因此在加载完成后，把「解码均亮度过低」的 baseColor 贴图自动替换为程序化生成的建筑立面纹理，
-   * 让这些楼从「黑盒子」变成正常的墙+窗格外观。
+   * GLB 文件本身存在「渲染后纯黑」的损坏立面贴图（导出或贴图烘焙失败所致，其像素几乎
+   * 完全一致、方差≈0），会让对应楼栋渲染成黑墙，观感即「材质丢失」。无法凭空还原真实立面
+   * 照片，因此在加载完成后，把「整体偏暗且方差极小（均匀黑占位图）」的 baseColor 贴图
+   * 自动替换为程序化生成的建筑立面纹理（墙+窗格），让这些楼从「黑盒子」变成正常的墙+窗格外观。
+   *
+   * 判据刻意使用「方差极小」而非「平均亮/暗」或「贴图尺寸」：
+   *  - 偏暗但带真实立面细节的合法贴图（例如食堂深色立面，std 很大）不会被误判；
+   *  - 模型里大量 16×16 的小贴图（太阳能板、屋顶、女儿墙、沥青地面等）虽小但属合法材质，
+   *    绝不以「尺寸」作为判定，避免把正常楼栋/屋顶/地面的材质误改。
+   * 仅此「均匀黑」一类会被启发式替换，其余材质一律原样保留。
    *
    * 仅在浏览器环境（存在 document / canvas）下生效，不依赖任何外部图片资源。
-   * @returns 被替换的材质数量（供诊断日志确认是否命中该根因）
+   * @returns 被替换的贴图数量（供诊断日志确认是否命中该根因）
    */
-  private fixBlackTextures(root: THREE.Object3D): number {
+  private fixMaterialTextures(root: THREE.Object3D): number {
     if (typeof document === 'undefined') return 0; // 非浏览器环境（如测试）跳过
     const sampler = document.createElement('canvas');
-    sampler.width = 16;
-    sampler.height = 16;
+    sampler.width = 32;
+    sampler.height = 32;
     const sctx = sampler.getContext('2d', { willReadFrequently: true });
     if (!sctx) return 0;
 
@@ -570,7 +579,24 @@ export class MapScene {
       return t;
     };
 
+    // 采样 32×32 算出灰度均值与标准差；仅「均值低且方差极小（均匀黑）」判定为损坏占位图。
+    const analyze = (data: Uint8ClampedArray): { mean: number; std: number } => {
+      const n = data.length / 4;
+      let sum = 0;
+      for (let i = 0; i < data.length; i += 4) {
+        sum += 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+      }
+      const mean = sum / n;
+      let varSum = 0;
+      for (let i = 0; i < data.length; i += 4) {
+        const l = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+        varSum += (l - mean) * (l - mean);
+      }
+      return { mean, std: Math.sqrt(varSum / n) };
+    };
+
     let replaced = 0;
+    const done = new Set<THREE.Texture>();
     root.traverse((child) => {
       const mesh = child as THREE.Mesh;
       if (!mesh.isMesh) return;
@@ -578,21 +604,19 @@ export class MapScene {
       for (const m of mats) {
         const mat = m as THREE.MeshStandardMaterial;
         if (!mat || !mat.map) continue;
+        if (done.has(mat.map)) continue; // 同一纹理只处理一次（材质在楼栋间共享）
         const img = mat.map.image as CanvasImageSource | undefined;
         if (!img) continue;
         try {
-          sctx.clearRect(0, 0, 16, 16);
-          sctx.drawImage(img, 0, 0, 16, 16);
-          const data = sctx.getImageData(0, 0, 16, 16).data;
-          let sum = 0;
-          for (let i = 0; i < data.length; i += 4) {
-            sum += 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
-          }
-          const mean = sum / (data.length / 4);
-          if (mean < 16) {
-            // 近全黑 → 替换为程序化立面纹理
+          sctx.clearRect(0, 0, 32, 32);
+          sctx.drawImage(img, 0, 0, 32, 32);
+          const data = sctx.getImageData(0, 0, 32, 32).data;
+          const { mean, std } = analyze(data);
+          // 仅「均匀黑占位图」：均值低且方差极小（无色差/细节）。真实但偏深的合法贴图放行。
+          if (mean < 40 && std < 16) {
             mat.map = facadeFor(mat.map);
             mat.needsUpdate = true;
+            done.add(mat.map);
             replaced++;
           }
         } catch {

@@ -289,10 +289,14 @@ export class MapScene {
     this.scene = new THREE.Scene();
     this.camera = new THREE.PerspectiveCamera(60, width / height, 1, 1 << 30);
 
-    // 色调映射：glTF 的 PBR 材质在线性工作流下需经 ACES 色调映射才能正确呈现，
-    // 否则高光/中间调易被截断，观感上像「材质丢失 / 发灰发暗」。
-    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.0;
+    // 色调映射：
+    // - WebGL2 下保留 ACESFilmic：配合 IBL 环境贴图，PBR 质感真实。
+    // - WebGL1（高德 GLCustomLayer 多数环境）下 PMREM/IBL 必然失败，场景无任何环境光，
+    //   若再用 ACES 会把 LDR 立面贴图整体压暗、去饱和，观感即「材质丢失 / 发灰」。
+    //   故 WebGL1 改用 LinearToneMapping（不压暗），保留贴图原始色，材质清晰可见。
+    const isWebGL2 = !!this.renderer?.capabilities?.isWebGL2;
+    this.renderer.toneMapping = isWebGL2 ? THREE.ACESFilmicToneMapping : THREE.LinearToneMapping;
+    this.renderer.toneMappingExposure = isWebGL2 ? 1.0 : 1.12;
 
     // 环境贴图（IBL）：PBR 材质需要环境光照才能呈现正确质感（尤其是金属度/粗糙度与边缘反射）。
     // 缺少 scene.environment 时，很多外立面材质会因为没有环境反射而显得「发灰、发暗、像没贴图」，
@@ -316,13 +320,26 @@ export class MapScene {
 
   private setupLights(): void {
     if (!this.scene) return;
-    const hemi = new THREE.HemisphereLight('#ffffff', '#334', 1.6);
+    // 环境光：保证背光面/底面也有基础照明，避免模型在深色地图底图上糊成一片暗灰
+    // （高德 GLCustomLayer 给的是 WebGL1 上下文，PMREM 环境贴图（IBL）往往无法生成，
+    //  不能依赖 scene.environment，故以「环境光 + 主光 + 补光」构成稳定的三档照明）。
+    const amb = new THREE.AmbientLight('#ffffff', 0.7);
+    this.scene.add(amb);
+
+    const hemi = new THREE.HemisphereLight('#ffffff', '#5a6472', 1.1);
     this.scene.add(hemi);
 
-    const dir = new THREE.DirectionalLight('#ffffff', 2.2);
+    // 主光（带阴影）
+    const dir = new THREE.DirectionalLight('#ffffff', 2.0);
     dir.position.set(-200, 400, 150);
     dir.castShadow = true;
     this.scene.add(dir);
+
+    // 补光：从主光对侧打一盏弱光，照亮背光面，使材质细节（贴图、纹理）清晰可辨
+    const fill = new THREE.DirectionalLight('#dfe7f0', 0.9);
+    fill.position.set(220, 180, -160);
+    fill.castShadow = false;
+    this.scene.add(fill);
   }
 
   // -------------------------------------------------------------------------
@@ -374,6 +391,20 @@ export class MapScene {
         this.placeModelAtAnchor();
         this.scene!.add(this.modelRoot);
 
+        // WebGL1（高德 GLCustomLayer 提供）对单张贴图尺寸有 MAX_TEXTURE_SIZE 上限，
+        // 超过上限的 JPEG 会上传失败、对应材质回退成白色/灰色平面，表现为「材质丢失」。
+        // 这里把所有超尺寸贴图等比缩到上限以内（仅重绘到 canvas，不改原始 GLB 文件）。
+        const clampedCount = this.clampTexturesToMaxSize(this.modelRoot);
+        // WebGL1 下「NPOT 尺寸贴图 + mipmap」会被驱动直接丢弃，导致部分建筑材质渲染失败（黑色/空白），
+        // 观感即「材质丢失」。主动降级为「无 mipmap + 线性过滤 + 边缘钳制」使其可正常显示（WebGL2 跳过）。
+        const npotFixed = this.makeTexturesWebGL1Safe(this.modelRoot);
+        const caps = this.renderer?.capabilities;
+        // eslint-disable-next-line no-console
+        console.info(
+          `[MapScene] GLB 加载完成：isWebGL2=${caps?.isWebGL2 ?? '?'}，MAX_TEXTURE_SIZE=${caps?.maxTextureSize ?? '?'}，` +
+            `超限缩放=${clampedCount} 张，NPOT 材质降级=${npotFixed} 张`,
+        );
+
         this.markDirty();
         this.callbacks.onModelReady?.();
       },
@@ -386,6 +417,121 @@ export class MapScene {
         this.callbacks.onModelError?.(err);
       },
     );
+  }
+
+  /**
+   * 把模型里超过 WebGL 上下文 MAX_TEXTURE_SIZE 上限的贴图等比缩放到上限以内。
+   * 高德 GLCustomLayer 在多数环境下提供的是 WebGL1 上下文，其单张贴图尺寸上限
+   * （常见 4096 或更低）可能小于建模软件导出的大贴图；超限的贴图上传会失败，
+   * 对应材质退化为白色/灰色平面，观感即「材质丢失」。
+   * 仅在浏览器环境（存在 document）下生效，缩放通过离屏 canvas 重绘实现，不改原始模型文件。
+   * @returns 被缩放的贴图数量（用于诊断「是否因超限导致材质丢失」）
+   */
+  private clampTexturesToMaxSize(root: THREE.Object3D): number {
+    const maxSize = this.renderer?.capabilities?.maxTextureSize ?? 4096;
+    if (typeof document === 'undefined') return 0; // 非浏览器环境（如测试）跳过
+    const seen = new Set<THREE.Texture>();
+    let clamped = 0;
+    root.traverse((child) => {
+      const mesh = child as THREE.Mesh;
+      if (!mesh.isMesh) return;
+      const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+      for (const m of mats) {
+        const mat = m as THREE.MeshStandardMaterial;
+        const maps: Array<THREE.Texture | null | undefined> = [
+          mat.map,
+          mat.roughnessMap,
+          mat.metalnessMap,
+          mat.normalMap,
+          mat.emissiveMap,
+          mat.aoMap,
+          mat.alphaMap,
+        ];
+        for (const tex of maps) {
+          if (!tex || seen.has(tex)) continue;
+          seen.add(tex);
+          const img = tex.image as { width?: number; height?: number } | undefined;
+          if (!img || !img.width || !img.height) continue;
+          const longest = Math.max(img.width, img.height);
+          if (longest <= maxSize) continue;
+          const scale = maxSize / longest;
+          const w = Math.max(1, Math.round(img.width * scale));
+          const h = Math.max(1, Math.round(img.height * scale));
+          const canvas = document.createElement('canvas');
+          canvas.width = w;
+          canvas.height = h;
+          const ctx = canvas.getContext('2d');
+          if (!ctx) continue;
+          try {
+            ctx.drawImage(img as CanvasImageSource, 0, 0, w, h);
+          } catch {
+            continue; // 极少数 ImageBitmap/跨域情况下 drawImage 可能抛错，保留原贴图
+          }
+          tex.image = canvas;
+          tex.needsUpdate = true;
+          clamped++;
+        }
+      }
+    });
+    return clamped;
+  }
+
+  /**
+   * 让模型所有贴图在 WebGL1 下可安全渲染（修复「部分建筑材质丢失」）。
+   *
+   * 根因：高德 GLCustomLayer 多数环境给的是 **WebGL1** 上下文。GLTFLoader 默认给贴图开启
+   * `generateMipmaps=true` + 三线性过滤，而 WebGL1 规范**不支持「非 2 的幂(NPOT)尺寸纹理 + mipmap」**——
+   * 这类纹理会被驱动直接丢弃，对应材质渲染成黑色/空白，观感即「建筑材质丢失」（仅部分贴图为 NPOT，
+   * 故表现为「某些」而非「全部」建筑）。
+   *
+   * 处理：WebGL1 下统一降级为「关闭 mipmap + minFilter 退为 LinearFilter + wrap 退为 ClampToEdgeWrapping」，
+   * 这是 WebGL1 对 NPOT 纹理唯一合法的渲染方式（代价是远处略有锯齿，但材质能正常显示）。
+   * WebGL2 原生支持 NPOT + mipmap，直接跳过以保留画质。
+   * @returns 被降级的贴图数量（供诊断日志确认是否命中该根因）
+   */
+  private makeTexturesWebGL1Safe(root: THREE.Object3D): number {
+    const caps = this.renderer?.capabilities;
+    if (!caps || caps.isWebGL2) return 0; // WebGL2 原生支持 NPOT，无需降级
+    const seen = new Set<THREE.Texture>();
+    let fixed = 0;
+    root.traverse((child) => {
+      const mesh = child as THREE.Mesh;
+      if (!mesh.isMesh) return;
+      const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+      for (const m of mats) {
+        const mat = m as THREE.MeshStandardMaterial;
+        const maps: Array<THREE.Texture | null | undefined> = [
+          mat.map,
+          mat.roughnessMap,
+          mat.metalnessMap,
+          mat.normalMap,
+          mat.emissiveMap,
+          mat.aoMap,
+          mat.alphaMap,
+        ];
+        for (const tex of maps) {
+          if (!tex || seen.has(tex)) continue;
+          seen.add(tex);
+          // 仅对「非 2 的幂(NPOT) 尺寸」或「非边缘钳制」的纹理降级：
+          // WebGL1 下 POT + ClampToEdge 的纹理原生支持 mipmap，应保留以保证远处画质；
+          // 只有 clampTexturesToMaxSize 产生的 NPOT 贴图或异常 wrap 模式才需降级。
+          const img = tex.image as { width?: number; height?: number } | undefined;
+          const w = img?.width ?? 0;
+          const h = img?.height ?? 0;
+          const isPOT = w > 0 && h > 0 && (w & (w - 1)) === 0 && (h & (h - 1)) === 0;
+          const allClamp =
+            tex.wrapS === THREE.ClampToEdgeWrapping && tex.wrapT === THREE.ClampToEdgeWrapping;
+          if (isPOT && allClamp) continue;
+          tex.generateMipmaps = false;
+          tex.minFilter = THREE.LinearFilter;
+          tex.wrapS = THREE.ClampToEdgeWrapping;
+          tex.wrapT = THREE.ClampToEdgeWrapping;
+          tex.needsUpdate = true;
+          fixed++;
+        }
+      }
+    });
+    return fixed;
   }
 
   /**

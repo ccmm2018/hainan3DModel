@@ -195,7 +195,9 @@ export const DEFAULT_SCENE_CONFIG: SceneConfig = {
   // 具体的「可点击 / 可选中」范围由 buildingNodeNames 单独控制（数字 0–25 才是建筑）。
   modelNodeFilter: {
     mode: 'exclude',
-    patterns: ['roof', 'parapet', 'door', 'pergola', 'rig', 'empty', 'camtarget', 'profile'],
+    // 不再隐藏 'roof' / 'rig'：它们对应的 RoofShed_Rig（雨棚/屋顶棚）是「顶棚」网格对象，
+    // 之前被误隐藏导致「凡含顶棚的网格对象都丢失」。现仅隐藏纯装饰/辅助几何（女儿墙/门/廊架/空物体/相机靶/轮廓）。
+    patterns: ['parapet', 'door', 'pergola', 'empty', 'camtarget', 'profile'],
   },
   // 可点击 / 可选中的建筑节点白名单（点击只显示这些节点的数字编号，其余不可点击）
   buildingNodeNames: Array.from({ length: 26 }, (_, i) => String(i)),

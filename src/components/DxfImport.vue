@@ -24,19 +24,18 @@ import { computed, markRaw, onBeforeUnmount, reactive, ref, watch } from 'vue';
 import { ElMessage, ElMessageBox, type UploadFile, type UploadRawFile } from 'element-plus';
 import { useBuildingStore } from '../stores/building';
 import AnchorPicker from './AnchorPicker.vue';
-import FloorPlan2D from './FloorPlan2D.vue';
-import FootprintOverlay from './FootprintOverlay.vue';
 import { isRoomFieldComplete } from '../utils/roomFields';
 import {
   decodeDxf,
   fingerprintFromOutline,
+  unitToScale,
   OVERLAP_DEVIATION_THRESHOLD,
   polygonAreaDiffRatio,
 } from '../utils/coordinate';
 import { polygonCentroid, type Pt } from '../utils/geometry';
 import { parseDxfToResult } from '../utils/dxfParser';
 import { validateDxf, type DxfValidation } from '../utils/dxfValidate';
-import type { BuildingFingerprint, CoordSource, DxfParseResult, Floor, FloorTransform, ParsedRoom } from '../types/cad';
+import type { CoordSource, DxfParseResult, Floor, FloorTransform, ParsedRoom } from '../types/cad';
 import type { MatchResult } from '../utils/matcher';
 
 const props = withDefaults(
@@ -63,6 +62,11 @@ const encoding = ref<string>('auto');
 /** 是否展开块参照（INSERT/ATTRIB）。默认 false：整体跳过块参照（家具/洁具/门窗等多为块，是噪音来源） */
 const expandBlocks = ref<boolean>(false);
 
+/** 是否展开「高级选项」（编码/坐标来源/块参照 手动纠正，默认隐藏，识别有误时才需） */
+const showAdvanced = ref(false);
+/** 是否展开「修改归属」（楼栋/楼层 手动选择，默认隐藏，系统已自动推断并预填） */
+const showAttrEdit = ref(false);
+
 /**
  * 批量上传的「沿用 / 自动递增」偏好：
  * - prefillBuilding：第一次确认归属时选中的楼栋；之后的文件默认沿用它。
@@ -70,6 +74,10 @@ const expandBlocks = ref<boolean>(false);
  */
 const prefillBuilding = ref('');
 const prefillFloor = ref(1);
+/** 入口已指定楼栋（如从某栋楼点击进入）：锁定归属，不在向导内重复选择楼栋 */
+const buildingLocked = computed(
+  () => !!props.defaultBuilding && store.buildingNames.includes(props.defaultBuilding),
+);
 
 // 归属默认由系统按「强匹配 / 批量沿用 / 入口楼栋」预选，用户可在清单中直接修改；
 // 最终以「导入」动作确认（不再要求单独点【确认绑定】），但绝不自动新建楼栋。
@@ -193,12 +201,6 @@ const overlayTargetBuilding = computed(() => matchResult.value?.candidates[0] ??
 const overlayFootprint = computed<[number, number][] | null>(() => {
   const fp = store.buildingFingerprint(overlayTargetBuilding.value).outline;
   return (fp as [number, number][] | undefined) ?? null;
-});
-/** 来自「楼层外轮廓线」自动算得的楼栋指纹 */
-const computedFingerprint = computed<BuildingFingerprint>(() => {
-  const o = floorOutlineLocal.value;
-  if (!o || o.length < 3) return {};
-  return fingerprintFromOutline(o as Pt[]);
 });
 /** 解析外轮廓 vs footprint 的面积偏差（0~1） */
 const utmDeviation = computed<number | null>(() => {
@@ -405,6 +407,14 @@ async function parseFile(item: UploadItem, file: File): Promise<void> {
     });
     item.result = markRaw(result);
     item.coordSource = result.coordSource;
+    autoFillRooms(item);
+    if (!item.result.rooms.length) {
+      ElMessageBox.alert(
+        `「${file.name}」未解析出任何房间轮廓。请确认 DXF 含闭合的「内部结构内墙线」图层后重新上传。`,
+        '未识别到房间',
+        { type: 'warning' },
+      );
+    }
     item.status = 'done';
   } catch (err) {
     item.status = 'error';
@@ -539,6 +549,39 @@ const bboxLabel = computed(() => {
   return `${w.toFixed(1)} × ${h.toFixed(1)}（源单位）`;
 });
 
+/** 编码的友好展示：默认自动识别，无需用户关心 */
+const encodingLabel = computed(() => {
+  const e = encoding.value;
+  if (e === 'auto') return '自动识别（UTF-8 / GBK）';
+  if (e === 'utf-8') return 'UTF-8';
+  if (e === 'gb2312') return 'GB2312';
+  return e.toUpperCase();
+});
+
+// 以上 coordLabel / bboxLabel / encodingLabel / unitLabel 仅用于已隐藏的技术明细，
+// 普通用户无需查看，故不在界面展示（保留计算以备高级模式追溯）。
+
+
+/** 是否必须让用户手动选楼栋：系统未能自动推断（无强/弱匹配、无入口楼栋、无批量沿用） */
+const needAttrChoice = computed(() => {
+  const it = activeItem.value;
+  return !it || !buildingFor(it);
+});
+
+/** 房间字段自动补填：几何面积回填到使用/建筑面积，编号与编码互填，减少用户手动补填负担 */
+function autoFillRooms(item: UploadItem): void {
+  const r = item.result;
+  if (!r) return;
+  const s = unitToScale(r.unit);
+  const sqm = (a: number) => Math.round(a * s * s * 10) / 10;
+  for (const room of r.rooms) {
+    if (room.useArea == null || Number.isNaN(room.useArea as number)) room.useArea = sqm(room.area);
+    if (room.buildArea == null || Number.isNaN(room.buildArea as number)) room.buildArea = room.useArea;
+    if (!room.number && room.code) room.number = room.code;
+    if (!room.code && room.number) room.code = room.number;
+  }
+}
+
 // ---- 单页式：每个文件的就绪状态（驱动「导入」按钮可用性与高亮） ----
 type Readiness = 'parsing' | 'error' | 'need-calib' | 'need-attr' | 'ready';
 
@@ -573,6 +616,7 @@ function itemReadiness(it: UploadItem): Readiness {
   if (!it.result || it.status !== 'done') return it.status === 'error' ? 'error' : 'parsing';
   const v = validateDxf(it.result, { buffer: it.buffer, coordSourceOverride: it.coordSource });
   if (v.hasError) return 'error';
+  if (!it.result.rooms.length) return 'error';
   if (it.coordSource === 'local' && !it.transform) return 'need-calib';
   if (!buildingFor(it)) return 'need-attr';
   return 'ready';
@@ -800,415 +844,162 @@ onBeforeUnmount(() => {
         </div>
       </section>
 
-      <!-- 校验选项 + 校验结果（C1–C6：区分 error 硬错误 / warn 软警告 / info 提示；仅 error 阻断） -->
+      <!-- 自动识别结果（编码/单位/坐标来源/块参照 内部自动判断，用户无需关心；识别有误才点开「高级」手动纠正） -->
       <section v-if="activeItem?.result" class="dxf-panel">
-        <div class="dxf-row dxf-row--wrap">
-          <label class="dxf-label">坐标来源</label>
-          <el-radio-group :model-value="activeItem.coordSource" @change="onCoordSourceChange">
-            <el-radio value="local">局部坐标</el-radio>
-            <el-radio value="utm">UTM 49N</el-radio>
-          </el-radio-group>
-          <span class="dxf-tip">识别单位：{{ activeItem.result.unit === 'mm' ? '毫米' : activeItem.result.unit === 'm' ? '米' : '未知' }}</span>
+        <div class="dxf-autodetect">
+          <div class="dxf-autodetect__title">已自动识别（无需手动设置）</div>
+          <div class="dxf-autodetect__line">
+            系统已自动识别文件，共找到 <b>{{ activeItem.result.rooms.length }}</b> 个房间，无需手动设置参数。
+          </div>
+
+          <div class="dxf-autofill">
+            <template v-if="roomFieldStats.Y > 0">
+              已自动补全 <b>{{ roomFieldStats.X }}</b> 间房的面积/字段，<b>{{ roomFieldStats.Y }}</b> 间缺少文本标注（可直接导入，之后在房间列表中补填，不影响落库）。
+            </template>
+            <template v-else>房间字段已识别完整，可直接导入。</template>
+          </div>
+
+          <el-button text type="primary" size="small" class="dxf-advanced-toggle" @click="showAdvanced = !showAdvanced">
+            {{ showAdvanced ? '收起高级选项' : '识别有误？手动调整' }}
+          </el-button>
+
+          <div v-if="showAdvanced" class="dxf-advanced">
+            <div class="dxf-row dxf-row--wrap">
+              <label class="dxf-label">坐标来源</label>
+              <el-radio-group :model-value="activeItem.coordSource" @change="onCoordSourceChange">
+                <el-radio value="local">局部坐标</el-radio>
+                <el-radio value="utm">UTM 49N</el-radio>
+              </el-radio-group>
+            </div>
+            <div class="dxf-row dxf-row--wrap">
+              <label class="dxf-label">编码</label>
+              <el-select v-model="encoding" class="dxf-enc" placeholder="文本编码">
+                <el-option label="自动（UTF-8 / GBK）" value="auto" />
+                <el-option label="UTF-8" value="utf-8" />
+                <el-option label="GBK" value="gbk" />
+                <el-option label="GB2312" value="gb2312" />
+              </el-select>
+            </div>
+            <div class="dxf-row dxf-row--wrap">
+              <label class="dxf-label">块参照</label>
+              <el-checkbox v-model="expandBlocks">展开块参照（INSERT/ATTRIB）</el-checkbox>
+            </div>
+          </div>
         </div>
 
-        <div class="dxf-row dxf-row--wrap">
-          <label class="dxf-label">编码</label>
-          <el-select v-model="encoding" class="dxf-enc" placeholder="文本编码">
-            <el-option label="自动（UTF-8 / GBK）" value="auto" />
-            <el-option label="UTF-8" value="utf-8" />
-            <el-option label="GBK" value="gbk" />
-            <el-option label="GB2312" value="gb2312" />
-          </el-select>
-          <span class="dxf-tip">切换后当前文件将按新编码重新解析</span>
-        </div>
-
-        <div class="dxf-row dxf-row--wrap">
-          <label class="dxf-label">块参照</label>
-          <el-checkbox v-model="expandBlocks">展开块参照（INSERT/ATTRIB）</el-checkbox>
-          <span class="dxf-tip">勾选后重新解析并保留块属性文字（默认跳过，家具/门窗等多为块噪音）</span>
-        </div>
-
-        <div v-if="validation" class="dxf-checks">
+        <div v-if="validation && (validation.hasError || validation.hasWarn)" class="dxf-checks">
           <div class="dxf-checks__head">
-            <span>校验结果（C1–C6）</span>
+            <span>识别提示</span>
             <span class="dxf-checks__summary">
-              <em v-if="validation.hasError" class="is-err">存在硬错误，须修正后才能继续</em>
-              <em v-else-if="validation.hasWarn" class="is-warn">{{ validation.checks.filter((c) => c.level === 'warn').length }} 项警告（可继续）</em>
-              <em v-else class="is-ok">全部通过</em>
+              <em v-if="validation.hasError" class="is-err">存在需处理的问题</em>
+              <em v-else class="is-warn">{{ validation.checks.filter((c) => c.level === 'warn').length }} 项提示（可继续）</em>
             </span>
           </div>
           <div
-            v-for="c in validation.checks"
+            v-for="c in validation.checks.filter((x) => x.level !== 'info')"
             :key="c.code"
             class="dxf-check"
             :class="`dxf-check--${c.level}`"
           >
-            <span class="dxf-check__badge">{{ c.code }}</span>
             <span class="dxf-check__icon">
-              {{ c.level === 'error' ? '✕' : c.level === 'warn' ? '⚠' : c.level === 'info' ? 'ℹ' : '✓' }}
+              {{ c.level === 'error' ? '✕' : c.level === 'warn' ? '⚠' : 'ℹ' }}
             </span>
             <span class="dxf-check__msg">{{ c.message }}</span>
           </div>
         </div>
       </section>
 
-      <!-- 解析结果摘要 + 解析告警 -->
-      <section v-if="activeItem?.result" class="dxf-panel">
-        <!-- 解析结果摘要：rooms / unit / coordSource / bbox / layers -->
-        <div class="dxf-parse-summary">
-          <div class="dxf-parse-summary__title">解析结果（extractRooms 输出）</div>
-          <div class="dxf-parse-summary__grid">
-            <div class="dxf-parse-cell">
-              <span class="dxf-parse-cell__k">识别房间</span>
-              <span class="dxf-parse-cell__v">{{ activeItem.result.rooms.length }} 个</span>
-            </div>
-            <div class="dxf-parse-cell">
-              <span class="dxf-parse-cell__k">单位</span>
-              <span class="dxf-parse-cell__v">{{ unitLabel }}</span>
-            </div>
-            <div class="dxf-parse-cell">
-              <span class="dxf-parse-cell__k">坐标来源</span>
-              <span class="dxf-parse-cell__v">{{ coordLabel }}</span>
-            </div>
-            <div class="dxf-parse-cell">
-              <span class="dxf-parse-cell__k">包围盒尺寸</span>
-              <span class="dxf-parse-cell__v">{{ bboxLabel }}</span>
-            </div>
-            <div class="dxf-parse-cell">
-              <span class="dxf-parse-cell__k">识别图层</span>
-              <span class="dxf-parse-cell__v">{{ activeItem.result.layers.length }} 个</span>
-            </div>
-          </div>
-        </div>
-
-        <!-- 解析告警（DxfParseResult.warnings） -->
-        <div v-if="activeItem.result.warnings.length" class="dxf-parse-warn">
-          <div class="dxf-parse-warn__title">解析告警（{{ activeItem.result.warnings.length }} 条）</div>
+      <!-- 解析提示（仅在有告警时显示；技术细节已自动处理并隐藏） -->
+      <section v-if="activeItem?.result && activeItem.result.warnings.length" class="dxf-panel">
+        <div class="dxf-parse-warn">
+          <div class="dxf-parse-warn__title">解析提示（{{ activeItem.result.warnings.length }} 条）</div>
           <div
             v-for="(w, i) in activeItem.result.warnings"
             :key="i"
             class="dxf-parse-warn__item"
             :class="`is-${w.level}`"
           >
-            <span class="dxf-parse-warn__badge">{{ w.code }}</span>
             <span class="dxf-parse-warn__msg">{{ w.message }}</span>
           </div>
         </div>
-
-        <!-- 房间清单（勾选需入库；extractRooms 产物） -->
-        <div class="dxf-parse-rooms">
-          <div class="dxf-parse-rooms__head">
-            <span>房间清单（勾选需入库，已选 {{ selectedCount }} / {{ activeItem.result.rooms.length }}）</span>
-          </div>
-          <div class="dxf-roomlist">
-            <div
-              v-for="(room, idx) in activeItem.result.rooms"
-              :key="room.id"
-              class="dxf-room"
-              :class="{ 'dxf-room--off': !room.selected }"
-            >
-              <el-checkbox v-model="room.selected" />
-              <span class="dxf-room__no">{{ room.code || `房间${idx + 1}` }}</span>
-              <span class="dxf-room__name">{{ room.name }}</span>
-              <span
-                class="dxf-room__tag"
-                :class="room.inspectStatus === 'partial' ? 'is-warn' : ''"
-              >{{ room.inspectStatus === 'partial' ? '待补填' : room.inspectStatus === 'highlight' ? '需复核' : '正常' }}</span>
-              <span class="dxf-room__area">{{ room.area.toFixed(1) }}</span>
-            </div>
-          </div>
-          <el-alert
-            v-if="!activeItem.result.rooms.length"
-            class="dxf-preview"
-            type="warning"
-            :closable="false"
-            title="未解析到房间轮廓，请检查 DXF 是否含闭合的「内部结构内墙线」图层"
-          />
-        </div>
       </section>
 
-      <!-- 房间预览（左侧清单剔除/补填，右侧 2.5D 预览；不再强制勾选确认） -->
-      <section v-if="activeItem?.result" class="dxf-panel dxf-panel--preview4">
-        <!-- 顶部统计 -->
-        <div class="dxf-stat">
-          <span>识别房间 <b>{{ roomFieldStats.N }}</b> 间</span>
-          <span class="is-ok">字段完整 <b>{{ roomFieldStats.X }}</b> 间</span>
-          <span class="is-warn">待补填 <b>{{ roomFieldStats.Y }}</b> 间</span>
-          <span v-if="roomFieldStats.excluded" class="is-muted">已剔除误识别 <b>{{ roomFieldStats.excluded }}</b> 间</span>
-        </div>
 
-        <div class="dxf-preview4__body">
-          <!-- 左侧房间清单 -->
-          <div class="dxf-preview4__list">
-            <div class="dxf-preview4__list-head">房间清单（取消勾选即剔除误识别房间）</div>
-            <div class="dxf-roomlist dxf-roomlist--tall">
-              <div
-                v-for="(room, idx) in activeItem.result.rooms"
-                :key="room.id"
-                class="dxf-room"
-                :class="{ 'dxf-room--off': room.selected === false }"
-              >
-                <el-checkbox v-model="room.selected" />
-                <span class="dxf-room__no">{{ room.code || `房间${idx + 1}` }}</span>
-                <span class="dxf-room__name">{{ room.name || '（未命名）' }}</span>
-                <span
-                  class="dxf-room__tag"
-                  :class="room.inspectStatus === 'partial' ? 'is-warn' : room.inspectStatus === 'highlight' ? 'is-info' : room.inspectStatus === 'warning' ? 'is-err' : ''"
-                >{{ room.inspectStatus === 'partial' ? '待补填' : room.inspectStatus === 'highlight' ? '需复核' : room.inspectStatus === 'warning' ? '警告' : '正常' }}</span>
-                <el-button link type="primary" size="small" @click="openEditor(room)">补填</el-button>
-              </div>
-            </div>
-          </div>
-
-          <!-- 右侧 FloorPlan2D 预览 -->
-          <div class="dxf-preview4__map">
-            <FloorPlan2D
-              :embedded="true"
-              :preview="{ rooms: activeItem.result.rooms, outline: activeItem.result.floorOutline?.polygon ?? null }"
-              @room-click="openEditor"
-            />
-          </div>
-        </div>
-
-        <!-- 6 字段补填 / 修正抽屉 -->
-        <el-drawer
-          v-model="drawerOpen"
-          :title="editingRoom ? `补填 / 修正：${editingRoom.code || editingRoom.name}` : '房间字段'"
-          size="360px"
-          @close="closeEditor"
-        >
-          <template v-if="editingRoom">
-            <el-form label-width="84px">
-              <el-form-item label="房间编码">
-                <el-input v-model="editingRoom.code" placeholder="如 101" />
-              </el-form-item>
-              <el-form-item label="房间号码">
-                <el-input v-model="editingRoom.number" placeholder="如 101" />
-              </el-form-item>
-              <el-form-item label="房间名称">
-                <el-input v-model="editingRoom.name" placeholder="如 办公室" />
-              </el-form-item>
-              <el-form-item label="部门名称">
-                <el-input v-model="editingRoom.dept" placeholder="如 保卫处" />
-              </el-form-item>
-              <el-form-item label="使用面积">
-                <el-input-number
-                  v-model="editingRoom.useArea"
-                  :min="0"
-                  :step="1"
-                  controls-position="right"
-                  style="width: 100%"
-                />
-              </el-form-item>
-              <el-form-item label="建筑面积">
-                <el-input-number
-                  v-model="editingRoom.buildArea"
-                  :min="0"
-                  :step="1"
-                  controls-position="right"
-                  style="width: 100%"
-                />
-              </el-form-item>
-            </el-form>
-            <div class="dxf-drawer__actions">
-              <el-button
-                v-if="editingRoom.selected !== false"
-                type="danger"
-                plain
-                @click="toggleExclude(editingRoom, true); closeEditor()"
-              >标记为误识别并剔除</el-button>
-              <el-button v-else type="primary" plain @click="toggleExclude(editingRoom, false); closeEditor()">
-                恢复保留
-              </el-button>
-            </div>
-            <p class="dxf-drawer__hint">修改即时生效；确认无误后勾选底部「已确认」再进入下一步。</p>
-          </template>
-        </el-drawer>
-      </section>
-
-      <!-- 坐标配准（UTM 自动匹配 / 局部坐标手动配准） -->
-      <section v-if="activeItem?.result" class="dxf-panel">
-        <!-- 局部坐标：手动配准（上节 AnchorPicker） -->
-        <template v-if="effectiveCoordSource === 'local'">
-          <el-alert
-            class="dxf-preview"
-            type="info"
-            :closable="false"
-            title="局部坐标图纸：不进行指纹自动匹配，请通过下方「2 对同名锚点」完成手动配准后再入库"
-          />
-          <AnchorPicker
-            v-model="activeItem.transform"
-            :unit="activeItem.result.unit"
-            :floor-outline-local="floorOutlineLocal"
-            :rooms-local="roomsLocal"
-            :footprint-utm="footprintUtm"
-          />
-        </template>
-
-        <!-- UTM：自动算指纹 + 与 footprint 叠加预览 -->
-        <template v-else>
-          <el-alert
-            v-if="matchResult"
-            class="dxf-preview"
-            :type="matchResult.status === 'strong' ? 'success' : 'warning'"
-            :closable="false"
-          >
-            <template #title>
-              <span>楼栋自动匹配（{{ matchResult.status === 'strong' ? '强匹配' : matchResult.status === 'weak' ? '弱匹配' : '未匹配' }}）：</span>
-              <span v-if="matchResult.candidates.length">{{ matchResult.candidates.join('、') }}</span>
-              <span v-else>无</span>
-              <el-button
-                v-if="matchResult.candidates.length === 1"
-                link
-                type="primary"
-                size="small"
-                style="margin-left: 8px"
-                @click="applyMatch"
-              >采用</el-button>
-            </template>
-            <template v-if="matchResult.reasons.length" #default>
-              <div v-for="(rs, i) in matchResult.reasons" :key="i" class="dxf-match__reason">{{ rs }}</div>
-            </template>
-          </el-alert>
-          <el-alert
-            v-else
-            class="dxf-preview"
-            type="info"
-            :closable="false"
-            title="UTM 图纸：未识别「楼层外轮廓线」，无法自动匹配楼栋，请在下一步手动选择归属楼栋"
-          />
-
-          <!-- 自动算得的楼栋指纹（取自「楼层外轮廓线」） -->
-          <div v-if="computedFingerprint.centerUtm" class="dxf-fp">
-            <div class="dxf-fp__title">从图纸自动识别的楼栋位置与轮廓（源自「楼层外轮廓线」图层）</div>
-            <div class="dxf-fp__grid">
-              <div class="dxf-fp__cell">
-                <span class="dxf-fp__k">轮廓中心位置</span>
-                <span class="dxf-fp__v">[{{ computedFingerprint.centerUtm[0].toFixed(1) }}, {{ computedFingerprint.centerUtm[1].toFixed(1) }}]</span>
-              </div>
-              <div class="dxf-fp__cell">
-                <span class="dxf-fp__k">轮廓面积</span>
-                <span class="dxf-fp__v">{{ computedFingerprint.footprintArea ? computedFingerprint.footprintArea.toFixed(0) : '—' }} ㎡</span>
-              </div>
-              <div class="dxf-fp__cell">
-                <span class="dxf-fp__k">轮廓朝向</span>
-                <span class="dxf-fp__v">{{ computedFingerprint.azimuth != null ? computedFingerprint.azimuth.toFixed(1) + '°' : '—' }}</span>
-              </div>
-            </div>
-          </div>
-
-          <!-- 外轮廓 ↔ footprint 叠加预览 -->
-          <div class="dxf-overlay">
-            <div class="dxf-overlay__title">外轮廓 ↔ 楼栋 footprint 叠加预览（UTM，单位米）</div>
-            <FootprintOverlay
-              :footprint="overlayFootprint as unknown as Pt[] | null"
-              :outline="floorOutlineLocal as unknown as Pt[] | null"
-              :rooms="roomsLocal as unknown as Pt[][]"
-            />
-          </div>
-
-          <!-- 偏差提示：面积偏差 > 20% 红色警告 -->
-          <el-alert
-            v-if="utmDeviation !== null"
-            class="dxf-preview"
-            :type="utmDeviationWarn ? 'error' : 'success'"
-            :closable="false"
-            :title="utmDeviationWarn
-              ? `面积偏差 ${(utmDeviation * 100).toFixed(1)}% > 20%（质心偏移 ${utmCenterOffset ? utmCenterOffset.toFixed(1) : '?'}m），外轮廓与 footprint 差异过大，请核对图纸或改用局部手动配准`
-              : `面积偏差 ${(utmDeviation * 100).toFixed(1)}%（质心偏移 ${utmCenterOffset ? utmCenterOffset.toFixed(1) : '0'}m）≤ 20%，配准良好`"
-          />
-          <el-alert
-            v-else
-            class="dxf-preview"
-            type="info"
-            :closable="false"
-            :title="overlayFootprint ? '外轮廓点数不足，无法计算偏差' : '该楼暂无 footprint，无法做叠加校验；请尽量保证「楼层外轮廓线」与真实楼栋一致'"
-          />
-        </template>
+      <!-- 坐标配准：仅「局部坐标」图纸需要用户操作（系统硬性要求必须先定位才能入库）；
+           UTM 图纸的楼栋匹配在后台自动完成，结果只体现在下方「确认归属」，此处不展示任何坐标/配准细节 -->
+      <section v-if="activeItem?.result && effectiveCoordSource === 'local'" class="dxf-panel">
+        <el-alert
+          class="dxf-preview"
+          type="info"
+          :closable="false"
+          title="该图纸为局部坐标（无地理基准），请在下方左右两图各点 2 个同名位置完成定位，无需填写任何坐标数字"
+        />
+        <AnchorPicker
+          v-model="activeItem.transform"
+          :unit="activeItem.result.unit"
+          :floor-outline-local="floorOutlineLocal"
+          :rooms-local="roomsLocal"
+          :footprint-utm="footprintUtm"
+        />
       </section>
 
       <!-- 确认归属（系统按强匹配 / 批量沿用 / 入口楼栋预选，可直接修改；以「导入」动作确认，绝不自动新建楼栋） -->
       <section v-if="activeItem?.result" class="dxf-panel">
-        <!-- 匹配 / 归属状态提示 -->
-        <el-alert
-          v-if="attributionStatus === 'strong' && matchResult?.candidates.length"
-          class="dxf-preview"
-          type="success"
-          :closable="false"
-          :title="`已自动匹配：${matchResult.candidates[0]}（相似度 ${matchResult.score ?? 0}%），可直接导入或在下方修改`"
-        >
-          <template #default>强匹配命中，归属已预填，导入时按此落库</template>
-        </el-alert>
-        <el-alert
-          v-else-if="attributionStatus === 'weak' && matchResult?.candidates.length"
-          class="dxf-preview"
-          type="warning"
-          :closable="false"
-          :title="`弱匹配（相似度 ${matchResult.score ?? 0}%），请在下方候选列表中确认归属`"
-        >
-          <template #default>
-            <div v-for="(rs, i) in matchResult.reasons" :key="i" class="dxf-match__reason">{{ rs }}</div>
-          </template>
-        </el-alert>
-        <el-alert
-          v-else-if="attributionStatus === 'none'"
-          class="dxf-preview"
-          type="error"
-          :closable="false"
-          title="未匹配到楼栋，请在下方选择归属（或与现有楼栋坐标对不上，可改用局部手动配准）"
-        >
-          <template #default>
-            <div v-for="(rs, i) in (matchResult?.reasons ?? ['无匹配候选'])" :key="i" class="dxf-match__reason">{{ rs }}</div>
-          </template>
-        </el-alert>
-        <el-alert
-          v-else
-          class="dxf-preview"
-          type="info"
-          :closable="false"
-          title="局部坐标 / 无外轮廓图纸：不支持自动匹配，请在下方手动选择归属楼栋"
-        />
-
-        <!-- 弱匹配候选单选 -->
-        <div v-if="attributionStatus === 'weak' && matchResult?.candidates.length" class="dxf-cand">
+        <!-- 归属已由系统自动预填，匹配结论见上方「坐标配准」区；此处仅保留必要操作时才展开的选择 -->
+        <!-- 弱匹配候选单选（仅未锁定时出现） -->
+        <div v-if="!buildingLocked && attributionStatus === 'weak' && matchResult?.candidates.length" class="dxf-cand">
           <div class="dxf-cand__title">候选楼栋（单选）</div>
           <el-radio-group :model-value="effectiveBuildingName" @change="onPickCandidate">
             <el-radio v-for="c in matchResult.candidates" :key="c" :value="c">{{ c }}</el-radio>
           </el-radio-group>
         </div>
 
-        <!-- 归属选择（核心控件，必须可筛选搜索；已按系统预选值，可随时修改） -->
+        <!-- 归属：从某栋楼进入时已锁定；否则按系统自动推断并预填，用户可按需展开修改 -->
         <div class="dxf-attr">
-          <div class="dxf-row dxf-row--wrap">
-            <label class="dxf-label">楼栋（可搜索）</label>
-            <el-select
-              v-model="effectiveBuildingName"
-              filterable
-              placeholder="选择 / 搜索楼栋名称"
-              class="dxf-control"
-            >
-              <el-option v-for="b in store.buildingNames" :key="b" :label="b" :value="b" />
-            </el-select>
-            <el-button type="primary" plain @click="createNewBuilding">新建楼栋</el-button>
+          <div class="dxf-attr__auto">
+            <span class="dxf-attr__chip">
+              将导入至：<b>{{ effectiveBuildingName || '待选择楼栋' }}</b> <b>{{ effectiveFloorNo }}F</b>
+            </span>
+            <el-tag v-if="buildingLocked" type="info" size="small" effect="plain">已指定楼栋</el-tag>
+            <el-tag v-else-if="attributionStatus === 'strong'" type="success" size="small" effect="plain">已自动匹配</el-tag>
+            <el-tag v-else-if="attributionStatus === 'weak'" type="warning" size="small" effect="plain">自动匹配待确认</el-tag>
+            <el-button v-if="!buildingLocked" text type="primary" size="small" @click="showAttrEdit = !showAttrEdit">
+              {{ showAttrEdit ? '收起' : effectiveBuildingName ? '修改' : '选择楼栋' }}
+            </el-button>
           </div>
-          <div class="dxf-row">
-            <label class="dxf-label">楼层</label>
-            <div class="dxf-floor-input">
-              <el-input-number v-model="effectiveFloorNo" :min="1" :max="99" controls-position="right" class="dxf-control" />
-              <span class="dxf-unit">F</span>
+
+          <div v-if="(showAttrEdit || needAttrChoice) && !buildingLocked" class="dxf-attr__edit">
+            <div class="dxf-row dxf-row--wrap">
+              <label class="dxf-label">楼栋（可搜索）</label>
+              <el-select
+                v-model="effectiveBuildingName"
+                filterable
+                placeholder="选择 / 搜索楼栋名称"
+                class="dxf-control"
+              >
+                <el-option v-for="b in store.buildingNames" :key="b" :label="b" :value="b" />
+              </el-select>
+              <el-button type="primary" plain @click="createNewBuilding">新建楼栋</el-button>
+            </div>
+            <div class="dxf-row">
+              <label class="dxf-label">楼层</label>
+              <div class="dxf-floor-input">
+                <el-input-number v-model="effectiveFloorNo" :min="1" :max="99" controls-position="right" class="dxf-control" />
+                <span class="dxf-unit">F</span>
+              </div>
             </div>
           </div>
         </div>
 
-        <!-- 批量沿用提示 -->
-        <div v-if="prefillBuilding" class="dxf-batch-hint">
+        <!-- 批量沿用提示（仅未锁定时出现） -->
+        <div v-if="prefillBuilding && !buildingLocked" class="dxf-batch-hint">
           批量模式：本文件默认沿用「{{ prefillBuilding }}」、楼层自动递增为 {{ floorDefaultNo }}F，可逐文件修改
         </div>
 
         <!-- 当前归属预览（导入即按此落库） -->
         <div class="dxf-bind">
           <span class="dxf-bind__ok">当前归属：{{ effectiveBuildingName || '未选择' }} {{ effectiveFloorNo }}F</span>
-          <span class="dxf-bind__tip">（点击「导入」即按此归属落库，可在上方随时修改）</span>
+          <span class="dxf-bind__tip">{{ buildingLocked ? '（由进入的楼栋决定，点击「导入」即按此落库）' : '（点击「导入」即按此归属落库，可在上方随时修改）' }}</span>
         </div>
 
         <div v-if="importedFloors.length" class="dxf-list">
@@ -1282,6 +1073,21 @@ onBeforeUnmount(() => {
 /* 楼层：数字输入框与「F」同一行紧贴 */
 .dxf-floor-input { display: flex; align-items: center; gap: 6px; flex: 1 1 auto; }
 .dxf-tip { font-size: 12px; color: #9ca3af; }
+.dxf-autodetect { border: 1px solid #ebeef5; border-radius: 8px; padding: 12px; background: #fafcff; }
+.dxf-autodetect__title { font-size: 13px; color: #6b7280; margin-bottom: 8px; }
+.dxf-autodetect__line { font-size: 13px; color: #4b5563; line-height: 1.6; }
+.dxf-autodetect__line b { color: #1f2d3d; font-size: 15px; }
+.dxf-autodetect__grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.dxf-autodetect__cell { display: flex; flex-direction: column; gap: 2px; }
+.dxf-autodetect__k { font-size: 12px; color: #9ca3af; }
+.dxf-autodetect__v { font-size: 14px; font-weight: 600; color: #1f2d3d; }
+.dxf-autofill { font-size: 12px; color: #6b7280; margin-top: 10px; line-height: 1.5; }
+.dxf-advanced-toggle { margin-top: 8px; padding-left: 0; }
+.dxf-advanced { margin-top: 10px; padding-top: 10px; border-top: 1px dashed #e5e7eb; display: flex; flex-direction: column; gap: 10px; }
+.dxf-attr__auto { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.dxf-attr__chip { font-size: 14px; color: #303133; }
+.dxf-attr__chip b { color: #1f2d3d; }
+.dxf-attr__edit { margin-top: 10px; display: flex; flex-direction: column; gap: 12px; }
 .dxf-uploader { width: 100%; }
 .dxf-drop {
   padding: 22px 12px;

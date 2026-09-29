@@ -398,11 +398,15 @@ export class MapScene {
         // WebGL1 下「NPOT 尺寸贴图 + mipmap」会被驱动直接丢弃，导致部分建筑材质渲染失败（黑色/空白），
         // 观感即「材质丢失」。主动降级为「无 mipmap + 线性过滤 + 边缘钳制」使其可正常显示（WebGL2 跳过）。
         const npotFixed = this.makeTexturesWebGL1Safe(this.modelRoot);
+        // GLB 文件本身存在「渲染后近全黑」的占位/损坏立面贴图（导出/烘焙失败所致），
+        // 这些贴图会让对应楼栋渲染成黑墙、观感即「材质丢失」。无法凭空还原真实立面，
+        // 这里在加载后将「解码均亮度过低的贴图」自动替换为程序化生成的建筑立面纹理。
+        const blackFixed = this.fixBlackTextures(this.modelRoot);
         const caps = this.renderer?.capabilities;
         // eslint-disable-next-line no-console
         console.info(
           `[MapScene] GLB 加载完成：isWebGL2=${caps?.isWebGL2 ?? '?'}，MAX_TEXTURE_SIZE=${caps?.maxTextureSize ?? '?'}，` +
-            `超限缩放=${clampedCount} 张，NPOT 材质降级=${npotFixed} 张`,
+            `超限缩放=${clampedCount} 张，NPOT 材质降级=${npotFixed} 张，黑图替换=${blackFixed} 张`,
         );
 
         this.markDirty();
@@ -532,6 +536,118 @@ export class MapScene {
       }
     });
     return fixed;
+  }
+
+  /**
+   * GLB 文件本身存在「渲染后近全黑」的占位/损坏立面贴图（导出或贴图烘焙失败所致），
+   * 这些贴图会让对应楼栋渲染成黑墙，观感即「材质丢失 / 整栋没材质」。无法凭空还原真实立面照片，
+   * 因此在加载完成后，把「解码均亮度过低」的 baseColor 贴图自动替换为程序化生成的建筑立面纹理，
+   * 让这些楼从「黑盒子」变成正常的墙+窗格外观。
+   *
+   * 仅在浏览器环境（存在 document / canvas）下生效，不依赖任何外部图片资源。
+   * @returns 被替换的材质数量（供诊断日志确认是否命中该根因）
+   */
+  private fixBlackTextures(root: THREE.Object3D): number {
+    if (typeof document === 'undefined') return 0; // 非浏览器环境（如测试）跳过
+    const sampler = document.createElement('canvas');
+    sampler.width = 16;
+    sampler.height = 16;
+    const sctx = sampler.getContext('2d', { willReadFrequently: true });
+    if (!sctx) return 0;
+
+    // 同一张损坏黑图可能被多个材质复用；按原纹理 uuid 缓存生成的立面纹理，保证复用一致。
+    const cache = new Map<string, THREE.Texture>();
+    const facadeFor = (tex: THREE.Texture): THREE.Texture => {
+      const key = tex.uuid;
+      let t = cache.get(key);
+      if (!t) {
+        // 用原纹理 uuid 派生一个稳定变体，避免所有楼长得一模一样。
+        let h = 0;
+        for (let i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) >>> 0;
+        t = this.makeFacadeTexture(h % 4);
+        cache.set(key, t);
+      }
+      return t;
+    };
+
+    let replaced = 0;
+    root.traverse((child) => {
+      const mesh = child as THREE.Mesh;
+      if (!mesh.isMesh) return;
+      const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+      for (const m of mats) {
+        const mat = m as THREE.MeshStandardMaterial;
+        if (!mat || !mat.map) continue;
+        const img = mat.map.image as CanvasImageSource | undefined;
+        if (!img) continue;
+        try {
+          sctx.clearRect(0, 0, 16, 16);
+          sctx.drawImage(img, 0, 0, 16, 16);
+          const data = sctx.getImageData(0, 0, 16, 16).data;
+          let sum = 0;
+          for (let i = 0; i < data.length; i += 4) {
+            sum += 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+          }
+          const mean = sum / (data.length / 4);
+          if (mean < 16) {
+            // 近全黑 → 替换为程序化立面纹理
+            mat.map = facadeFor(mat.map);
+            mat.needsUpdate = true;
+            replaced++;
+          }
+        } catch {
+          // 采样失败（图片未就绪等）则跳过，不影响其它材质
+        }
+      }
+    });
+    return replaced;
+  }
+
+  /** 生成一张程序化建筑立面纹理（墙 + 窗格网格），variants 控制配色与窗格密度 */
+  private makeFacadeTexture(variant: number): THREE.Texture {
+    const c = document.createElement('canvas');
+    c.width = 256;
+    c.height = 256;
+    const ctx = c.getContext('2d')!;
+    const palettes = [
+      { wall: '#cdd6e0', frame: '#aeb8c4', glass: '#33485f' },
+      { wall: '#d8d2c4', frame: '#bdb29c', glass: '#3a4a52' },
+      { wall: '#c9d8d2', frame: '#a9bcb2', glass: '#2f4a4a' },
+      { wall: '#d3c9d6', frame: '#b6a8bc', glass: '#3b3350' },
+    ];
+    const p = palettes[variant % palettes.length];
+    ctx.fillStyle = p.wall;
+    ctx.fillRect(0, 0, 256, 256);
+    const cols = 4;
+    const rows = 6;
+    const mx = 16;
+    const my = 14;
+    const cw = (256 - mx * 2) / cols;
+    const ch = (256 - my * 2) / rows;
+    for (let r = 0; r < rows; r++) {
+      for (let col = 0; col < cols; col++) {
+        const x = mx + col * cw + 4;
+        const y = my + r * ch + 4;
+        const w = cw - 8;
+        const h = ch - 8;
+        // 窗框
+        ctx.fillStyle = p.frame;
+        ctx.fillRect(x - 2, y - 2, w + 4, h + 4);
+        // 玻璃
+        ctx.fillStyle = p.glass;
+        ctx.fillRect(x, y, w, h);
+        // 高光
+        ctx.fillStyle = 'rgba(255,255,255,0.18)';
+        ctx.fillRect(x, y, w, Math.max(2, h * 0.18));
+      }
+    }
+    const tex = new THREE.CanvasTexture(c);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.wrapS = THREE.RepeatWrapping;
+    tex.wrapT = THREE.RepeatWrapping;
+    tex.anisotropy = 4;
+    tex.needsUpdate = true;
+    return tex;
   }
 
   /**

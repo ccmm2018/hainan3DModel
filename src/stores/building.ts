@@ -32,7 +32,7 @@ import {
 } from '../utils/coordinate';
 import { utm49nToGcj02 } from '../utils/coordTransform';
 import { matchBuildings, type Fingerprint, type MatchResult } from '../utils/matcher';
-import { polygonArea, polygonCentroid, transformPolygon, type Pt } from '../utils/geometry';
+import { polygonArea, polygonCentroid, transformPolygon, mergeRectOutlines, type Pt } from '../utils/geometry';
 import { persistence, type LoadedState } from '../utils/persist';
 
 function floorKey(buildingName: string, floorNo: number, version = 1): string {
@@ -337,6 +337,114 @@ export const useBuildingStore = defineStore('building', () => {
   }
 
   /**
+   * 新增一个房间（楼层编辑：在 2.5D 图上拖拽画矩形后调用）。
+   * outline 为 UTM 米多边形；质心与面积自动计算，面积缺失时回退几何面积。
+   */
+  function addRoom(fid: string, init: Partial<Room> & { outline: Pt[] }): string {
+    const list = rooms.value[fid] ?? [];
+    const outline = init.outline;
+    const centroid = polygonCentroid(outline);
+    const area = polygonArea(outline);
+    const idx = list.length + 1;
+    const code = init.code ?? `新房间${idx}`;
+    const newRoom: Room = {
+      id: init.id ?? `${fid}-r${Date.now()}`,
+      floorId: fid,
+      code,
+      number: init.number ?? code,
+      name: init.name ?? '新房间',
+      dept: init.dept ?? '',
+      usePurpose: init.usePurpose ?? '',
+      useArea: init.useArea && init.useArea > 0 ? init.useArea : area,
+      buildArea: init.buildArea && init.buildArea > 0 ? init.buildArea : area,
+      outline,
+      centroid,
+      inspectStatus: init.inspectStatus ?? 'normal',
+      useStatus: init.useStatus ?? '',
+      selected: true,
+    };
+    rooms.value[fid] = [...list, newRoom];
+    const f = Object.values(floors.value).find((x) => x.id === fid);
+    if (f) {
+      f.roomCount = rooms.value[fid].length;
+      void persistence.saveFloor(f, rooms.value[fid]).catch(() => undefined);
+    }
+    void persistence.saveRooms(fid, rooms.value[fid]).catch(() => undefined);
+    return newRoom.id;
+  }
+
+  /** 删除若干房间（楼层编辑：勾选后删除）。 */
+  function deleteRooms(fid: string, ids: string[]): void {
+    const list = rooms.value[fid];
+    if (!list) return;
+    const set = new Set(ids);
+    rooms.value[fid] = list.filter((r) => !set.has(r.id));
+    const f = Object.values(floors.value).find((x) => x.id === fid);
+    if (f) {
+      f.roomCount = rooms.value[fid].length;
+      void persistence.saveFloor(f, rooms.value[fid]).catch(() => undefined);
+    }
+    void persistence.saveRooms(fid, rooms.value[fid]).catch(() => undefined);
+  }
+
+  /**
+   * 更新房间几何（楼层编辑：拖拽移动 / 缩放房间轮廓后实时调用）。
+   * 重算质心与面积；面积字段为空时回退几何面积，已填写则保留。
+   */
+  function updateRoomGeometry(fid: string, roomId: string, outline: Pt[]): void {
+    const list = rooms.value[fid];
+    if (!list) return;
+    const room = list.find((r) => r.id === roomId);
+    if (!room) return;
+    const area = polygonArea(outline);
+    room.outline = outline;
+    room.centroid = polygonCentroid(outline);
+    if (!room.useArea || room.useArea <= 0) room.useArea = area;
+    if (!room.buildArea || room.buildArea <= 0) room.buildArea = area;
+    void persistence.saveRooms(fid, list).catch(() => undefined);
+  }
+
+  /**
+   * 合并多个房间为一个（楼层编辑：多选后合并）。
+   * 合并轮廓取各房轮廓在对齐坐标系下的包围盒（见 geometry.mergeRectOutlines）。
+   * 房间字段以第一个房间为基准，名称记为「合并房间」。
+   */
+  function mergeRooms(fid: string, ids: string[]): string | null {
+    const list = rooms.value[fid];
+    if (!list || ids.length < 2) return null;
+    const sel = list.filter((r) => ids.includes(r.id));
+    if (sel.length < 2) return null;
+    const outline = mergeRectOutlines(sel.map((r) => r.outline));
+    const centroid = polygonCentroid(outline);
+    const area = polygonArea(outline);
+    const base = sel[0];
+    const merged: Room = {
+      id: `${fid}-m${Date.now()}`,
+      floorId: fid,
+      code: base.code ? `${base.code}合` : '合并房间',
+      number: base.number || base.code || '合并房间',
+      name: '合并房间',
+      dept: '',
+      usePurpose: '',
+      useArea: area,
+      buildArea: area,
+      outline,
+      centroid,
+      inspectStatus: 'normal',
+      useStatus: '',
+      selected: true,
+    };
+    rooms.value[fid] = list.filter((r) => !ids.includes(r.id)).concat(merged);
+    const f = Object.values(floors.value).find((x) => x.id === fid);
+    if (f) {
+      f.roomCount = rooms.value[fid].length;
+      void persistence.saveFloor(f, rooms.value[fid]).catch(() => undefined);
+    }
+    void persistence.saveRooms(fid, rooms.value[fid]).catch(() => undefined);
+    return merged.id;
+  }
+
+  /**
    * 启动恢复：把持久化读出的楼层 / 房间 / 楼栋指纹合并进内存态。
    * 调用时机在「播种样例数据」之后，故持久化数据会覆盖样例中的同名项。
    */
@@ -390,6 +498,10 @@ export const useBuildingStore = defineStore('building', () => {
     setRoomUseStatus,
     setRoomSelected,
     updateRoom,
+    addRoom,
+    deleteRooms,
+    updateRoomGeometry,
+    mergeRooms,
     applyPersisted,
     matchByFingerprint,
   };

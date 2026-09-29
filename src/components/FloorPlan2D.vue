@@ -176,6 +176,16 @@ function onStageMouseDown(e: MouseEvent): void {
   isDragging.value = true;
   dragMoved.value = false;
   dragStart = { x: e.clientX, y: e.clientY, panX: panX.value, panY: panY.value };
+  if (editMode.value && activeTool.value === 'add' && !downOnRoom) {
+    // 编辑-新增：在空白处按下即开始画矩形
+    dragKind.value = 'draw';
+    const p = fromScreen(e.clientX, e.clientY);
+    dragStartFloor.x = p[0];
+    dragStartFloor.y = p[1];
+    draftRect.value = { x0: p[0], y0: p[1], x1: p[0], y1: p[1] };
+  } else {
+    dragKind.value = 'pan';
+  }
 }
 function onStageMouseMove(e: MouseEvent): void {
   if (!isDragging.value) return;
@@ -184,19 +194,65 @@ function onStageMouseMove(e: MouseEvent): void {
   // 仅当「按住并移动超过阈值」才视为拖拽，避免「点一下松开鼠标」就产生位移
   if (!dragMoved.value && Math.hypot(dx, dy) < 4) return;
   dragMoved.value = true;
-  panX.value = dragStart.panX + dx;
-  panY.value = dragStart.panY + dy;
+  if (dragKind.value === 'pan') {
+    panX.value = dragStart.panX + dx;
+    panY.value = dragStart.panY + dy;
+    return;
+  }
+  if (dragKind.value === 'move' || dragKind.value === 'resize') {
+    if (dragRoomId.value) {
+      const cur = fromScreen(e.clientX, e.clientY);
+      const cell = floorToCell(cur[0], cur[1]);
+      if (dragKind.value === 'move') {
+        // 移动：按拖拽经过的网格单元数平移房间（保持尺寸），夹紧在 6×2 内
+        const dBi = cell.bi - dragStartCell.bi;
+        const dC = cell.c - dragStartCell.c;
+        const next = clampSpanKeepSize({
+          bi0: dragStartSpan.bi0 + dBi,
+          bi1: dragStartSpan.bi1 + dBi,
+          c0: dragStartSpan.c0 + dC,
+          c1: dragStartSpan.c1 + dC,
+        });
+        // 若目标位置被其它房间占据，则与对方互换单元，保持网格整洁
+        const occupant = Object.keys(gridPos).find(
+          (id) => id !== dragRoomId.value && overlaps(next, gridPos[id]!),
+        );
+        applySpan(dragRoomId.value, next, occupant);
+      } else {
+        // 缩放：拖拽角点移动到的新单元即时改变该角，对角固定
+        const next = resizeSpan(dragStartSpan, dragCorner.value, cell);
+        gridPos[dragRoomId.value] = next;
+      }
+    }
+    return;
+  }
+  if (dragKind.value === 'draw') {
+    const cur = fromScreen(e.clientX, e.clientY);
+    if (draftRect.value) draftRect.value = { ...draftRect.value, x1: cur[0], y1: cur[1] };
+  }
 }
 function onStageMouseUp(e?: MouseEvent): void {
-  isDragging.value = false;
-  // 在「未拖动」的前提下，点击空白处（非房间、非弹窗）即关闭已打开的房间弹窗；
-  // 点击房间由 onSelect 处理，点击/操作弹窗内部由 @mouseup.stop 拦截，都不会走到这里。
-  const t = e && (e.target as Element | null);
-  const onPop = !!(t && t.closest && t.closest('.fpv-pop'));
-  if (!dragMoved.value && !downOnRoom && !onPop && selectedRoom.value) {
-    closePop();
+  const kind = dragKind.value;
+  if (kind === 'pan') {
+    isDragging.value = false;
+    // 在「未拖动」的前提下，点击空白处（非房间、非弹窗）即关闭已打开的房间弹窗；
+    // 点击房间由 onSelect 处理，点击/操作弹窗内部由 @mouseup.stop 拦截，都不会走到这里。
+    const t = e && (e.target as Element | null);
+    const onPop = !!(t && t.closest && t.closest('.fpv-pop'));
+    if (!dragMoved.value && !downOnRoom && !onPop && selectedRoom.value && !editMode.value) {
+      closePop();
+    }
+    downOnRoom = false;
+    dragKind.value = null;
+    return;
   }
-  downOnRoom = false;
+  if (kind === 'draw') commitDraft();
+  // move / resize 已在 mousemove 实时更新网格定位，此处把最终位置写回 store 持久化
+  if ((kind === 'move' || kind === 'resize') && dragRoomId.value) commitSpan(dragRoomId.value);
+  isDragging.value = false;
+  dragKind.value = null;
+  dragRoomId.value = null;
+  dragCorner.value = 0;
 }
 function onStageMouseLeave(): void {
   isDragging.value = false;
@@ -639,9 +695,21 @@ const ROOM_SAMPLE: { names: string[]; depts: string[]; areas: string[] } = {
 /** 预览态（无真实入库房间）下，弹窗内对合成房间的本地覆盖（业务状态 / 隐藏等），保证交互可闭环；真实房间走 store。 */
 const synthOverrides = reactive<Record<string, Partial<RoomLike>>>({});
 
-const roomBlocks = computed<RoomBlock[]>(() => {
+// ---- 网格单元定位模型：浏览与编辑共用同一套 6×2 网格，保证「编辑前后画面完全一致」 ----
+const GRID_ROWS = 2;
+
+/** 每个房间在 6×2 网格中占据的单元范围（bi=排 0/1，c=列 0..5）；浏览/编辑/渲染全部以此为准。 */
+const gridPos = reactive<Record<string, { bi0: number; bi1: number; c0: number; c1: number }>>({});
+
+function idxToSpan(idx: number): { bi0: number; bi1: number; c0: number; c1: number } {
+  const bi = Math.floor(idx / ROOM_COLS);
+  const c = idx % ROOM_COLS;
+  return { bi0: bi, bi1: bi, c0: c, c1: c };
+}
+
+const gridGeom = computed(() => {
   const poly = outlinePoints.value;
-  if (!poly || poly.length < 3) return [];
+  if (!poly || poly.length < 3) return null;
   let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
   for (const p of poly) {
     const [ax, ay] = alignSource(p);
@@ -650,65 +718,79 @@ const roomBlocks = computed<RoomBlock[]>(() => {
     if (ay < minY) minY = ay;
     if (ay > maxY) maxY = ay;
   }
-  if (!isFinite(minX)) return [];
+  if (!isFinite(minX)) return null;
   const width = Math.max(maxX - minX, 1e-6);
   const depth = Math.max(maxY - minY, 1e-6);
   const midY = (minY + maxY) / 2;
-  const half = depth / 12; // 走廊半宽 = 进深/12（带宽 = 进深/6）
-  const zBase = BUILDING_H;             // 地板高度（房间/走廊均平铺在此平面）
-  const zTop = BUILDING_H;              // 房间=平铺色块，不再整体抬升；凹凸感由 roomWalls 隔墙表达
+  const half = depth / 12;
+  return { minX, maxX, minY, maxY, midY, half, width, depth };
+});
+
+/** 网格单元 → 楼层世界坐标矩形 [x0,y0,x1,y1]（与上/下排 bands 对齐） */
+function spanToRect(s: { bi0: number; bi1: number; c0: number; c1: number }): [number, number, number, number] {
+  const g = gridGeom.value;
+  if (!g) return [0, 0, 0, 0];
+  const bands = [
+    { y0: g.minY, y1: g.midY - g.half },
+    { y0: g.midY + g.half, y1: g.maxY },
+  ];
+  const x0 = g.minX + (g.width * s.c0) / ROOM_COLS;
+  const x1 = g.minX + (g.width * (s.c1 + 1)) / ROOM_COLS;
+  const y0 = bands[s.bi0]!.y0;
+  const y1 = bands[s.bi1]!.y1;
+  return [x0, y0, x1, y1];
+}
+function rectToPolygon(r: [number, number, number, number]): [number, number][] {
+  const [x0, y0, x1, y1] = r;
+  return [
+    [x0, y0],
+    [x1, y0],
+    [x1, y1],
+    [x0, y1],
+  ];
+}
+/** 楼层世界坐标 → 网格单元（用于拖拽定位） */
+function floorToCell(fx: number, fy: number): { bi: number; c: number } {
+  const g = gridGeom.value;
+  if (!g) return { bi: 0, c: 0 };
+  const c = Math.min(ROOM_COLS - 1, Math.max(0, Math.round(((fx - g.minX) / g.width) * ROOM_COLS)));
+  const bi = fy < g.midY ? 0 : 1;
+  return { bi, c };
+}
+/** 按真实房间出现顺序铺入 6×2 网格；已存在（如编辑后）的单元定位保留 */
+function initGridPos(): void {
+  const rooms = displayedRooms.value;
+  rooms.forEach((r, i) => {
+    if (!gridPos[r.id]) gridPos[r.id] = idxToSpan(i);
+  });
+}
+watch(displayedRooms, () => initGridPos(), { immediate: true });
+
+const roomBlocks = computed<RoomBlock[]>(() => {
+  const g = gridGeom.value;
+  if (!g) return [];
   const f = fit.value;
   const P = (ax: number, ay: number, z: number): [number, number] => {
     const [ix, iy] = projectXY(ax, ay, z);
     return [ix * f.scale + f.padX, iy * f.scale + f.padY];
   };
-  const bands: { y0: number; y1: number; prefix: number }[] = [
-    { y0: minY, y1: midY - half, prefix: 1 },
-    { y0: midY + half, y1: maxY, prefix: 2 },
-  ];
+  const zTop = BUILDING_H; // 房间=平铺色块，凹凸感由隔墙表达（与合成网格一致）
+  const hasReal = displayedRooms.value.length > 0;
   const blocks: RoomBlock[] = [];
-  bands.forEach((band, bi) => {
-    for (let c = 0; c < ROOM_COLS; c++) {
-      const x0 = minX + (width * c) / ROOM_COLS;
-      const x1 = minX + (width * (c + 1)) / ROOM_COLS;
-      const y0 = band.y0;
-      const y1 = band.y1; // 较大的 ay = 朝向观察者的前边
-      // 顶面四个角（z=zTop，亮色）
-      const t0 = P(x0, y0, zTop);
-      const t1 = P(x1, y0, zTop);
-      const t2 = P(x1, y1, zTop);
-      const t3 = P(x0, y1, zTop);
-      const topPoints = `${t0[0].toFixed(1)},${t0[1].toFixed(1)} ${t1[0].toFixed(1)},${t1[1].toFixed(1)} ${t2[0].toFixed(1)},${t2[1].toFixed(1)} ${t3[0].toFixed(1)},${t3[1].toFixed(1)}`;
-      const cx = (t0[0] + t1[0] + t2[0] + t3[0]) / 4;
-      const cy = (t0[1] + t1[1] + t2[1] + t3[1]) / 4;
-      const roomHpx = Math.abs(t0[1] - t3[1]); // 房间顶面屏幕竖向像素高度
-      // 四行文字自适应字号（房间越高字越大，但夹紧在可读/可放范围内）
-      const gap = Math.max(roomHpx * 0.21, 8);
-      const sizeNumber = Math.min(Math.max(gap * 0.95, 10), 16);
-      const sizeOther = Math.min(Math.max(gap * 0.62, 7.5), 11);
-      const top = cy - gap * 1.5;
 
-      const idx = bi * ROOM_COLS + c;
-      const real = displayedRooms.value[idx] ?? null;
-      const sp = SPECIAL[`${bi}_${c}`];
-      const isSpecial = !!sp;
-      const number = real?.code || (sp ? sp.number : `${band.prefix}${String(c + 1).padStart(2, '0')}`);
-      const name = real?.name || (sp ? sp.name : ROOM_SAMPLE.names[c]!);
-      const dept = real?.dept || (sp ? sp.dept : ROOM_SAMPLE.depts[c]!);
-      const area = real
-        ? `${real.useArea > 0 ? real.useArea.toFixed(2) : '—'}㎡ / ${real.buildArea > 0 ? real.buildArea.toFixed(2) : '—'}㎡`
-        : sp
-          ? sp.area
-          : ROOM_SAMPLE.areas[c]!;
-
-      // 该格子对应的房间对象：优先使用真实入库房间，否则合成一个占位 ParsedRoom 供弹窗展示/编辑
-      let room: RoomLike;
-      if (real) {
-        room = real;
-      } else {
-        const m = area.match(/([\d.]+)\s*㎡\s*\/\s*([\d.]+)\s*㎡/);
+  // 演示态：无真实房间时，用 12 个样例房间铺满 6×2 网格
+  const demos: { room: RoomLike; meta: { number: string; name: string; dept: string; area: string; isSpecial: boolean } }[] = hasReal
+    ? []
+    : Array.from({ length: GRID_ROWS * ROOM_COLS }, (_, i) => {
+        const bi = Math.floor(i / ROOM_COLS);
+        const c = i % ROOM_COLS;
+        const sp = SPECIAL[`${bi}_${c}`];
+        const number = sp ? sp.number : `${bi === 0 ? '1' : '2'}${String(c + 1).padStart(2, '0')}`;
+        const name = sp ? sp.name : ROOM_SAMPLE.names[c]!;
+        const dept = sp ? sp.dept : ROOM_SAMPLE.depts[c]!;
+        const area = sp ? sp.area : ROOM_SAMPLE.areas[c]!;
         const base: ParsedRoom = {
-          id: `r${bi}_${c}`,
+          id: `demo_${i}`,
           buildingName: props.buildingName ?? '',
           floorNo: selectedFloor.value,
           code: number,
@@ -716,47 +798,78 @@ const roomBlocks = computed<RoomBlock[]>(() => {
           name,
           dept,
           usePurpose: '',
-          useArea: m ? parseFloat(m[1]) : 0,
-          buildArea: m ? parseFloat(m[2]) : 0,
-          polygon: [[x0, y0], [x1, y0], [x1, y1], [x0, y1]],
-          centroid: [(x0 + x1) / 2, (y0 + y1) / 2],
-          area: Math.abs((x1 - x0) * (y1 - y0)),
+          useArea: 0,
+          buildArea: 0,
+          polygon: [
+            [0, 0],
+            [1, 0],
+            [1, 1],
+            [0, 1],
+          ],
+          centroid: [0.5, 0.5],
+          area: 0,
           inspectStatus: 'normal',
           useStatus: '' as UseStatus,
           selected: true,
           layers: [],
           unmatchedTexts: [],
         };
-        const ov = synthOverrides[base.id];
-        room = ov ? ({ ...base, ...ov } as ParsedRoom) : base;
-      }
-      // 隐藏（预览态剔除 / 真实态 store 已剔除）的房间不渲染格子
-      if ((room as ParsedRoom).selected === false) return;
-
-      blocks.push({
-        id: room.id,
-        room,
-        topPoints,
-        sidePoints: '', // 平铺色块无侧壁
-        topFill: isSpecial ? sp!.fill : NORMAL_TOP,
-        sideFill: isSpecial ? sp!.side : NORMAL_SIDE,
-        stroke: isSpecial ? sp!.stroke : NORMAL_STROKE,
-        cx,
-        cy,
-        number,
-        name,
-        dept,
-        area,
-        special: isSpecial,
-        textColor: isSpecial ? '#ffffff' : '#2d3a47',
-        yNumber: top,
-        yName: top + gap,
-        yDept: top + gap * 2,
-        yArea: top + gap * 3,
-        sizeNumber,
-        sizeOther,
+        return { room: base as RoomLike, meta: { number, name, dept, area, isSpecial: !!sp } };
       });
-    }
+
+  const items = hasReal ? displayedRooms.value : demos.map((d) => d.room);
+  items.forEach((room, idx) => {
+    const biF = Math.floor(idx / ROOM_COLS);
+    const cF = idx % ROOM_COLS;
+    const span = hasReal ? gridPos[room.id] ?? idxToSpan(idx) : idxToSpan(idx);
+    const [wx0, wy0, wx1, wy1] = spanToRect(span);
+    const t0 = P(wx0, wy0, zTop);
+    const t1 = P(wx1, wy0, zTop);
+    const t2 = P(wx1, wy1, zTop);
+    const t3 = P(wx0, wy1, zTop);
+    const topPoints = `${t0[0].toFixed(1)},${t0[1].toFixed(1)} ${t1[0].toFixed(1)},${t1[1].toFixed(1)} ${t2[0].toFixed(1)},${t2[1].toFixed(1)} ${t3[0].toFixed(1)},${t3[1].toFixed(1)}`;
+    const cx = (t0[0] + t1[0] + t2[0] + t3[0]) / 4;
+    const cy = (t0[1] + t1[1] + t2[1] + t3[1]) / 4;
+    const roomHpx = Math.abs(t0[1] - t3[1]);
+    const gap = Math.max(roomHpx * 0.21, 8);
+    const sizeNumber = Math.min(Math.max(gap * 0.95, 10), 16);
+    const sizeOther = Math.min(Math.max(gap * 0.62, 7.5), 11);
+    const top = cy - gap * 1.5;
+
+    const sp = SPECIAL[`${biF}_${cF}`]!;
+    const meta = hasReal
+      ? {
+          number: room.number || room.code || `房${idx + 1}`,
+          name: room.name || '（未命名）',
+          dept: room.dept || '—',
+          area: `${room.useArea > 0 ? room.useArea.toFixed(2) : '—'}㎡ / ${room.buildArea > 0 ? room.buildArea.toFixed(2) : '—'}㎡`,
+          isSpecial: SPECIAL_BY_IDX.has(idx),
+        }
+      : demos[idx]!.meta;
+
+    blocks.push({
+      id: room.id,
+      room,
+      topPoints,
+      sidePoints: '',
+      topFill: meta.isSpecial ? sp.fill : NORMAL_TOP,
+      sideFill: meta.isSpecial ? sp.side : NORMAL_SIDE,
+      stroke: meta.isSpecial ? sp.stroke : NORMAL_STROKE,
+      cx,
+      cy,
+      number: meta.number,
+      name: meta.name,
+      dept: meta.dept,
+      area: meta.area,
+      special: meta.isSpecial,
+      textColor: meta.isSpecial ? '#ffffff' : '#2d3a47',
+      yNumber: top,
+      yName: top + gap,
+      yDept: top + gap * 2,
+      yArea: top + gap * 3,
+      sizeNumber,
+      sizeOther,
+    });
   });
   return blocks;
 });
@@ -951,14 +1064,24 @@ interface RoomFill {
 }
 
 /** 房间文字标签：固定 4 项（房间号 / 名称 / 建筑面积 / 使用面积），房间号缺省兜底「未命名」。 */
-function buildLabelLines(room: RoomLike): Omit<LabelLine, 'y' | 'rect'>[] {
+function buildLabelLines(room: RoomLike, special: boolean): Omit<LabelLine, 'y'>[] {
   const code = (room.code || room.number || room.name || '').trim();
   const d = (s: string) => (s.trim() !== '' ? s.trim() : '—');
+  // 与合成网格（roomBlocks）完全一致的四行：号码(大字) / 名称 / 部门 / 使用面积㎡ / 建筑面积㎡；
+  // 普通房间深色字，特殊房间白色字（与彩色顶面对比）。
+  const main = special ? '#ffffff' : '#2d3a47';
+  const sub = special ? 'rgba(255,255,255,0.92)' : '#4b5563';
   return [
-    { text: code !== '' ? code : '未命名房间', size: 11, weight: 500, color: '#1f2937', badge: false },
-    { text: `名称:${d(room.name)}`, size: 8, weight: 400, color: '#374151', badge: false },
-    { text: `建筑面积:${room.buildArea > 0 ? room.buildArea.toFixed(1) : '—'}㎡`, size: 8, weight: 400, color: '#111827', badge: true },
-    { text: `使用面积:${room.useArea > 0 ? room.useArea.toFixed(1) : '—'}㎡`, size: 8, weight: 400, color: '#111827', badge: true },
+    { text: code !== '' ? code : '未命名房间', size: 13, weight: 700, color: main, badge: false },
+    { text: d(room.name), size: 9, weight: 400, color: sub, badge: false },
+    { text: d(room.dept), size: 9, weight: 400, color: sub, badge: false },
+    {
+      text: `${room.useArea > 0 ? room.useArea.toFixed(2) : '—'}㎡ / ${room.buildArea > 0 ? room.buildArea.toFixed(2) : '—'}㎡`,
+      size: 9,
+      weight: 500,
+      color: main,
+      badge: false,
+    },
   ];
 }
 
@@ -1164,7 +1287,6 @@ const wallTopFaces = computed<Face[]>(() =>
     .map((seg) => wallFaces(seg).top),
 );
 
-const LINE_GAP = 13;
 /** 房间几何质心（源坐标），由多边形顶点反推（不依赖 room.centroid 字段，杜绝持久化缺失导致的 NaN）。 */
 function centroidOf(room: RoomLike): [number, number] {
   const poly = polyOf(room);
@@ -1184,9 +1306,9 @@ const roomFills = computed<RoomFill[]>(() => {
   const blocks = displayedRooms.value.map((room) => {
     const poly = polyOf(room);
     const H = wallHeight.value;
-    // 房间盒子向内收一点(INSET)：在相邻房间、上下两排之间留出可见的走廊/隔墙缝；
-    // 仅相对各自质心收缩，房间中心位置与 6列×2排 的排布均不变。
-    const INSET = 0.06;
+    // 房间盒子不做内缩（INSET 恒为 0）：真实房间之间的分隔由真实墙体（wallSide/wallTopFaces）负责，
+    // 浏览与编辑模式必须渲染出完全相同的盒子（缩放手柄画在真实轮廓角点，也与盒子角点重合）。
+    const INSET = 0;
     let icx = 0;
     let icy = 0;
     for (const p of poly) {
@@ -1246,15 +1368,24 @@ const roomFills = computed<RoomFill[]>(() => {
             topPts.reduce((s, p) => s + p[1], 0) / topPts.length,
           ]
         : toScreen(room.centroid ?? [0, 0]);
-    const baseLines = buildLabelLines(room);
-    const startY = c[1] - ((baseLines.length - 1) * LINE_GAP) / 2;
-    const lines: LabelLine[] = baseLines.map((ln, i) => ({ ...ln, y: startY + i * LINE_GAP }));
+    // 与合成网格一致的自适应行距/字号：按顶面屏幕竖向像素高度推 gap，再夹紧到可读范围
+    const ys = topPts.map((p) => p[1]);
+    const roomHpx = ys.length > 1 ? Math.abs(Math.max(...ys) - Math.min(...ys)) : 0;
+    const gap = Math.max(roomHpx * 0.21, 8);
+    const sizeNumber = Math.min(Math.max(gap * 0.95, 10), 16);
+    const sizeOther = Math.min(Math.max(gap * 0.62, 7.5), 11);
+    const isSpecial = SPECIAL_BY_IDX.has(displayedRooms.value.indexOf(room));
+    const baseLines = buildLabelLines(room, isSpecial).map((ln, i) =>
+      i === 0 ? { ...ln, size: sizeNumber } : { ...ln, size: sizeOther },
+    );
+    const startY = c[1] - ((baseLines.length - 1) * gap) / 2;
+    const lines: LabelLine[] = baseLines.map((ln, i) => ({ ...ln, y: startY + i * gap }));
     return {
       id: room.id,
       room,
       points,
-      fill: '#ffffff',
-      stroke: '#c4cbd4',
+      fill: fillFor(room),
+      stroke: NORMAL_STROKE,
       dimmed: room.selected === false,
       sides,
       lines,
@@ -1430,6 +1561,11 @@ function onSelect(room: RoomLike, ev?: MouseEvent): void {
     emit('room-click', room as ParsedRoom);
     return;
   }
+  // 编辑模式下：单击=选中（Shift 多选），并打开弹窗供属性编辑
+  if (editMode.value) {
+    onSelectRoom(room, ev);
+    return;
+  }
   // 拖拽平移（移动超过阈值）结束后松手会触发一次 click，需忽略；
   // 用「按下点→松开点」的直线距离判断，容忍点击瞬间的微小手抖（≤8px 仍算点击），
   // 避免「必须点中房间正中才能弹出」的误吞现象。
@@ -1569,6 +1705,299 @@ function saveEdit(): void {
   ElMessage.success('已保存房间信息');
 }
 
+// ---- 楼层编辑模式：房间 增 / 删 / 改 / 查（合并 / 移动 / 缩放 / 新增） ----
+// 仅在 store 模式（非嵌入预览）可用；编辑的是真实入库房间（roomFills），合成网格在编辑模式下隐藏。
+const editMode = ref(false);
+const activeTool = ref<'select' | 'add'>('select');
+const selectedIds = ref<string[]>([]);
+const dragKind = ref<null | 'pan' | 'move' | 'resize' | 'draw'>(null);
+const dragRoomId = ref<string | null>(null);
+const dragCorner = ref(0);
+const dragStartFloor = reactive({ x: 0, y: 0 });
+/** 拖拽起始时的网格单元（光标所在格）与房间原始 span，用于移动/缩放的增量计算 */
+let dragStartCell = { bi: 0, c: 0 };
+let dragStartSpan = { bi0: 0, bi1: 0, c0: 0, c1: 0 };
+
+/** 把一个房间移动到新 span，若新位置与另一房间重叠则与之互换（保持网格整洁） */
+function applySpan(id: string, next: { bi0: number; bi1: number; c0: number; c1: number }, swapWith?: string): void {
+  const old = gridPos[id];
+  gridPos[id] = next;
+  if (swapWith && gridPos[swapWith] && old) gridPos[swapWith] = old;
+}
+/** 把某个单元范围夹紧在 6×2 内，并保持尺寸不变（用于移动） */
+function clampSpanKeepSize(s: { bi0: number; bi1: number; c0: number; c1: number }): { bi0: number; bi1: number; c0: number; c1: number } {
+  const w = s.c1 - s.c0;
+  const h = s.bi1 - s.bi0;
+  const c0 = Math.min(ROOM_COLS - 1 - w, Math.max(0, s.c0));
+  const bi0 = Math.min(GRID_ROWS - 1 - h, Math.max(0, s.bi0));
+  return { bi0, bi1: bi0 + h, c0, c1: c0 + w };
+}
+/** 缩放：固定对角角点，把当前拖拽角点移动到的单元赋值给对应角（保证最小 1 格） */
+function resizeSpan(base: { bi0: number; bi1: number; c0: number; c1: number }, corner: number, cell: { bi: number; c: number }): { bi0: number; bi1: number; c0: number; c1: number } {
+  let { bi0, bi1, c0, c1 } = base;
+  const setC = (v: number) => {
+    if (corner === 0 || corner === 3) c0 = Math.min(Math.max(v, 0), c1);
+    else c1 = Math.max(Math.min(v, ROOM_COLS - 1), c0);
+  };
+  const setBi = (v: number) => {
+    if (corner === 0 || corner === 1) bi0 = Math.min(Math.max(v, 0), bi1);
+    else bi1 = Math.max(Math.min(v, GRID_ROWS - 1), bi0);
+  };
+  setC(cell.c);
+  setBi(cell.bi);
+  return { bi0, bi1, c0, c1 };
+}
+/** 两个网格 span 是否占用任一相同单元 */
+function overlaps(a: { bi0: number; bi1: number; c0: number; c1: number }, b: { bi0: number; bi1: number; c0: number; c1: number }): boolean {
+  return a.bi0 <= b.bi1 && a.bi1 >= b.bi0 && a.c0 <= b.c1 && a.c1 >= b.c0;
+}
+/** 提交：把房间当前网格 span 转成世界坐标矩形并写回 store（持久化） */
+function commitSpan(id: string): void {
+  const f = currentFloor.value;
+  const s = gridPos[id];
+  if (!f || !s) return;
+  store.updateRoomGeometry(f.id, id, rectToPolygon(spanToRect(s)));
+}
+const draftRect = ref<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
+/** 内部渲染 <svg> 的引用：用 getScreenCTM 把屏幕坐标精确反算回楼层坐标（含 viewBox 缩放与图层平移/缩放） */
+const stageG = ref<SVGGraphicsElement | null>(null);
+
+function isSelected(id: string): boolean {
+  return selectedIds.value.includes(id);
+}
+function toggleSelect(id: string): void {
+  const i = selectedIds.value.indexOf(id);
+  if (i >= 0) selectedIds.value = selectedIds.value.filter((x) => x !== id);
+  else selectedIds.value = [...selectedIds.value, id];
+}
+
+/** 屏幕坐标 → 楼层 UTM 坐标（z 为抬升高度，画在 z=0 地面或 z=wallHeight 顶面）。
+ *  借助 <g> 的 getScreenCTM().inverse()，一次性抵消 viewBox 缩放、图层平移(pan)与缩放(zoom)，
+ *  得到 project() 的输出空间；再逆推 fit 变换 + 反向对齐旋转，即得楼层坐标。 */
+function fromScreen(clientX: number, clientY: number, z = 0): [number, number] {
+  const g = stageG.value;
+  if (!g) return [0, 0];
+  const ctm = g.getScreenCTM();
+  if (!ctm) return [0, 0];
+  const pt = new DOMPoint(clientX, clientY).matrixTransform(ctm.inverse());
+  const f = fit.value;
+  const ix = (pt.x - f.padX) / f.scale;
+  const iy = (pt.y - f.padY) / f.scale;
+  const ax = ix; // SX=0：深度错切为 0，ax 即对齐后 x
+  const ay = (iy + z * Z_EXAG) / K.value; // iy = ay*K - z*Z_EXAG 反解
+  const { cx, cy, angle } = sourceAlign.value; // alignSource 绕质心旋转 -angle，此处反向旋转 +angle
+  const dx = ax - cx;
+  const dy = ay - cy;
+  const c = Math.cos(angle);
+  const s = Math.sin(angle);
+  return [dx * c - dy * s + cx, dx * s + dy * c + cy];
+}
+
+/** 编辑模式：单击房间——单选，Shift/Ctrl 多选（供合并）；仍打开弹窗供属性编辑 */
+function onSelectRoom(room: RoomLike, ev?: MouseEvent): void {
+  if (editMode.value && ev && (ev.shiftKey || ev.ctrlKey || ev.metaKey)) {
+    toggleSelect(room.id);
+  } else {
+    selectedIds.value = [room.id];
+  }
+  selectedId.value = room.id;
+  selectedRoom.value = room;
+  if (!selectedId.value) return;
+  popMode.value = null;
+  const stage = mainRef.value ?? stageRef.value;
+  if (!stage) return;
+  const r = stage.getBoundingClientRect();
+  if (ev) popupAnchor.value = { x: ev.clientX - r.left, y: ev.clientY - r.top };
+  else popupAnchor.value = { x: r.width / 2, y: r.height / 2 };
+  popupBase.value = { x: (popupAnchor.value.x - 270) / zoom.value, y: (popupAnchor.value.y - 300) / zoom.value };
+  nextTick(() => fitPopupInStage());
+}
+
+/** 编辑模式：在房间体上按下——开始移动（拖拽房间轮廓） */
+function onRoomDown(room: RoomLike, ev: MouseEvent): void {
+  if (!editMode.value) return; // 非编辑模式不拦截，走原 onSelect/弹窗
+  ev.stopPropagation();
+  if (activeTool.value !== 'select') return;
+  selectedIds.value = [room.id];
+  selectedRoom.value = room;
+  selectedId.value = room.id;
+  dragKind.value = 'move';
+  dragRoomId.value = room.id;
+  dragStartSpan = { ...(gridPos[room.id] ?? idxToSpan(0)) };
+  const p = fromScreen(ev.clientX, ev.clientY);
+  dragStartFloor.x = p[0];
+  dragStartFloor.y = p[1];
+  dragStartCell = floorToCell(p[0], p[1]);
+  isDragging.value = true;
+  dragMoved.value = false;
+  dragStart = { x: ev.clientX, y: ev.clientY, panX: panX.value, panY: panY.value };
+}
+
+/** 编辑模式：在房间四角手柄按下——开始缩放（拖动该角点） */
+function onHandleDown(room: RoomLike, idx: number, ev: MouseEvent): void {
+  if (!editMode.value) return;
+  ev.stopPropagation();
+  selectedIds.value = [room.id];
+  selectedRoom.value = room;
+  selectedId.value = room.id;
+  dragKind.value = 'resize';
+  dragRoomId.value = room.id;
+  dragCorner.value = idx;
+  dragStartSpan = { ...(gridPos[room.id] ?? idxToSpan(0)) };
+  const p = fromScreen(ev.clientX, ev.clientY);
+  dragStartCell = floorToCell(p[0], p[1]);
+  isDragging.value = true;
+  dragMoved.value = false;
+  dragStart = { x: ev.clientX, y: ev.clientY, panX: panX.value, panY: panY.value };
+}
+
+/** 提交「框选新增」的草稿矩形为真实房间 */
+function commitDraft(): void {
+  const d = draftRect.value;
+  draftRect.value = null;
+  if (!d) return;
+  const x0 = Math.min(d.x0, d.x1);
+  const x1 = Math.max(d.x0, d.x1);
+  const y0 = Math.min(d.y0, d.y1);
+  const y1 = Math.max(d.y0, d.y1);
+  if (x1 - x0 < 0.5 || y1 - y0 < 0.5) return; // 太小忽略
+  const f = currentFloor.value;
+  if (!f) return;
+  const c0 = Math.min(ROOM_COLS - 1, Math.max(0, Math.round(((x0 - (gridGeom.value?.minX ?? 0)) / (gridGeom.value?.width ?? 1)) * ROOM_COLS)));
+  const c1 = Math.min(ROOM_COLS - 1, Math.max(0, Math.round(((x1 - (gridGeom.value?.minX ?? 0)) / (gridGeom.value?.width ?? 1)) * ROOM_COLS)));
+  const bi0 = (y0 + y1) / 2 < (gridGeom.value?.midY ?? 0) ? 0 : 1;
+  const bi1 = bi0;
+  store.addRoom(f.id, { outline: [[x0, y0], [x1, y0], [x1, y1], [x0, y1]] });
+  // 新增后把该房间放到草稿拖出的网格单元（否则会被 initGridPos 铺到默认空位）
+  nextTick(() => {
+    const rooms = displayedRooms.value;
+    const last = rooms[rooms.length - 1];
+    if (last) gridPos[last.id] = { bi0, bi1, c0, c1 };
+  });
+  ElMessage.success('已新增房间');
+}
+
+/** 合并所选房间 */
+function doMerge(): void {
+  const f = currentFloor.value;
+  if (!f) return;
+  if (selectedIds.value.length < 2) {
+    ElMessage.warning('请按住 Shift 点选 2 个及以上房间后再合并');
+    return;
+  }
+  const id = store.mergeRooms(f.id, [...selectedIds.value]);
+  if (id) {
+    // 合并后新房间占据所选房间网格单元的外包范围
+    let bi0 = GRID_ROWS - 1, bi1 = 0, c0 = ROOM_COLS - 1, c1 = 0;
+    for (const sid of selectedIds.value) {
+      const s = gridPos[sid];
+      if (!s) continue;
+      bi0 = Math.min(bi0, s.bi0);
+      bi1 = Math.max(bi1, s.bi1);
+      c0 = Math.min(c0, s.c0);
+      c1 = Math.max(c1, s.c1);
+    }
+    nextTick(() => {
+      if (gridPos[id]) gridPos[id] = { bi0, bi1, c0, c1 };
+    });
+    selectedIds.value = [id];
+    selectedRoom.value = displayedRooms.value.find((r) => r.id === id) ?? null;
+    selectedId.value = id;
+  } else {
+    selectedIds.value = [];
+    selectedRoom.value = null;
+    selectedId.value = null;
+  }
+}
+
+/** 删除所选房间 */
+function doDelete(): void {
+  const f = currentFloor.value;
+  if (!f) return;
+  if (!selectedIds.value.length) {
+    ElMessage.warning('请先选择要删除的房间');
+    return;
+  }
+  store.deleteRooms(f.id, [...selectedIds.value]);
+  selectedIds.value = [];
+  selectedRoom.value = null;
+  selectedId.value = null;
+  closePop();
+}
+
+/** 退出编辑模式 */
+function exitEdit(): void {
+  editMode.value = false;
+  activeTool.value = 'select';
+  selectedIds.value = [];
+  draftRect.value = null;
+}
+
+/** 编辑模式下选中单个房间时，其网格单元四角（顶面 z=wallHeight）的屏幕坐标，用于绘制缩放手柄 */
+const editCorners = computed(() => {
+  if (!editMode.value || selectedIds.value.length !== 1 || !selectedRoom.value) return [];
+  const s = gridPos[selectedRoom.value.id];
+  if (!s) return [];
+  const [x0, y0, x1, y1] = spanToRect(s);
+  const H = wallHeight.value;
+  // 顺序：0=左上(远-左) 1=右上(远-右) 2=右下(近-右) 3=左下(近-左)
+  return [
+    project(x0, y0, H),
+    project(x1, y0, H),
+    project(x1, y1, H),
+    project(x0, y1, H),
+  ].map((p) => ({ x: p[0], y: p[1] }));
+});
+
+/** 框选新增时的草稿矩形（project 输出空间） */
+const draftPoints = computed(() => {
+  if (!editMode.value || !draftRect.value) return '';
+  const d = draftRect.value;
+  const a = project(d.x0, d.y0, 0);
+  const b = project(d.x1, d.y1, 0);
+  return `${a[0].toFixed(1)},${a[1].toFixed(1)} ${b[0].toFixed(1)},${a[1].toFixed(1)} ${b[0].toFixed(1)},${b[1].toFixed(1)} ${a[0].toFixed(1)},${b[1].toFixed(1)}`;
+});
+
+/** 是否存在真实入库房间（决定编辑模式下是否隐藏合成演示网格） */
+const hasRealRooms = computed(() => displayedRooms.value.length > 0);
+
+/**
+ * 是否渲染「真实房间」路径（roomFills + 真实墙体 + 真实标签）。
+ * 三种情况任一满足即走真实路径：渐进式演示推进到第 5 阶段 / 编辑模式 / 已导入真实房间。
+ * 关键：有真实房间时浏览模式也走真实轮廓渲染 —— 保证「编辑前后画面完全一致」，
+ * 不会再出现浏览=合成网格布局、编辑=真实坐标布局导致的上下排翻转/样式跳变。
+ */
+const showRooms = computed(() => renderStage.value >= 5 || editMode.value || hasRealRooms.value);
+
+/**
+ * 真实房间的特殊配色映射：与合成网格 SPECIAL 格位一一对应。
+ * roomBlocks 用 `${bi}_${c}` 取 SPECIAL，且第 bi 排第 c 格填 displayedRooms[bi*ROOM_COLS+c]，
+ * 故 '0_2'/'0_5'/'1_3' 依次对应真实房间序号 2 / 5 / 9（即 R03、R06 红、R10 紫），
+ * 保证编辑模式（真实房间）与浏览模式（合成网格）颜色完全一致。
+ */
+const SPECIAL_BY_IDX = new Map<number, string>();
+for (const [k, v] of Object.entries(SPECIAL)) {
+  const [b, c] = k.split('_').map(Number);
+  if (b == null || c == null || Number.isNaN(b) || Number.isNaN(c)) continue;
+  SPECIAL_BY_IDX.set(b * ROOM_COLS + c, v.fill);
+}
+
+/** 真实房间的顶面填充色：普通统一浅蓝，少数特殊房间醒目色（与合成网格按格位配色一致） */
+function fillFor(room: RoomLike): string {
+  const idx = displayedRooms.value.indexOf(room);
+  return SPECIAL_BY_IDX.get(idx) ?? NORMAL_TOP;
+}
+
+/** 进入编辑模式 */
+function enterEdit(): void {
+  editMode.value = true;
+  activeTool.value = 'select';
+  selectedIds.value = [];
+  selectedRoom.value = null;
+  selectedId.value = null;
+  closePop();
+}
+
 // ---- 缩放 / 平移 相关函数与状态已在上方（immediate watch 之前）声明，避免 TDZ ----
 </script>
 
@@ -1611,9 +2040,30 @@ function saveEdit(): void {
           <el-button type="warning" plain @click="startFill">继续补填</el-button>
         </div>
 
+        <div class="fpv-editbar" v-if="!props.embedded">
+          <template v-if="!editMode">
+            <el-button size="small" type="primary" @click="enterEdit">编辑楼层（房间）</el-button>
+            <span class="fpv-editbar__tip">可新增 / 删除 / 移动 / 缩放 / 合并房间</span>
+          </template>
+          <template v-else>
+            <span class="fpv-editbar__hint">编辑中：</span>
+            <el-radio-group v-model="activeTool" size="small">
+              <el-radio-button value="select">选择 / 移动</el-radio-button>
+              <el-radio-button value="add">框选新增</el-radio-button>
+            </el-radio-group>
+            <el-button size="small" :disabled="selectedIds.length < 2" @click="doMerge">合并（{{ selectedIds.length }}）</el-button>
+            <el-button size="small" type="danger" plain :disabled="!selectedIds.length" @click="doDelete">删除（{{ selectedIds.length }}）</el-button>
+            <el-button size="small" @click="exitEdit">完成</el-button>
+            <span class="fpv-editbar__tip" v-if="activeTool === 'add'">在空白处按住拖出矩形即可新增房间</span>
+            <span class="fpv-editbar__tip" v-else-if="selectedIds.length < 2">按住 Shift 点选多个房间可合并</span>
+            <span class="fpv-editbar__tip" v-else>已选 {{ selectedIds.length }} 间，点「合并」或继续 Shift 加选</span>
+          </template>
+        </div>
+
         <div class="fpv-main" ref="mainRef">
           <div class="fpv-stage" ref="stageRef" @wheel.prevent="onWheel" @mousedown="onStageMouseDown" @mouseleave="onStageMouseLeave">
           <svg
+            ref="stageG"
             :viewBox="`0 0 ${VIEW_W} ${VIEW_H}`"
             class="fpv-svg"
             :style="svgStyle"
@@ -1650,8 +2100,8 @@ function saveEdit(): void {
               stroke="none"
               pointer-events="none"
             />
-            <!-- ③ 房间平铺色块（第 3 步）：每个房间=平铺在地板(BUILDING_H)上的彩色矩形，不做立体、不画侧墙；凹凸感由隔墙表达。
-                 整块可点击：点击触发 onSelect 打开房间信息弹窗（真实或合成房间均可）。 -->
+            <!-- ③ 房间平铺色块（6×2 网格）：浏览 / 编辑 共用同一套渲染，保证「编辑前后画面完全一致」。
+                 编辑模式下可点击选中 / 拖拽移动（@mousedown），选中单间显示四角缩放手柄。 -->
             <template
               v-if="renderStage >= 3"
               v-for="rb in roomBlocks"
@@ -1659,14 +2109,30 @@ function saveEdit(): void {
             >
               <g
                 class="fpv-room"
-                :class="{ 'fpv-room--sel': rb.id === selectedId }"
-                @click="onSelect(rb.room, $event)"
-                style="cursor: pointer"
+                :class="{ 'fpv-room--sel': isSelected(rb.room.id) }"
+                :style="{ cursor: editMode ? (activeTool === 'add' ? 'crosshair' : 'move') : 'pointer' }"
+                @click="editMode ? onSelectRoom(rb.room, $event) : onSelect(rb.room, $event)"
+                @mousedown="editMode && activeTool === 'select' ? onRoomDown(rb.room, $event) : undefined"
               >
                 <polygon :points="rb.topPoints" :fill="rb.topFill" :stroke="rb.stroke" stroke-width="1" />
               </g>
+              <g
+                v-if="editMode && isSelected(rb.room.id) && selectedIds.length === 1 && rb.room.id === selectedRoom?.id"
+                class="fpv-handles"
+                pointer-events="none"
+              >
+                <circle
+                  v-for="(c, ci) in editCorners"
+                  :key="ci"
+                  :cx="c.x"
+                  :cy="c.y"
+                  r="6"
+                  class="fpv-handle"
+                  @mousedown.stop="onHandleDown(rb.room, ci, $event)"
+                />
+              </g>
             </template>
-            <!-- ③b 房间之间的隔墙（第 5 步）：平铺房间之间抬升 0.5m 的矮墙，房间平、墙凸 → 凹凸感；先画暗色侧面再画亮色顶面 -->
+            <!-- ③b 网格隔墙（凹凸感）：平铺房间之间的抬升矮墙，始终显示 -->
             <template
               v-if="renderStage >= 3"
               v-for="w in roomWalls"
@@ -1675,8 +2141,7 @@ function saveEdit(): void {
               <polygon v-for="(s, si) in w.sides" :key="'ws' + si" :points="s" fill="rgba(140,148,162,0.97)" :stroke="w.stroke" stroke-width="0.5" pointer-events="none" />
               <polygon :points="w.top" fill="#cdd5df" :stroke="w.stroke" stroke-width="0.5" pointer-events="none" />
             </template>
-            <!-- ⑥ 房间文字（第 4 步）：每个房间顶面正中心四行（号码最大加粗 / 名称 / 部门 / 两面积），水平绘制不倾斜；
-                 普通房间深色字、特殊房间白色字保证对比 -->
+            <!-- ⑥ 房间文字（四行：号码/名称/部门/面积）：始终显示 -->
             <g v-if="renderStage >= 4" class="fpv-labels" pointer-events="none">
               <g v-for="rb in roomBlocks" :key="'L' + rb.id">
                 <text :x="rb.cx" :y="rb.yNumber" text-anchor="middle" :font-size="rb.sizeNumber" font-weight="700" :fill="rb.textColor" dominant-baseline="middle">{{ rb.number }}</text>
@@ -1685,73 +2150,11 @@ function saveEdit(): void {
                 <text :x="rb.cx" :y="rb.yArea" text-anchor="middle" :font-size="rb.sizeOther" :fill="rb.textColor" dominant-baseline="middle">{{ rb.area }}</text>
               </g>
             </g>
-            <!-- ① 地面(楼板) + ② 走廊：保留给后续阶段（第 4 步起）；当前第 3 步楼板已由第 1 步盒顶面提供 -->
+            <!-- ① 地面(楼板)：楼板已由第 1 步盒顶面提供；此外轮廓为 z=0 投影(比楼板低一个墙高)、且为近白填充，
+                 若常显会盖住下半排房间与走廊（2026-09-29 回归），故与嵌入模板一致保持 renderStage>=5 才显示 -->
             <path v-if="renderStage >= 5 && outlinePath" :d="outlinePath" fill="#eef1f5" stroke="#c4cbd4" stroke-width="1.5" pointer-events="none" />
-            <!-- ③ 房间盒子（第 5 步起显示，预留）：先画朝向观察者的可见侧墙(较暗)，再画顶面(较亮) -->
-            <template
-              v-if="renderStage >= 5"
-              v-for="rf in roomFills"
-              :key="rf.id"
-            >
-              <g
-                class="fpv-room"
-                :opacity="rf.dimmed ? 0.18 : 1"
-                @click="onSelect(rf.room, $event)"
-              >
-                <polygon
-                  v-for="(s, si) in rf.sides"
-                  :key="'rs' + si"
-                  :points="s.points"
-                  :fill="s.fill"
-                  stroke="#9aa3b2"
-                  stroke-width="0.5"
-                  pointer-events="none"
-                />
-                <polygon
-                  :points="rf.points"
-                  :fill="rf.fill"
-                  :stroke="rf.stroke"
-                  stroke-width="1"
-                />
-              </g>
-            </template>
-            <!-- ④ 墙侧面（第 5 步起显示，预留，先画，仅作视觉，不拦截点击） -->
-            <polygon
-              v-if="renderStage >= 5"
-              v-for="(f, i) in wallSideFaces"
-              :key="'s' + i"
-              :points="f.points"
-              :fill="f.fill"
-              stroke="none"
-              pointer-events="none"
-            />
-            <!-- ⑤ 墙顶面（第 5 步起显示，预留，后画，盖在侧面上）：浅灰实心面，非白线，不拦截点击 -->
-            <polygon
-              v-if="renderStage >= 5"
-              v-for="(f, i) in wallTopFaces"
-              :key="'t' + i"
-              :points="f.points"
-              :fill="f.fill"
-              stroke="#8a8a8a"
-              stroke-width="0.5"
-              pointer-events="none"
-            />
-            <!-- ⑥ 文字（第 5 步起显示，预留，最上层） -->
-            <g v-if="renderStage >= 5" class="fpv-labels" pointer-events="none">
-              <template v-for="rf in roomFills" :key="'L' + rf.id">
-                <g v-for="(ln, i) in rf.lines" :key="i">
-                  <text
-                    :x="rf.labelX"
-                    :y="ln.y"
-                    text-anchor="middle"
-                    :font-size="ln.size"
-                    :font-weight="ln.weight"
-                    :fill="ln.color"
-                    dominant-baseline="middle"
-                  >{{ ln.text }}</text>
-                </g>
-              </template>
-            </g>
+            <!-- 框选新增时的草稿矩形 -->
+            <polygon v-if="editMode && draftRect" :points="draftPoints" class="fpv-draft" pointer-events="none" />
             </g>
           </svg>
 
@@ -2141,6 +2544,15 @@ function saveEdit(): void {
 .fpv-svg { display: block; width: 100%; height: 60vh; }
 .fpv-room { cursor: pointer; }
 .fpv-room--sel polygon { stroke: #1f6feb; stroke-width: 2.5; }
+.fpv-handles { pointer-events: none; }
+.fpv-handle { fill: #fff; stroke: #1f6feb; stroke-width: 2; pointer-events: all; cursor: nwse-resize; }
+.fpv-draft { fill: rgba(31, 111, 235, 0.12); stroke: #1f6feb; stroke-width: 1.5; stroke-dasharray: 5 4; }
+.fpv-editbar {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px;
+  padding: 8px 12px; margin-bottom: 8px; background: #f8fafc; border: 1px solid #e5e7eb; border-radius: 10px;
+}
+.fpv-editbar__hint { font-size: 13px; font-weight: 600; color: #374151; }
+.fpv-editbar__tip { font-size: 12px; color: #9ca3af; }
 .fpv-tip { line-height: 1.6; }
 .fpv-tip__no { font-weight: 700; margin-bottom: 2px; }
 .fpv-tip__row { font-size: 12px; white-space: nowrap; }

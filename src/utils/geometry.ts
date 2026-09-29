@@ -344,3 +344,71 @@ export function projectPoint(
     t.offsetY + (bbox.maxY - pt[1]) * t.scale,
   ];
 }
+
+/**
+ * 合并多个房间轮廓为一个矩形轮廓（用于「合并房间」）。
+ * 做法：把所有顶点统一旋转到「主方向坐标系」（绕整体质心旋转 -θ，θ 取所有顶点凸包的最长边方向），
+ * 在该坐标系下取轴对齐包围盒，再把包围盒四角旋转回原坐标系，得到贴合两房合并后的矩形。
+ * 适用于相邻矩形房间合并（走廊网格相邻房共享整条边时结果精确为矩形；偏移/对角相邻时为外包矩形）。
+ */
+export function mergeRectOutlines(outlines: Pt[][]): Pt[] {
+  const all: Pt[] = [];
+  for (const o of outlines) for (const p of o) all.push(p);
+  if (all.length < 3) return outlines[0] ? outlines[0].slice() : [];
+  // 整体质心
+  let cx = 0;
+  let cy = 0;
+  for (const p of all) {
+    cx += p[0];
+    cy += p[1];
+  }
+  cx /= all.length;
+  cy /= all.length;
+  // 主方向：凸包最长边方向角
+  const hull = convexHull(all);
+  let best = 0;
+  let bestLen = -1;
+  for (let i = 0; i < hull.length; i++) {
+    const a = hull[i]!;
+    const b = hull[(i + 1) % hull.length]!;
+    const dx = b[0] - a[0];
+    const dy = b[1] - a[1];
+    const len = dx * dx + dy * dy;
+    if (len > bestLen) {
+      bestLen = len;
+      best = Math.atan2(dy, dx);
+    }
+  }
+  const theta = best;
+  const c = Math.cos(-theta);
+  const s = Math.sin(-theta);
+  // 旋转到对齐坐标系，取包围盒
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let minY = Infinity;
+  let maxY = -Infinity;
+  for (const p of all) {
+    const dx = p[0] - cx;
+    const dy = p[1] - cy;
+    const ax = dx * c - dy * s + cx;
+    const ay = dx * s + dy * c + cy;
+    if (ax < minX) minX = ax;
+    if (ax > maxX) maxX = ax;
+    if (ay < minY) minY = ay;
+    if (ay > maxY) maxY = ay;
+  }
+  const corners: Pt[] = [
+    [minX, minY],
+    [maxX, minY],
+    [maxX, maxY],
+    [minX, maxY],
+  ];
+  // 旋转回原坐标系
+  const c2 = Math.cos(theta);
+  const s2 = Math.sin(theta);
+  return corners.map(([ax, ay]) => {
+    const dx = ax - cx;
+    const dy = ay - cy;
+    return [dx * c2 - dy * s2 + cx, dx * s2 + dy * c2 + cy] as Pt;
+  });
+}

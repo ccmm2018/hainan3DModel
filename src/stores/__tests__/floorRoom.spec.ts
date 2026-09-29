@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest';
+import { computed, nextTick } from 'vue';
 import { createPinia, setActivePinia } from 'pinia';
 import { useBuildingStore } from '../building';
 import { parseDxfToResult } from '../../utils/dxfParser';
@@ -155,6 +156,23 @@ describe('building store', () => {
     // 全部房间均已字段完整且无需复核 → 自动升级为 parsed
     expect(store.getFloor('图书馆', 1)!.status).toBe('parsed');
     expect(store.getFloor('图书馆', 1)!.errorReason).toBeUndefined();
+  });
+
+  it('updateRoom 修改字段后触发依赖 roomsOfFloor 的 computed 刷新（响应式回归）', async () => {
+    const store = useBuildingStore();
+    const parsed = parseDxfToResult(SAMPLE_DXF, '化学楼', 1);
+    const fid = store.importFloor({ buildingName: '化学楼', floorNo: 1, parsed, coordSource: 'local', transform });
+    const room = store.roomsOfFloor(fid)[0];
+    // 模拟视图层对房间字段的依赖（楼层图标签 / 弹窗 直接读 roomsOfFloor 派生值）
+    const nameC = computed(() => store.roomsOfFloor(fid).find((r) => r.id === room.id)?.name);
+    expect(nameC.value).toBe(room.name);
+
+    store.updateRoom(fid, room.id, { name: '响应式测试名' });
+    await nextTick();
+
+    // 修复前：in-place 修改数组元素不会替换数组引用，computed 不重算，nameC 仍为旧值；
+    // 修复后：updateRoom 末尾 rooms.value[fid] = [...list]，computed 立即反映新名称。
+    expect(nameC.value).toBe('响应式测试名');
   });
 
   it('刷新后（applyPersisted）仍可按楼栋+楼层反查到房间', () => {

@@ -12,6 +12,7 @@
 
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import { wgs84ToGcj02, gcj02ToWgs84 } from '../utils/coordTransform';
 import type { SceneConfig } from '../config/mapConfig';
 import { ROOM_STATUS_CONFIG, type Room } from '../data/roomData';
@@ -287,6 +288,23 @@ export class MapScene {
 
     this.scene = new THREE.Scene();
     this.camera = new THREE.PerspectiveCamera(60, width / height, 1, 1 << 30);
+
+    // 色调映射：glTF 的 PBR 材质在线性工作流下需经 ACES 色调映射才能正确呈现，
+    // 否则高光/中间调易被截断，观感上像「材质丢失 / 发灰发暗」。
+    this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    this.renderer.toneMappingExposure = 1.0;
+
+    // 环境贴图（IBL）：PBR 材质需要环境光照才能呈现正确质感（尤其是金属度/粗糙度与边缘反射）。
+    // 缺少 scene.environment 时，很多外立面材质会因为没有环境反射而显得「发灰、发暗、像没贴图」，
+    // 这正是「GLB 材质丢失」最常见的原因。这里用 RoomEnvironment 程序化生成一张轻量环境贴图。
+    try {
+      const pmrem = new THREE.PMREMGenerator(this.renderer);
+      const envTex = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+      this.scene.environment = envTex;
+      pmrem.dispose();
+    } catch {
+      /* 极少数 WebGL 环境下 PMREM 不可用，退化为基础灯光照明（不影响几何显示） */
+    }
 
     // 量算图层：独立于模型，始终绘制在模型之上
     this.measureGroup = new THREE.Group();

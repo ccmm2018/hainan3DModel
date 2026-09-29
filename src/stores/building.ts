@@ -278,6 +278,7 @@ export const useBuildingStore = defineStore('building', () => {
     const room = list.find((r) => r.id === roomId);
     if (!room) return;
     room.useStatus = useStatus;
+    rooms.value[fid] = [...list];
     void persistence.saveRooms(fid, list).catch(() => undefined);
   }
 
@@ -287,6 +288,7 @@ export const useBuildingStore = defineStore('building', () => {
     const room = list.find((r) => r.id === roomId);
     if (!room) return;
     room.selected = selected;
+    rooms.value[fid] = [...list];
     void persistence.saveRooms(fid, list).catch(() => undefined);
   }
 
@@ -309,6 +311,8 @@ export const useBuildingStore = defineStore('building', () => {
     const room = list.find((r) => r.id === roomId);
     if (!room) return;
     Object.assign(room, patch);
+    // 触发响应式更新：替换数组引用，使依赖 rooms/displayedRooms 的 computed（房间标签 / 弹窗 / 图块）立即刷新
+    rooms.value[fid] = [...list];
     // 补填完整后，若该房间此前因字段缺失被标记为 partial，则恢复 normal
     if (patch.code !== undefined || patch.name !== undefined) {
       if (room.code.trim() !== '' && room.name.trim() !== '' && room.inspectStatus === 'partial') {
@@ -373,6 +377,20 @@ export const useBuildingStore = defineStore('building', () => {
     return newRoom.id;
   }
 
+  /**
+   * 还原某楼层房间列表（楼层编辑「取消」/ 未点「完成」直接关闭时调用）。
+   * 用编辑开始前快照的数组整体覆盖，回滚本次编辑里所有 新增/删除/合并/移动/缩放 的改动。
+   */
+  function restoreRooms(fid: string, list: Room[]): void {
+    rooms.value[fid] = list;
+    const f = Object.values(floors.value).find((x) => x.id === fid);
+    if (f) {
+      f.roomCount = list.length;
+      void persistence.saveFloor(f, list).catch(() => undefined);
+    }
+    void persistence.saveRooms(fid, list).catch(() => undefined);
+  }
+
   /** 删除若干房间（楼层编辑：勾选后删除）。 */
   function deleteRooms(fid: string, ids: string[]): void {
     const list = rooms.value[fid];
@@ -401,6 +419,7 @@ export const useBuildingStore = defineStore('building', () => {
     room.centroid = polygonCentroid(outline);
     if (!room.useArea || room.useArea <= 0) room.useArea = area;
     if (!room.buildArea || room.buildArea <= 0) room.buildArea = area;
+    rooms.value[fid] = [...list];
     void persistence.saveRooms(fid, list).catch(() => undefined);
   }
 
@@ -499,6 +518,7 @@ export const useBuildingStore = defineStore('building', () => {
     setRoomSelected,
     updateRoom,
     addRoom,
+    restoreRooms,
     deleteRooms,
     updateRoomGeometry,
     mergeRooms,

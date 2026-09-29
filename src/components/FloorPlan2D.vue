@@ -28,10 +28,11 @@
  *   数据源为入库前候选（ParsedRoom[]），点击房间 emit('room-click') 交由导入向导编辑。
  */
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
-import { ElMessage } from 'element-plus';
+import { ElMessage, ElMessageBox } from 'element-plus';
 import { CircleCloseFilled, WarningFilled } from '@element-plus/icons-vue';
 import { useBuildingStore } from '../stores/building';
 import { isRoomFieldComplete } from '../utils/roomFields';
+import { cleanName } from '../utils/roomName';
 import type { Floor, InspectStatus, ParsedRoom, Room, UseStatus } from '../types/cad';
 
 const props = withDefaults(
@@ -168,6 +169,8 @@ const isDragging = ref(false);
 const dragMoved = ref(false);
 let dragStart = { x: 0, y: 0, panX: 0, panY: 0 };
 let downOnRoom = false;
+/** 拖动房间（move）结束后浏览器仍会触发一次 click，用此标记抑制该次 click 的选中切换 */
+let suppressClickSelect = false;
 function onStageMouseDown(e: MouseEvent): void {
   if (e.button !== 0) return;
   const t = e.target as Element | null;
@@ -176,16 +179,8 @@ function onStageMouseDown(e: MouseEvent): void {
   isDragging.value = true;
   dragMoved.value = false;
   dragStart = { x: e.clientX, y: e.clientY, panX: panX.value, panY: panY.value };
-  if (editMode.value && activeTool.value === 'add' && !downOnRoom) {
-    // 编辑-新增：在空白处按下即开始画矩形
-    dragKind.value = 'draw';
-    const p = fromScreen(e.clientX, e.clientY);
-    dragStartFloor.x = p[0];
-    dragStartFloor.y = p[1];
-    draftRect.value = { x0: p[0], y0: p[1], x1: p[0], y1: p[1] };
-  } else {
-    dragKind.value = 'pan';
-  }
+  // 空白处按下：平移视图（新增房间已改为按钮触发，不再框选画矩形）
+  dragKind.value = 'pan';
 }
 function onStageMouseMove(e: MouseEvent): void {
   if (!isDragging.value) return;
@@ -199,36 +194,26 @@ function onStageMouseMove(e: MouseEvent): void {
     panY.value = dragStart.panY + dy;
     return;
   }
-  if (dragKind.value === 'move' || dragKind.value === 'resize') {
+  if (dragKind.value === 'move') {
     if (dragRoomId.value) {
       const cur = fromScreen(e.clientX, e.clientY);
       const cell = floorToCell(cur[0], cur[1]);
-      if (dragKind.value === 'move') {
-        // 移动：按拖拽经过的网格单元数平移房间（保持尺寸），夹紧在 6×2 内
-        const dBi = cell.bi - dragStartCell.bi;
-        const dC = cell.c - dragStartCell.c;
-        const next = clampSpanKeepSize({
-          bi0: dragStartSpan.bi0 + dBi,
-          bi1: dragStartSpan.bi1 + dBi,
-          c0: dragStartSpan.c0 + dC,
-          c1: dragStartSpan.c1 + dC,
-        });
-        // 若目标位置被其它房间占据，则与对方互换单元，保持网格整洁
-        const occupant = Object.keys(gridPos).find(
-          (id) => id !== dragRoomId.value && overlaps(next, gridPos[id]!),
-        );
-        applySpan(dragRoomId.value, next, occupant);
-      } else {
-        // 缩放：拖拽角点移动到的新单元即时改变该角，对角固定
-        const next = resizeSpan(dragStartSpan, dragCorner.value, cell);
-        gridPos[dragRoomId.value] = next;
-      }
+      // 移动：按拖拽经过的网格单元数平移房间（保持尺寸），夹紧在 6×2 内
+      const dBi = cell.bi - dragStartCell.bi;
+      const dC = cell.c - dragStartCell.c;
+      const next = clampSpanKeepSize({
+        bi0: dragStartSpan.bi0 + dBi,
+        bi1: dragStartSpan.bi1 + dBi,
+        c0: dragStartSpan.c0 + dC,
+        c1: dragStartSpan.c1 + dC,
+      });
+      // 若目标位置被其它房间占据，则与对方互换单元，保持网格整洁
+      const occupant = Object.keys(gridPos).find(
+        (id) => id !== dragRoomId.value && overlaps(next, gridPos[id]!),
+      );
+      applySpan(dragRoomId.value, next, occupant);
     }
     return;
-  }
-  if (dragKind.value === 'draw') {
-    const cur = fromScreen(e.clientX, e.clientY);
-    if (draftRect.value) draftRect.value = { ...draftRect.value, x1: cur[0], y1: cur[1] };
   }
 }
 function onStageMouseUp(e?: MouseEvent): void {
@@ -246,9 +231,12 @@ function onStageMouseUp(e?: MouseEvent): void {
     dragKind.value = null;
     return;
   }
-  if (kind === 'draw') commitDraft();
-  // move / resize 已在 mousemove 实时更新网格定位，此处把最终位置写回 store 持久化
-  if ((kind === 'move' || kind === 'resize') && dragRoomId.value) commitSpan(dragRoomId.value);
+  // move 已在 mousemove 实时更新网格定位，此处把最终位置写回 store 持久化
+  if (kind === 'move' && dragRoomId.value) {
+    commitSpan(dragRoomId.value);
+    // 发生过拖拽（非纯点击）→ 抑制随后触发的 click，避免误切换选中态
+    if (dragMoved.value) suppressClickSelect = true;
+  }
   isDragging.value = false;
   dragKind.value = null;
   dragRoomId.value = null;
@@ -334,7 +322,7 @@ function loadMaint(r: RoomLike | null): void {
 
 function saveMaint(): void {
   const f = currentFloor.value;
-  const r = selectedRoom.value;
+  const r = liveRoom.value;
   if (!f || !r) return;
   if (!isRealRoom(r)) {
     // 合成预览房间不入库，仅给出提示，不写 store
@@ -840,7 +828,7 @@ const roomBlocks = computed<RoomBlock[]>(() => {
     const meta = hasReal
       ? {
           number: room.number || room.code || `房${idx + 1}`,
-          name: room.name || '（未命名）',
+          name: cleanName(room.name),
           dept: room.dept || '—',
           area: `${room.useArea > 0 ? room.useArea.toFixed(2) : '—'}㎡ / ${room.buildArea > 0 ? room.buildArea.toFixed(2) : '—'}㎡`,
           isSpecial: SPECIAL_BY_IDX.has(idx),
@@ -905,14 +893,26 @@ const roomWalls = computed<WallBox[]>(() => {
   const wallPx = WALL_H * Z_EXAG * f.scale; // 0.5 米在屏幕上的抬升像素
   // 隔墙中线集合
   const segs: { horiz: boolean; a: [number, number]; b: [number, number] }[] = [];
-  const rows: { y0: number; y1: number }[] = [
-    { y0: minY, y1: midY - half },
-    { y0: midY + half, y1: maxY },
+  // 各房间占用的网格单元 → 用于「合并后的房间内部不再画隔墙」
+  const cellOwner = new Map<string, string>();
+  for (const [rid, s] of Object.entries(gridPos)) {
+    for (let bi = s.bi0; bi <= s.bi1; bi++) {
+      for (let c = s.c0; c <= s.c1; c++) cellOwner.set(`${bi}_${c}`, rid);
+    }
+  }
+  const rows: { y0: number; y1: number; bi: number }[] = [
+    { y0: minY, y1: midY - half, bi: 0 },
+    { y0: midY + half, y1: maxY, bi: 1 },
   ];
-  // 每排房间之间的纵向隔墙（c=1..5）
+  // 每排房间之间的纵向隔墙（c=1..5）：若两侧相邻格属于同一房间（即该隔墙位于合并房间内部），则跳过不画
   for (const row of rows) {
     for (let c = 1; c < ROOM_COLS; c++) {
       const xc = minX + (width * c) / ROOM_COLS;
+      const lk = `${row.bi}_${c - 1}`;
+      const rk = `${row.bi}_${c}`;
+      const lo = cellOwner.get(lk);
+      const ro = cellOwner.get(rk);
+      if (lo && lo === ro) continue;
       segs.push({ horiz: false, a: [xc, row.y0], b: [xc, row.y1] });
     }
   }
@@ -1442,6 +1442,7 @@ const legend = computed(() => {
 
 // ---- 交互：仅点击选中弹出小卡片（已移除 hover tooltip，避免遮挡与误触）----
 const selectedId = ref<string | null>(null);
+const selectedIds = ref<string[]>([]);
 const popMode = ref<'edit' | 'maint' | null>(null);
 
 /** 弹窗相对 .fpv-main 的锚点（点击点在 main 内的像素坐标）。弹窗从该锚点向左上展开，
@@ -1450,6 +1451,17 @@ const popupAnchor = ref({ x: 0, y: 0 });
 
 /** 当前选中房间（弹窗数据来源）。直接由 onSelect 赋值（真实或合成 RoomLike），避免仅从 displayedRooms 派生导致合成房间无法被选中。 */
 const selectedRoom = ref<RoomLike | null>(null);
+
+/**
+ * 实时选中的房间：始终从 displayedRooms（store 响应式房间）按当前选中的 id 重新查找，
+ * 保证「保存后读视图立即刷新」「编辑态多选取下弹窗跟随最后一个选中房间」等场景不出现陈旧引用。
+ * 优于直接读 selectedRoom（其在编辑态可能未被及时赋值或被指向旧对象）。
+ */
+const liveRoom = computed<RoomLike | null>(() => {
+  const id = selectedId.value || (selectedIds.value.length ? selectedIds.value[selectedIds.value.length - 1] : null);
+  if (!id) return null;
+  return displayedRooms.value.find((r) => r.id === id) ?? selectedRoom.value;
+});
 
 /** 弹窗 DOM 引用，用于测量真实尺寸后夹取在舞台内（展开子面板后尺寸变化也能重新适配） */
 const popupEl = ref<HTMLElement | null>(null);
@@ -1536,11 +1548,11 @@ const roomThumb = computed<{ viewBox: string; points: string; fill: string } | n
 
 /** 弹窗数据：一行两个属性，按 [label, value] 成对排列 */
 const roomInfoPairs = computed<{ label: string; value: string }[]>(() => {
-  const r = selectedRoom.value;
+  const r = liveRoom.value;
   if (!r) return [];
   return [
     { label: '房间号', value: r.code || '—' },
-    { label: '名称', value: r.name || '—' },
+    { label: '名称', value: cleanName(r.name) },
     { label: '部门', value: r.dept || '—' },
     { label: '用途', value: r.usePurpose || '—' },
     { label: '使用面积', value: `${r.useArea > 0 ? r.useArea.toFixed(1) : '—'} ㎡` },
@@ -1551,7 +1563,7 @@ const roomInfoPairs = computed<{ label: string; value: string }[]>(() => {
 });
 
 /** 选中房间变化时，同步加载其维护信息到表单 */
-watch(selectedRoom, (r) => loadMaint(r), { immediate: true });
+watch(liveRoom, (r) => loadMaint(r), { immediate: true });
 
 /** 展开 / 收起子面板（修改信息、维护房间信息）会改变弹窗高度，重新夹取位置避免超出界面 */
 watch(popMode, () => nextTick(fitPopupInStage));
@@ -1561,8 +1573,13 @@ function onSelect(room: RoomLike, ev?: MouseEvent): void {
     emit('room-click', room as ParsedRoom);
     return;
   }
-  // 编辑模式下：单击=选中（Shift 多选），并打开弹窗供属性编辑
+  // 编辑模式下：单击=选中（点选切换，支持多选），不在此弹窗；弹窗仅在「修改信息」按钮时弹出。
+  // 拖动房间（move）结束后浏览器仍会触发一次 click，用 suppressClickSelect 抑制，避免误改选中态。
   if (editMode.value) {
+    if (suppressClickSelect) {
+      suppressClickSelect = false;
+      return;
+    }
     onSelectRoom(room, ev);
     return;
   }
@@ -1602,7 +1619,7 @@ function isRealRoom(r: RoomLike | null): boolean {
 }
 
 function setUseStatus(status: UseStatus): void {
-  const r = selectedRoom.value;
+  const r = liveRoom.value;
   if (!r) return;
   if (isRealRoom(r)) {
     const f = currentFloor.value;
@@ -1622,14 +1639,18 @@ function hideRoom(): void {
     synthOverrides[r.id] = { ...(synthOverrides[r.id] ?? {}), selected: false } as Partial<RoomLike>;
   }
   selectedId.value = null;
+  selectedIds.value = [];
   selectedRoom.value = null;
 }
 
-/** 关闭房间弹窗（同时清空选中 id 与房间对象，确保 v-if="selectedRoom" 失效）。 */
+/** 关闭房间弹窗。浏览态：清空选中使弹窗消失；编辑态：仅收起弹窗、保留选中（便于继续删/合并）。 */
 function closePop(): void {
-  selectedId.value = null;
-  selectedRoom.value = null;
   popMode.value = null;
+  if (!editMode.value) {
+    selectedId.value = null;
+    selectedIds.value = [];
+    selectedRoom.value = null;
+  }
 }
 
 /** 预览模式下：剔除 / 恢复房间（直接改 preview.rooms 上的 selected） */
@@ -1675,7 +1696,7 @@ function startFill(): void {
 
 /** 选中房间变化时，把字段载入编辑表单 */
 watch(
-  selectedRoom,
+  liveRoom,
   (r) => {
     if (!r) return;
     editRoom.code = r.code;
@@ -1691,7 +1712,7 @@ watch(
 
 function saveEdit(): void {
   const f = currentFloor.value;
-  const r = selectedRoom.value;
+  const r = liveRoom.value;
   if (!f || !r) return;
   store.updateRoom(f.id, r.id, {
     code: editRoom.code.trim(),
@@ -1702,6 +1723,8 @@ function saveEdit(): void {
     useArea: Number(editRoom.useArea) || 0,
     buildArea: Number(editRoom.buildArea) || 0,
   });
+  // 保存后把 selectedRoom 重新指向 store 最新对象，确保读视图立即刷新（避免陈旧引用显示旧面积）
+  selectedRoom.value = liveRoom.value;
   ElMessage.success('已保存房间信息');
 }
 
@@ -1709,10 +1732,12 @@ function saveEdit(): void {
 // 仅在 store 模式（非嵌入预览）可用；编辑的是真实入库房间（roomFills），合成网格在编辑模式下隐藏。
 const editMode = ref(false);
 const activeTool = ref<'select' | 'add'>('select');
-const selectedIds = ref<string[]>([]);
 const dragKind = ref<null | 'pan' | 'move' | 'resize' | 'draw'>(null);
 const dragRoomId = ref<string | null>(null);
 const dragCorner = ref(0);
+/** 编辑前房间快照（用于「未点完成直接关闭」时一键回滚） */
+let editSnapshot: ReturnType<typeof store.roomsOfFloor> | null = null;
+let editFid: string | null = null;
 const dragStartFloor = reactive({ x: 0, y: 0 });
 /** 拖拽起始时的网格单元（光标所在格）与房间原始 span，用于移动/缩放的增量计算 */
 let dragStartCell = { bi: 0, c: 0 };
@@ -1731,21 +1756,6 @@ function clampSpanKeepSize(s: { bi0: number; bi1: number; c0: number; c1: number
   const c0 = Math.min(ROOM_COLS - 1 - w, Math.max(0, s.c0));
   const bi0 = Math.min(GRID_ROWS - 1 - h, Math.max(0, s.bi0));
   return { bi0, bi1: bi0 + h, c0, c1: c0 + w };
-}
-/** 缩放：固定对角角点，把当前拖拽角点移动到的单元赋值给对应角（保证最小 1 格） */
-function resizeSpan(base: { bi0: number; bi1: number; c0: number; c1: number }, corner: number, cell: { bi: number; c: number }): { bi0: number; bi1: number; c0: number; c1: number } {
-  let { bi0, bi1, c0, c1 } = base;
-  const setC = (v: number) => {
-    if (corner === 0 || corner === 3) c0 = Math.min(Math.max(v, 0), c1);
-    else c1 = Math.max(Math.min(v, ROOM_COLS - 1), c0);
-  };
-  const setBi = (v: number) => {
-    if (corner === 0 || corner === 1) bi0 = Math.min(Math.max(v, 0), bi1);
-    else bi1 = Math.max(Math.min(v, GRID_ROWS - 1), bi0);
-  };
-  setC(cell.c);
-  setBi(cell.bi);
-  return { bi0, bi1, c0, c1 };
 }
 /** 两个网格 span 是否占用任一相同单元 */
 function overlaps(a: { bi0: number; bi1: number; c0: number; c1: number }, b: { bi0: number; bi1: number; c0: number; c1: number }): boolean {
@@ -1793,34 +1803,21 @@ function fromScreen(clientX: number, clientY: number, z = 0): [number, number] {
   return [dx * c - dy * s + cx, dx * s + dy * c + cy];
 }
 
-/** 编辑模式：单击房间——单选，Shift/Ctrl 多选（供合并）；仍打开弹窗供属性编辑 */
-function onSelectRoom(room: RoomLike, ev?: MouseEvent): void {
-  if (editMode.value && ev && (ev.shiftKey || ev.ctrlKey || ev.metaKey)) {
-    toggleSelect(room.id);
-  } else {
-    selectedIds.value = [room.id];
-  }
+/** 编辑模式：单击房间——仅选中高亮（蓝框），不弹窗；Shift/Ctrl 多选供合并。
+ *  弹窗仅在用户点「修改信息」按钮时打开，避免编辑时误弹卡片挡住画布。 */
+/** 编辑模式：单击房间——多选切换（点一下选中 / 再点取消；点多个即同时选中，无需按住 Shift）。
+ *  弹窗仅在用户点「修改信息」按钮时打开，避免编辑时误弹卡片挡住画布。 */
+function onSelectRoom(room: RoomLike, _ev?: MouseEvent): void {
+  toggleSelect(room.id);
   selectedId.value = room.id;
-  selectedRoom.value = room;
-  if (!selectedId.value) return;
-  popMode.value = null;
-  const stage = mainRef.value ?? stageRef.value;
-  if (!stage) return;
-  const r = stage.getBoundingClientRect();
-  if (ev) popupAnchor.value = { x: ev.clientX - r.left, y: ev.clientY - r.top };
-  else popupAnchor.value = { x: r.width / 2, y: r.height / 2 };
-  popupBase.value = { x: (popupAnchor.value.x - 270) / zoom.value, y: (popupAnchor.value.y - 300) / zoom.value };
-  nextTick(() => fitPopupInStage());
 }
 
-/** 编辑模式：在房间体上按下——开始移动（拖拽房间轮廓） */
+/** 编辑模式：在房间体上按下——仅启动拖拽移动的准备（记录起始格 / 房间 id），不改动选中态；
+ *  选中（含多选）统一在 @click（onSelect→onSelectRoom）里完成，保证多选可累积。 */
 function onRoomDown(room: RoomLike, ev: MouseEvent): void {
   if (!editMode.value) return; // 非编辑模式不拦截，走原 onSelect/弹窗
   ev.stopPropagation();
   if (activeTool.value !== 'select') return;
-  selectedIds.value = [room.id];
-  selectedRoom.value = room;
-  selectedId.value = room.id;
   dragKind.value = 'move';
   dragRoomId.value = room.id;
   dragStartSpan = { ...(gridPos[room.id] ?? idxToSpan(0)) };
@@ -1833,48 +1830,62 @@ function onRoomDown(room: RoomLike, ev: MouseEvent): void {
   dragStart = { x: ev.clientX, y: ev.clientY, panX: panX.value, panY: panY.value };
 }
 
-/** 编辑模式：在房间四角手柄按下——开始缩放（拖动该角点） */
-function onHandleDown(room: RoomLike, idx: number, ev: MouseEvent): void {
-  if (!editMode.value) return;
-  ev.stopPropagation();
-  selectedIds.value = [room.id];
-  selectedRoom.value = room;
-  selectedId.value = room.id;
-  dragKind.value = 'resize';
-  dragRoomId.value = room.id;
-  dragCorner.value = idx;
-  dragStartSpan = { ...(gridPos[room.id] ?? idxToSpan(0)) };
-  const p = fromScreen(ev.clientX, ev.clientY);
-  dragStartCell = floorToCell(p[0], p[1]);
-  isDragging.value = true;
-  dragMoved.value = false;
-  dragStart = { x: ev.clientX, y: ev.clientY, panX: panX.value, panY: panY.value };
+/** 当前网格中已被占用的单元集合（bi_c） */
+function occupiedCells(): Set<string> {
+  const s = new Set<string>();
+  for (const id in gridPos) {
+    const g = gridPos[id]!;
+    for (let bi = g.bi0; bi <= g.bi1; bi++) for (let c = g.c0; c <= g.c1; c++) s.add(`${bi}_${c}`);
+  }
+  return s;
+}
+/** 从 (startBi,startC) 起在 6×2 网格里寻找第一个未被占用的单元（行优先、环形回绕） */
+function findFreeCell(startBi: number, startC: number): { bi: number; c: number } | null {
+  for (let off = 0; off < GRID_ROWS * ROOM_COLS; off++) {
+    const bi = (startBi + Math.floor(off / ROOM_COLS)) % GRID_ROWS;
+    const c = (startC + off) % ROOM_COLS;
+    if (!occupiedCells().has(`${bi}_${c}`)) return { bi, c };
+  }
+  return null;
 }
 
-/** 提交「框选新增」的草稿矩形为真实房间 */
-function commitDraft(): void {
-  const d = draftRect.value;
-  draftRect.value = null;
-  if (!d) return;
-  const x0 = Math.min(d.x0, d.x1);
-  const x1 = Math.max(d.x0, d.x1);
-  const y0 = Math.min(d.y0, d.y1);
-  const y1 = Math.max(d.y0, d.y1);
-  if (x1 - x0 < 0.5 || y1 - y0 < 0.5) return; // 太小忽略
+/** 是否还能在 6×2 网格中新增房间：有空闲格才允许，否则工具栏「新增房间」按钮置灰 */
+const canAddRoom = computed(() => occupiedCells().size < GRID_ROWS * ROOM_COLS);
+
+/** 新增房间：在 6×2 网格的第一个空闲格新建一间房，并立即选中+打开信息表单供填写。
+ *  相比「框选拖矩形」，按钮方式对普通用户更直观，也不会误触发 SVG 文字选中。 */
+function doAddRoom(): void {
   const f = currentFloor.value;
   if (!f) return;
-  const c0 = Math.min(ROOM_COLS - 1, Math.max(0, Math.round(((x0 - (gridGeom.value?.minX ?? 0)) / (gridGeom.value?.width ?? 1)) * ROOM_COLS)));
-  const c1 = Math.min(ROOM_COLS - 1, Math.max(0, Math.round(((x1 - (gridGeom.value?.minX ?? 0)) / (gridGeom.value?.width ?? 1)) * ROOM_COLS)));
-  const bi0 = (y0 + y1) / 2 < (gridGeom.value?.midY ?? 0) ? 0 : 1;
-  const bi1 = bi0;
-  store.addRoom(f.id, { outline: [[x0, y0], [x1, y0], [x1, y1], [x0, y1]] });
-  // 新增后把该房间放到草稿拖出的网格单元（否则会被 initGridPos 铺到默认空位）
+  const free = findFreeCell(0, 0);
+  if (!free) {
+    ElMessage.warning('当前楼层 6×2 网格已放满，无法再新增（可删除或合并后重试）');
+    return;
+  }
+  const [wx0, wy0, wx1, wy1] = spanToRect({ bi0: free.bi, bi1: free.bi, c0: free.c, c1: free.c });
+  store.addRoom(f.id, { outline: [[wx0, wy0], [wx1, wy0], [wx1, wy1], [wx0, wy1]] });
   nextTick(() => {
     const rooms = displayedRooms.value;
     const last = rooms[rooms.length - 1];
-    if (last) gridPos[last.id] = { bi0, bi1, c0, c1 };
+    if (!last) return;
+    gridPos[last.id] = { bi0: free.bi, bi1: free.bi, c0: free.c, c1: free.c };
+    selectedIds.value = [last.id];
+    selectedRoom.value = last;
+    selectedId.value = last.id;
+    popMode.value = 'edit';
+    // 弹窗定位到画布中央，便于立刻填写
+    const stage = mainRef.value ?? stageRef.value;
+    if (stage) {
+      const r = stage.getBoundingClientRect();
+      popupAnchor.value = { x: r.width / 2, y: r.height / 2 };
+      popupBase.value = {
+        x: (r.width / 2 - 270) / zoom.value,
+        y: (r.height / 2 - 300) / zoom.value,
+      };
+      nextTick(() => fitPopupInStage());
+    }
   });
-  ElMessage.success('已新增房间');
+  ElMessage.success('已新增一间房，请在弹窗填写房间信息');
 }
 
 /** 合并所选房间 */
@@ -1882,7 +1893,7 @@ function doMerge(): void {
   const f = currentFloor.value;
   if (!f) return;
   if (selectedIds.value.length < 2) {
-    ElMessage.warning('请按住 Shift 点选 2 个及以上房间后再合并');
+    ElMessage.warning('请先点选 2 个及以上房间（点一下选中、再点另一个可多选）后再合并');
     return;
   }
   const id = store.mergeRooms(f.id, [...selectedIds.value]);
@@ -1910,15 +1921,27 @@ function doMerge(): void {
   }
 }
 
-/** 删除所选房间 */
-function doDelete(): void {
+/** 删除所选房间：先弹确认框，避免误删（尤其合并 / 多选删除时） */
+async function doDelete(): Promise<void> {
   const f = currentFloor.value;
   if (!f) return;
   if (!selectedIds.value.length) {
     ElMessage.warning('请先选择要删除的房间');
     return;
   }
+  const n = selectedIds.value.length;
+  try {
+    await ElMessageBox.confirm(
+      `确定要删除选中的 ${n} 个房间吗？删除后不可恢复（可点「取消」放弃本次编辑回滚）。`,
+      '删除确认',
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消', confirmButtonClass: 'el-button--danger' },
+    );
+  } catch {
+    return; // 用户取消
+  }
   store.deleteRooms(f.id, [...selectedIds.value]);
+  // 同步清理被删房间的网格定位，避免「新增房间」按钮误判网格仍满而一直置灰
+  for (const id of selectedIds.value) delete gridPos[id];
   selectedIds.value = [];
   selectedRoom.value = null;
   selectedId.value = null;
@@ -1926,38 +1949,52 @@ function doDelete(): void {
 }
 
 /** 退出编辑模式 */
-function exitEdit(): void {
+function exitEdit(commit: boolean): void {
+  if (commit) {
+    // 完成：保留本次编辑（新增/删除/合并/移动均已即时写入 store），清空临时状态
+    editSnapshot = null;
+    editFid = null;
+    editMode.value = false;
+    activeTool.value = 'select';
+    selectedIds.value = [];
+    draftRect.value = null;
+    return;
+  }
+  // 未点「完成」直接关闭：回滚本次编辑至进入前的快照
+  cancelEdit();
+}
+
+/** 回滚编辑（取消）：用进入编辑前的房间快照覆盖 store，并重建网格定位 */
+function cancelEdit(): void {
+  if (editFid && editSnapshot) {
+    store.restoreRooms(editFid, editSnapshot);
+  }
+  editSnapshot = null;
+  editFid = null;
+  rebuildGrid();
   editMode.value = false;
   activeTool.value = 'select';
   selectedIds.value = [];
   draftRect.value = null;
+  selectedRoom.value = null;
+  selectedId.value = null;
+  closePop();
 }
 
-/** 编辑模式下选中单个房间时，其网格单元四角（顶面 z=wallHeight）的屏幕坐标，用于绘制缩放手柄 */
-const editCorners = computed(() => {
-  if (!editMode.value || selectedIds.value.length !== 1 || !selectedRoom.value) return [];
-  const s = gridPos[selectedRoom.value.id];
-  if (!s) return [];
-  const [x0, y0, x1, y1] = spanToRect(s);
-  const H = wallHeight.value;
-  // 顺序：0=左上(远-左) 1=右上(远-右) 2=右下(近-右) 3=左下(近-左)
-  return [
-    project(x0, y0, H),
-    project(x1, y0, H),
-    project(x1, y1, H),
-    project(x0, y1, H),
-  ].map((p) => ({ x: p[0], y: p[1] }));
-});
+/** 重建网格定位：清空 gridPos 并按当前 displayedRooms 顺序铺回 6×2（进入编辑 / 取消回滚后调用） */
+function rebuildGrid(): void {
+  for (const k of Object.keys(gridPos)) delete gridPos[k];
+  displayedRooms.value.forEach((r, i) => {
+    gridPos[r.id] = idxToSpan(i);
+  });
+}
+
+/** 弹窗（el-dialog）关闭时：若仍在编辑态且未点「完成」，则回滚本次编辑 */
+function onDialogClose(): void {
+  if (editMode.value) cancelEdit();
+}
 
 /** 框选新增时的草稿矩形（project 输出空间） */
-const draftPoints = computed(() => {
-  if (!editMode.value || !draftRect.value) return '';
-  const d = draftRect.value;
-  const a = project(d.x0, d.y0, 0);
-  const b = project(d.x1, d.y1, 0);
-  return `${a[0].toFixed(1)},${a[1].toFixed(1)} ${b[0].toFixed(1)},${a[1].toFixed(1)} ${b[0].toFixed(1)},${b[1].toFixed(1)} ${a[0].toFixed(1)},${b[1].toFixed(1)}`;
-});
-
 /** 是否存在真实入库房间（决定编辑模式下是否隐藏合成演示网格） */
 const hasRealRooms = computed(() => displayedRooms.value.length > 0);
 
@@ -1988,8 +2025,13 @@ function fillFor(room: RoomLike): string {
   return SPECIAL_BY_IDX.get(idx) ?? NORMAL_TOP;
 }
 
-/** 进入编辑模式 */
+/** 进入编辑模式：先对当前楼层房间拍快照，供「未点完成直接关闭」时回滚 */
 function enterEdit(): void {
+  const f = currentFloor.value;
+  if (!f) return;
+  editFid = f.id;
+  editSnapshot = JSON.parse(JSON.stringify(store.roomsOfFloor(f.id)));
+  rebuildGrid();
   editMode.value = true;
   activeTool.value = 'select';
   selectedIds.value = [];
@@ -2002,15 +2044,16 @@ function enterEdit(): void {
 </script>
 
 <template>
-  <el-dialog
-    v-if="!embedded"
-    v-model="visible"
-    width="80%"
-    top="5vh"
-    :fullscreen="fullscreen"
-    :show-close="true"
-    class="fpv-dialog"
-  >
+    <el-dialog
+      v-if="!embedded"
+      v-model="visible"
+      width="80%"
+      top="5vh"
+      :fullscreen="fullscreen"
+      :show-close="true"
+      class="fpv-dialog"
+      @close="onDialogClose"
+    >
     <template #header>
       <div class="fpv__head">
         <strong class="fpv__title">{{ buildingName }} · 楼宇分层图（2.5D）</strong>
@@ -2043,20 +2086,17 @@ function enterEdit(): void {
         <div class="fpv-editbar" v-if="!props.embedded">
           <template v-if="!editMode">
             <el-button size="small" type="primary" @click="enterEdit">编辑楼层（房间）</el-button>
-            <span class="fpv-editbar__tip">可新增 / 删除 / 移动 / 缩放 / 合并房间</span>
+            <span class="fpv-editbar__tip">可新增 / 删除 / 移动 / 合并房间，或点「修改」编辑房间信息</span>
           </template>
           <template v-else>
             <span class="fpv-editbar__hint">编辑中：</span>
-            <el-radio-group v-model="activeTool" size="small">
-              <el-radio-button value="select">选择 / 移动</el-radio-button>
-              <el-radio-button value="add">框选新增</el-radio-button>
-            </el-radio-group>
-            <el-button size="small" :disabled="selectedIds.length < 2" @click="doMerge">合并（{{ selectedIds.length }}）</el-button>
-            <el-button size="small" type="danger" plain :disabled="!selectedIds.length" @click="doDelete">删除（{{ selectedIds.length }}）</el-button>
-            <el-button size="small" @click="exitEdit">完成</el-button>
-            <span class="fpv-editbar__tip" v-if="activeTool === 'add'">在空白处按住拖出矩形即可新增房间</span>
-            <span class="fpv-editbar__tip" v-else-if="selectedIds.length < 2">按住 Shift 点选多个房间可合并</span>
-            <span class="fpv-editbar__tip" v-else>已选 {{ selectedIds.length }} 间，点「合并」或继续 Shift 加选</span>
+            <span class="fpv-editbar__sel">已选 {{ selectedIds.length }} 间</span>
+            <el-button size="small" :disabled="!canAddRoom" :title="canAddRoom ? '在空闲格新建一间房' : '当前楼层网格已放满，删除或合并房间后可新增'" @click="doAddRoom">＋ 新增房间</el-button>
+            <el-button size="small" :disabled="selectedIds.length < 2" :title="selectedIds.length < 2 ? '先点选 2 间及以上房间（点一间选中、再点另一间即多选）' : '将选中的多间房合并为一间大房间（如大会议室）'" @click="doMerge">合并所选（{{ selectedIds.length }}）</el-button>
+            <el-button size="small" type="danger" plain :disabled="!selectedIds.length" :title="!selectedIds.length ? '请先点选要删除的房间' : '删除选中的 ' + selectedIds.length + ' 间房（蓝色描边即选中）'" @click="doDelete">删除所选（{{ selectedIds.length }}）</el-button>
+            <el-button size="small" type="success" @click="exitEdit(true)">完成</el-button>
+            <el-button size="small" @click="exitEdit(false)">取消</el-button>
+            <span class="fpv-editbar__tip">点房间＝选中（蓝框高亮）；点多个房间可同时选中；拖动房间可换位置；要修改房间名称/部门等资料，请在「查看图纸」时点击房间→修改信息</span>
           </template>
         </div>
 
@@ -2110,27 +2150,13 @@ function enterEdit(): void {
               <g
                 class="fpv-room"
                 :class="{ 'fpv-room--sel': isSelected(rb.room.id) }"
-                :style="{ cursor: editMode ? (activeTool === 'add' ? 'crosshair' : 'move') : 'pointer' }"
-                @click="editMode ? onSelectRoom(rb.room, $event) : onSelect(rb.room, $event)"
-                @mousedown="editMode && activeTool === 'select' ? onRoomDown(rb.room, $event) : undefined"
+                :style="{ cursor: editMode ? 'move' : 'pointer' }"
+                @click="onSelect(rb.room, $event)"
+                @mousedown="editMode ? onRoomDown(rb.room, $event) : undefined"
               >
                 <polygon :points="rb.topPoints" :fill="rb.topFill" :stroke="rb.stroke" stroke-width="1" />
               </g>
-              <g
-                v-if="editMode && isSelected(rb.room.id) && selectedIds.length === 1 && rb.room.id === selectedRoom?.id"
-                class="fpv-handles"
-                pointer-events="none"
-              >
-                <circle
-                  v-for="(c, ci) in editCorners"
-                  :key="ci"
-                  :cx="c.x"
-                  :cy="c.y"
-                  r="6"
-                  class="fpv-handle"
-                  @mousedown.stop="onHandleDown(rb.room, ci, $event)"
-                />
-              </g>
+              <!-- 选中单间：以描边加粗 + 角标小三角提示「可拖拽移动」，不再用含义不清的空心圆圈手柄 -->
             </template>
             <!-- ③b 网格隔墙（凹凸感）：平铺房间之间的抬升矮墙，始终显示 -->
             <template
@@ -2153,13 +2179,11 @@ function enterEdit(): void {
             <!-- ① 地面(楼板)：楼板已由第 1 步盒顶面提供；此外轮廓为 z=0 投影(比楼板低一个墙高)、且为近白填充，
                  若常显会盖住下半排房间与走廊（2026-09-29 回归），故与嵌入模板一致保持 renderStage>=5 才显示 -->
             <path v-if="renderStage >= 5 && outlinePath" :d="outlinePath" fill="#eef1f5" stroke="#c4cbd4" stroke-width="1.5" pointer-events="none" />
-            <!-- 框选新增时的草稿矩形 -->
-            <polygon v-if="editMode && draftRect" :points="draftPoints" class="fpv-draft" pointer-events="none" />
             </g>
           </svg>
 
           <div
-            v-if="selectedRoom"
+            v-if="liveRoom && (!editMode || popMode)"
             ref="popupEl"
             class="fpv-pop"
             :style="{ left: popupPos.x + 'px', top: popupPos.y + 'px' }"
@@ -2167,7 +2191,7 @@ function enterEdit(): void {
             @mouseup.stop
           >
             <div class="fpv-pop__hd">
-              <span class="fpv-pop__title">{{ selectedRoom.code || selectedRoom.name || '未命名房间' }}</span>
+              <span class="fpv-pop__title">{{ liveRoom.code || cleanName(liveRoom.name) || '未命名房间' }}</span>
               <button class="fpv-pop__x" type="button" @click="closePop">×</button>
             </div>
             <div v-if="roomThumb" class="fpv-pop__img">
@@ -2541,17 +2565,18 @@ function enterEdit(): void {
 .fpv-showall { margin-top: 8px; }
 .fpv-main { display: flex; gap: 12px; align-items: stretch; position: relative; }
 .fpv-stage { position: relative; flex: 1; border: 1px solid #e5e7eb; border-radius: 10px; overflow: hidden; background: linear-gradient(180deg, #8fc1ec 0%, #bfdcf4 55%, #eef6fc 100%); }
+/* 画布与 SVG 内文字禁止原生选中，否则在画布上拖拽（移动/框选）会误把其它房间文字高亮，误导用户 */
+.fpv-stage, .fpv-svg, .fpv-labels { user-select: none; -webkit-user-select: none; -moz-user-select: none; }
 .fpv-svg { display: block; width: 100%; height: 60vh; }
 .fpv-room { cursor: pointer; }
-.fpv-room--sel polygon { stroke: #1f6feb; stroke-width: 2.5; }
-.fpv-handles { pointer-events: none; }
-.fpv-handle { fill: #fff; stroke: #1f6feb; stroke-width: 2; pointer-events: all; cursor: nwse-resize; }
-.fpv-draft { fill: rgba(31, 111, 235, 0.12); stroke: #1f6feb; stroke-width: 1.5; stroke-dasharray: 5 4; }
+/* 编辑态选中高亮：明显蓝框 + 轻微外发光，确保「删/改/合并」前用户清楚知道选中了哪几间 */
+.fpv-room--sel polygon { stroke: #1257e0; stroke-width: 3.2; filter: drop-shadow(0 0 2.4px rgba(18, 87, 224, 0.9)); }
 .fpv-editbar {
   display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px;
   padding: 8px 12px; margin-bottom: 8px; background: #f8fafc; border: 1px solid #e5e7eb; border-radius: 10px;
 }
 .fpv-editbar__hint { font-size: 13px; font-weight: 600; color: #374151; }
+.fpv-editbar__sel { font-size: 13px; font-weight: 700; color: #fff; background: #1f6feb; border-radius: 999px; padding: 2px 10px; }
 .fpv-editbar__tip { font-size: 12px; color: #9ca3af; }
 .fpv-tip { line-height: 1.6; }
 .fpv-tip__no { font-weight: 700; margin-bottom: 2px; }

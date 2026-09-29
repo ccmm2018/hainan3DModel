@@ -591,8 +591,12 @@ function associateRoomFields(inside: FieldText[], centroid: Pt): {
   // 各字段独立竞争（不互相消费同一行）：同一文本可同时作为「名称（离质心最近）」
   // 与「房间号码（纯数字）」。例如 "101" 既是离质心最近的一行，又是纯数字号码。
   if (!fields.name) {
-    const pick = byDist(bare)[0];
-    if (pick) fields.name = pick.text;
+    // 名称不应是「面积 / 纯房号」等数值文本（这些另有字段承载）；跳过这类文本，
+    // 避免出现「名称一栏显示成面积数字」的误导（如房间内仅有一行 45.2㎡ 靠近质心时）。
+    const namePick = byDist(
+      bare.filter((t) => !/^(?:\d{1,5}(?:[房号室])?|[\d.]+(?:㎡|m²|m2|平方[^]*?)?)\s*$/i.test(t.text)),
+    )[0];
+    if (namePick) fields.name = namePick.text;
   }
   if (!fields.number && !fields.code) {
     // 纯数字（如 "101"）或带 房/号/室 后缀（如 "201室"、"3号"）：必须以数字开头，

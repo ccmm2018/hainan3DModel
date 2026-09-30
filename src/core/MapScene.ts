@@ -117,13 +117,16 @@ export class MapScene {
 
   private renderer: THREE.WebGLRenderer | null = null;
   private lowEnd = false; // 低配设备标记：用于降低渲染负载（关阴影 / 跳过 PMREM / 像素比封顶）
-  private loadStartTs = 0; // 首次加载起始时间戳（用于日志输出首屏总耗时，便于定位加载瓶颈）
+  private loadStartTs = 0; // 首次加载起始时间戳（loadModel 入口，用于量真实首屏总耗时：含下载 + 108 张解码 + 后处理）
+  private onLoadEntryTs = 0; // onLoad 入口（下载+解析完成后），用于把耗时拆分为「下载/解析」与「后处理」两段，定位 5 秒卡顿归属
   private scene: THREE.Scene | null = null;
   private camera: THREE.PerspectiveCamera | null = null;
   private modelRoot: THREE.Object3D | null = null;
   private raycaster = new THREE.Raycaster();
   /** 上一帧的地图视角签名，用于检测视角变化 */
   private lastViewSig = '';
+  /** 上一帧用于同步相机的视角签名；与 lastViewSig 一致时说明视角未变，可复用相机、跳过 getCameraParams 重算 */
+  private lastCamSyncSig = '';
   /**
    * fitToBuildings 取景后的迭代微调数据。
    * 「距离→缩放」换算依赖高德内部相机模型，可能与实际有偏差（偏近/偏远），
@@ -411,13 +414,14 @@ export class MapScene {
   // -------------------------------------------------------------------------
   private loadModel(url: string): void {
     if (!this.scene) return;
+    this.loadStartTs = performance.now();
     const loader = new GLTFLoader();
     loader.load(
       url,
-      (gltf) => {
+      async (gltf) => {
         if (this.disposed) return;
         this.modelRoot = gltf.scene;
-        this.loadStartTs = performance.now();
+        this.onLoadEntryTs = performance.now();
 
         // 按配置过滤节点：隐藏 Blender 一并导出的辅助几何（屋顶棚/女儿墙/大门/廊架/骨架/空物体等），
         // 只保留楼本体，避免地图上出现无关网格。需在居中/命名解析前执行。
@@ -454,22 +458,35 @@ export class MapScene {
         });
 
         this.placeModelAtAnchor();
-        this.scene!.add(this.modelRoot);
 
+        // 把「整段贴图后处理」拆成多段、每段之间让出主线程一帧：否则 108 张贴图的处理 +
+        // 后续首帧 GPU 上传会在低配机器上连成一次数秒的同步阻塞，表现为「进度到 100% 后界面卡死 5 秒才出模型」。
+        // 让出帧后加载遮罩可继续刷新，CPU 也不会被一次性打满。
+        await this.yieldToEventLoop();
+        if (this.disposed) return;
         // WebGL1（高德 GLCustomLayer 提供）对单张贴图尺寸有 MAX_TEXTURE_SIZE 上限，
         // 超过上限的 JPEG 会上传失败、对应材质回退成白色/灰色平面，表现为「材质丢失」。
         // 这里把所有超尺寸贴图等比缩到上限以内（仅重绘到 canvas，不改原始 GLB 文件）。
         const clampedCount = this.clampTexturesToMaxSize(this.modelRoot);
+        await this.yieldToEventLoop();
+        if (this.disposed) return;
         // WebGL1 下「NPOT 尺寸贴图 + mipmap」会被驱动直接丢弃，导致部分建筑材质渲染失败（黑色/空白），
         // 观感即「材质丢失」。主动降级为「无 mipmap + 线性过滤 + 边缘钳制」使其可正常显示（WebGL2 跳过）。
         const npotFixed = this.makeTexturesWebGL1Safe(this.modelRoot);
+        await this.yieldToEventLoop();
+        if (this.disposed) return;
         // GLB 文件本身存在「渲染后纯黑」的损坏立面贴图（导出/烘焙失败所致），会让对应楼栋渲染成黑墙，
         // 观感即「材质丢失」。离线逐张解码已实证共 6 张（mean≈0/std≈0），加载后做启发式检测并替换为
         // 程序化立面纹理。此一类修复经用户确认有效（「墙面发黑问题已修复」），不再做其它运行时材质改写，
         // 以免误伤楼栋原本正常的材质/屋顶/地面。
         const materialFixed = this.fixMaterialTextures(this.modelRoot);
-        // 低配：大贴图关 mipmap，降低首帧上传 / mip 生成开销（首帧 CPU 峰值来源之一）
+        await this.yieldToEventLoop();
+        if (this.disposed) return;
+        // 低配：大贴图缩尺寸 + 关 mipmap + 线性过滤，大幅削减首帧 GPU 上传量（首帧 CPU/GPU 峰值主源）
         const textureReduced = this.reduceTextureQualityForLowEnd(this.modelRoot);
+        // 所有贴图处理完成后再挂入场景：避免在「让出帧」期间 AMap 提前渲染、把全分辨率贴图先上传一遍 GPU
+        // （那样低配机器仍会先承受一次 450MB 上传峰值）。挂入后 AMap 第一次渲染拿到的就是已降级的贴图。
+        this.scene!.add(this.modelRoot);
         const caps = this.renderer?.capabilities;
         const shadowState = this.renderer?.shadowMap?.enabled ? '单次(静态缓存)' : '关(低配)';
         // eslint-disable-next-line no-console
@@ -491,9 +508,11 @@ export class MapScene {
         // 需靠 needsUpdate 触发；渲染后 three 会自清零，后续帧复用缓存，不再每帧重绘）。
         if (this.renderer?.shadowMap?.enabled) this.renderer.shadowMap.needsUpdate = true;
         if (!this.fitRefine) {
-          if (this.loadStartTs) {
+          if (this.loadStartTs && this.onLoadEntryTs) {
+            const parseMs = Math.round(this.onLoadEntryTs - this.loadStartTs);
+            const postMs = Math.round(performance.now() - this.onLoadEntryTs);
             // eslint-disable-next-line no-console
-            console.info(`[MapScene] 取景完成（低配跳过微调），首次加载总耗时约 ${Math.round(performance.now() - this.loadStartTs)}ms`);
+            console.info(`[MapScene] 取景完成（低配跳过微调）：下载+解析=${parseMs}ms，后处理=${postMs}ms，合计=${parseMs + postMs}ms`);
           }
           this.callbacks.onFitComplete?.();
         }
@@ -804,9 +823,11 @@ export class MapScene {
   private endFitRefine(): void {
     if (!this.fitRefine) return; // 幂等：重复调用不重复回调
     this.fitRefine = null;
-    if (this.loadStartTs) {
+    if (this.loadStartTs && this.onLoadEntryTs) {
+      const parseMs = Math.round(this.onLoadEntryTs - this.loadStartTs);
+      const postMs = Math.round(performance.now() - this.onLoadEntryTs);
       // eslint-disable-next-line no-console
-      console.info(`[MapScene] 取景完成，首次加载总耗时约 ${Math.round(performance.now() - this.loadStartTs)}ms`);
+      console.info(`[MapScene] 取景完成：下载+解析=${parseMs}ms，后处理=${postMs}ms，合计=${parseMs + postMs}ms`);
     }
     if (this.modelRoot && !this.modelRoot.visible) {
       this.modelRoot.visible = true;
@@ -1213,13 +1234,28 @@ export class MapScene {
   }
 
   /**
-   * 低配设备：对尺寸较大的贴图关闭 mipmap，降低「首帧把 108 张贴图上传到 GPU 并生成 mip 链」的开销
-   * （首帧 CPU/GPU 峰值的主要来源之一）。代价是远处略有锯齿，但低配机器优先保证加载速度与流畅度。
-   * 仅在 lowEnd 时生效；非低配机器保留 mipmap 以保证画质。
-   * @returns 被降级的贴图数量
+   * 让出主线程一帧（优先 rAF，退化到 setTimeout），避免大段同步处理在低配机器上一次性阻塞、卡死 UI。
+   * 用于把「加载时 108 张贴图处理 + 首帧 GPU 上传」拆成多个可被打断的小段，让加载遮罩持续刷新、CPU 不被打满。
+   */
+  private yieldToEventLoop(): Promise<void> {
+    return new Promise((resolve) => {
+      if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => resolve());
+      else setTimeout(resolve, 0);
+    });
+  }
+
+  /**
+   * 低配设备：激进削减贴图首帧开销（低配机器优先保证加载速度与流畅度，代价是远处略带锯齿）。
+   * 仅在 lowEnd 时生效；非低配机器跳过以保留画质。
+   *  - 对**所有**贴图关闭 mipmap + 退为线性过滤 + 各向异性=1：省掉 mip 链生成（纯 CPU 浪费）与三线性采样；
+   *  - 对最长边 > 512 的贴图重绘到 ≤512 的 canvas：首帧 GPU 上传量最多降 4~16 倍
+   *    （原 1024² 贴图 4MB/张 × 108 张 ≈ 450MB，缩到 512² 后仅约 110MB，且无需 mip 链）。
+   * @returns 被处理的贴图数量
    */
   private reduceTextureQualityForLowEnd(root: THREE.Object3D): number {
     if (!this.lowEnd) return 0;
+    if (typeof document === 'undefined') return 0; // 非浏览器环境（如测试）跳过
+    const MAX = 512; // 低配贴图尺寸上限（最长边）
     const seen = new Set<THREE.Texture>();
     let reduced = 0;
     root.traverse((child) => {
@@ -1234,15 +1270,35 @@ export class MapScene {
         for (const tex of maps) {
           if (!tex || seen.has(tex)) continue;
           seen.add(tex);
+          // 关闭 mipmap + 线性过滤 + 各向异性=1（低配优先首帧速度，避免 mip 链生成与三线性采样开销）
+          tex.generateMipmaps = false;
+          tex.minFilter = THREE.LinearFilter;
+          tex.anisotropy = 1;
+          tex.needsUpdate = true;
+          reduced++;
           const img = tex.image as { width?: number; height?: number } | undefined;
           const w = img?.width ?? 0;
           const h = img?.height ?? 0;
-          // 仅对较大贴图降级（小贴图 mip 开销可忽略，保留以保证远处观感）
-          if (w > 512 || h > 512) {
-            tex.generateMipmaps = false;
-            tex.minFilter = THREE.LinearFilter;
-            tex.needsUpdate = true;
-            reduced++;
+          if (!w || !h) continue;
+          const longest = Math.max(w, h);
+          // 大贴图缩尺寸：重绘到较小 canvas，首帧 GPU 上传量随之下降
+          if (longest > MAX) {
+            const scale = MAX / longest;
+            const nw = Math.max(1, Math.round(w * scale));
+            const nh = Math.max(1, Math.round(h * scale));
+            try {
+              const canvas = document.createElement('canvas');
+              canvas.width = nw;
+              canvas.height = nh;
+              const ctx = canvas.getContext('2d');
+              if (ctx) {
+                ctx.drawImage(img as CanvasImageSource, 0, 0, nw, nh);
+                tex.image = canvas;
+                tex.needsUpdate = true;
+              }
+            } catch {
+              /* 个别 ImageBitmap/跨域 drawImage 抛错则保留原图 */
+            }
           }
         }
       }
@@ -2419,21 +2475,29 @@ export class MapScene {
     // 低配机器的性能压力已由「低功耗渲染设置（关抗锯齿、像素比封顶为 1）」承担，无需靠跳帧降负载。
     this.renderer.resetState();
 
-    // 视角变化检测（拖拽 / 缩放 / 旋转 / 飞行）→ 通知上层刷新锚定浮层位置
+    // 视角变化检测（拖拽 / 缩放 / 旋转 / 飞行）→ 更新 lastViewSig 并在变化时通知上层刷新浮层
     this.syncViewChange();
 
-    const { near, far, fov, up, lookAt, position } = this.customCoords.getCameraParams();
-    const width = this.container.clientWidth || 1;
-    const height = this.container.clientHeight || 1;
+    // 相机同步节流：getCameraParams() 是高德原生调用（弱机上每帧调用有开销）。
+    // 仅当视角签名变化（拖拽 / 缩放 / 旋转 / 飞行）时才重新从地图拉取相机参数并重建投影矩阵；
+    // 视角静止的帧（含空闲帧）直接复用上一帧已设置好的相机，跳过本次重算。
+    // 注意：无论是否重算相机，下方 renderer.render 仍每帧执行——AMap 每帧都会清掉底图帧缓冲，
+    // 必须重绘本层，否则模型会闪烁。节流只省「相机同步」开销，不影响模型跟手与显示。
+    if (this.lastViewSig !== this.lastCamSyncSig) {
+      this.lastCamSyncSig = this.lastViewSig;
+      const { near, far, fov, up, lookAt, position } = this.customCoords.getCameraParams();
+      const width = this.container.clientWidth || 1;
+      const height = this.container.clientHeight || 1;
 
-    this.camera.aspect = width / height;
-    this.camera.near = near;
-    this.camera.far = far;
-    this.camera.fov = fov;
-    this.camera.position.set(position[0], position[1], position[2]);
-    this.camera.up.set(up[0], up[1], up[2]);
-    this.camera.lookAt(lookAt[0], lookAt[1], lookAt[2]);
-    this.camera.updateProjectionMatrix();
+      this.camera.aspect = width / height;
+      this.camera.near = near;
+      this.camera.far = far;
+      this.camera.fov = fov;
+      this.camera.position.set(position[0], position[1], position[2]);
+      this.camera.up.set(up[0], up[1], up[2]);
+      this.camera.lookAt(lookAt[0], lookAt[1], lookAt[2]);
+      this.camera.updateProjectionMatrix();
+    }
 
     // 取景迭代微调：此刻相机已与地图真实状态同步，按实测出画倍率逐步收敛到「刚好」
     if (this.fitRefine) {

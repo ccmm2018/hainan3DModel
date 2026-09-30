@@ -31,9 +31,13 @@ export interface SceneConfig {
    *  浅色底图下高德 3D 建筑会以浅灰「白模」呈现，叠加路网 / 绿地 / 水系更清晰。 */
   mapStyle?: string;
   /**
-   * 底图显示要素（底图降噪用）。
+   * 底图显示要素（底图降噪 + 性能调节用）。
    * 可选值：bg(区域面) / road(道路) / building(建筑) / point(兴趣点 POI)。
-   * 默认去掉 point（POI），保留背景 / 道路 / 建筑，让底图更干净。
+   *
+   * ⚠️ 性能：高德 GL 底图在平移/缩放时会把 'building'（周边 3D 楼块）逐帧重新拉伸渲染，
+   * 这些是弱机 CPU 满载（拖拽/缩放 80%+）的首要来源。校园数字孪生以「自有 3D 模型」为核心，
+   * 周边 3D 楼块既冗余又昂贵，故默认关闭（仅保留 bg 地面轮廓 + road 路网）。
+   * 若确实需要周边建筑的立体感，可把 'building' 加回数组（代价是平移/缩放时 CPU 占用回升）。
    */
   mapFeatures: string[];
   /** 是否显示地图文字注记（地名 / 路名等）。底图降噪时设为 false */
@@ -195,7 +199,9 @@ export const DEFAULT_SCENE_CONFIG: SceneConfig = {
   allocationApiUrl: '',
   hideAMapAttribution: false,
   buildingNameAliases: {},
-  mapFeatures: ['bg', 'road', 'building'],
+  // 性能优先：关闭周边 3D 楼块（building）。它们是高德底图平移/缩放时逐帧重绘的最重图层，
+  // 弱机拖拽/缩放 CPU 80%+ 的首要来源。仅保留 bg(地面轮廓) + road(路网)。需要周边立体感时可加回 'building'。
+  mapFeatures: ['bg', 'road'],
   showLabel: false,
   // 隐藏 Blender 一并导出的辅助几何（屋顶棚/女儿墙/大门/廊架/骨架/空物体），只留楼本体可见；
   // 具体的「可点击 / 可选中」范围由 buildingNodeNames 单独控制（数字 0–25 才是建筑）。

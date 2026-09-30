@@ -147,6 +147,43 @@ for (const f of photoFiles) {
   console.log(`✓ 已替换材质「${matName}」的贴图 <- ${f} (${photoBytes.length} bytes)`);
 }
 
+// ---- 自动兜底：白盒楼 / 食堂占位面 -> 复用示意贴图（dorm.png / canteen.png） ----
+// 仅作用于「贴图字节 < 2048 的占位图」，已有真实照（≥2048）的材质绝不改动。
+const REUSE = [
+  { test: /^Bk_Facade_Dorm_/, photo: 'dorm.png' },
+  // Bk____3 / Bk____4 原材质名为「食堂」（中文字符导出时被剥成下划线），套食堂贴图
+  { test: /^Bk____/, photo: 'canteen.png' },
+  { test: /^Bk_Canteen_Face/, photo: 'canteen.png' },
+];
+for (const [matName, mi] of matByName) {
+  const mat = materials[mi];
+  const texIdx = mat.pbrMetallicRoughness?.baseColorTexture?.index;
+  if (texIdx === undefined || !textures[texIdx]) continue;
+  const imgIdx = textures[texIdx].source;
+  if (imgIdx === undefined || !images[imgIdx]) continue;
+  const bv = images[imgIdx].bufferView;
+  const curBytes = (bv !== undefined && bufferViews[bv]) ? bufferViews[bv].byteLength : 1e9;
+  if (curBytes >= 2048) continue; // 已有真实照，跳过
+  const rule = REUSE.find((r) => r.test.test(matName));
+  if (!rule) continue;
+  const photoPath = join(photosDir, rule.photo);
+  if (!existsSync(photoPath)) continue;
+  const photoBytes = readFileSync(photoPath);
+  const mime = extToMime[extname(photoPath).toLowerCase()] || 'image/png';
+  const offset = binWork.length;
+  const pad = (4 - (offset % 4)) % 4;
+  const paddedOffset = offset + pad;
+  binWork = Buffer.concat([binWork, Buffer.alloc(pad, 0), photoBytes]);
+  const bvNew = { buffer: 0, byteOffset: paddedOffset, byteLength: photoBytes.length };
+  bufferViews.push(bvNew);
+  const newBvIdx = bufferViews.length - 1;
+  delete images[imgIdx].uri;
+  images[imgIdx].bufferView = newBvIdx;
+  images[imgIdx].mimeType = mime;
+  modified++;
+  console.log(`✓ [兜底] 已替换材质「${matName}」占位贴图 <- ${rule.photo} (${photoBytes.length} bytes)`);
+}
+
 if (modified === 0) {
   console.log('没有任何照片被嵌入，未改动模型。');
   process.exit(0);

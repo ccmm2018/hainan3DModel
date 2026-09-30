@@ -168,17 +168,25 @@ function resetView(): void {
 const isDragging = ref(false);
 const dragMoved = ref(false);
 let dragStart = { x: 0, y: 0, panX: 0, panY: 0 };
+let dragStartPitch = 55;
 let downOnRoom = false;
 /** 拖动房间（move）结束后浏览器仍会触发一次 click，用此标记抑制该次 click 的选中切换 */
 let suppressClickSelect = false;
 function onStageMouseDown(e: MouseEvent): void {
-  if (e.button !== 0) return;
   const t = e.target as Element | null;
   // 记录按下点是否落在某个房间上：落在房间上的点击由 onSelect 处理（保留/切换弹窗），不要在此处关闭
   downOnRoom = !!(t && t.closest && t.closest('.fpv-room'));
   isDragging.value = true;
   dragMoved.value = false;
   dragStart = { x: e.clientX, y: e.clientY, panX: panX.value, panY: panY.value };
+  // 纵向旋转（俯仰角）：右键拖拽，或 Shift+左键拖拽 → 鼠标纵向移动调整俯仰角（无障碍旋转，替代原滑杆）
+  if (e.button === 2 || (e.button === 0 && e.shiftKey)) {
+    dragKind.value = 'rotate';
+    dragStartPitch = pitchDeg.value;
+    e.preventDefault();
+    return;
+  }
+  if (e.button !== 0) return;
   // 空白处按下：平移视图（新增房间已改为按钮触发，不再框选画矩形）
   dragKind.value = 'pan';
 }
@@ -192,6 +200,11 @@ function onStageMouseMove(e: MouseEvent): void {
   if (dragKind.value === 'pan') {
     panX.value = dragStart.panX + dx;
     panY.value = dragStart.panY + dy;
+    return;
+  }
+  if (dragKind.value === 'rotate') {
+    // 向上拖拽(dy<0)增大俯仰角、视图更"立"；向下拖拽减小、更接近正俯视。范围 0~80°。
+    pitchDeg.value = clamp(dragStartPitch - dy * 0.3, 0, 80);
     return;
   }
   if (dragKind.value === 'move') {
@@ -1472,7 +1485,7 @@ const popupEl = ref<HTMLElement | null>(null);
 const popupBase = ref({ x: 0, y: 0 });
 
 /** 缓存弹窗与舞台尺寸，避免在 pan 拖动过程中反复 getBoundingClientRect 造成卡顿。 */
-const popupSize = ref({ w: 260, h: 300 });
+const popupSize = ref({ w: 340, h: 380 });
 const stageSize = ref({ w: 0, h: 0 });
 
 /** 弹窗最终屏幕位置：以 popupBase 为基准，叠加当前图层变换(pan+zoom)实时跟随房间；
@@ -1732,7 +1745,7 @@ function saveEdit(): void {
 // 仅在 store 模式（非嵌入预览）可用；编辑的是真实入库房间（roomFills），合成网格在编辑模式下隐藏。
 const editMode = ref(false);
 const activeTool = ref<'select' | 'add'>('select');
-const dragKind = ref<null | 'pan' | 'move' | 'resize' | 'draw'>(null);
+const dragKind = ref<null | 'pan' | 'move' | 'resize' | 'draw' | 'rotate'>(null);
 const dragRoomId = ref<string | null>(null);
 const dragCorner = ref(0);
 /** 编辑前房间快照（用于「未点完成直接关闭」时一键回滚） */
@@ -2101,7 +2114,7 @@ function enterEdit(): void {
         </div>
 
         <div class="fpv-main" ref="mainRef">
-          <div class="fpv-stage" ref="stageRef" @wheel.prevent="onWheel" @mousedown="onStageMouseDown" @mouseleave="onStageMouseLeave">
+          <div class="fpv-stage" ref="stageRef" @wheel.prevent="onWheel" @mousedown="onStageMouseDown" @contextmenu.prevent @mouseleave="onStageMouseLeave">
           <svg
             ref="stageG"
             :viewBox="`0 0 ${VIEW_W} ${VIEW_H}`"
@@ -2285,19 +2298,10 @@ function enterEdit(): void {
                 </el-radio-group>
               </div>
               <div class="fpv-tools__row">
-                <span class="fpv-tools__label">墙高(米)</span>
-                <el-slider v-model="wallHeight" :min="0.5" :max="5" :step="0.5" :show-tooltip="true" class="fpv__lift" />
-              </div>
-              <div class="fpv-tools__row">
-                <span class="fpv-tools__label">纵向旋转</span>
-                <el-slider v-model="pitchDeg" :min="0" :max="80" :step="1" :show-tooltip="true" class="fpv__lift" />
-                <span class="fpv-tools__val">{{ pitchDeg }}°</span>
-              </div>
-              <div class="fpv-tools__row">
                 <el-checkbox v-model="alignToAxisEnabled" size="small">源对齐(转正为水平矩形)</el-checkbox>
               </div>
               <div class="fpv-tools__row">
-                <span class="fpv-tools__hint">整栋楼「盒子」(亮顶面+连续暗色前墙) + 横向走廊带 + 12 个房间(普通统一浅蓝、少数特殊醒目色，平铺色块) + 房间之间 0.5m 抬升隔墙(灰，表达凹凸感：房间平、墙凸、走廊凹) + 每间正中心四行文字(号码/名称/部门/两面积)。颜色只区分「普通/特殊」，无深浅渐变。左键拖拽平移；滚轮缩放；纵向旋转可调俯视角。</span>
+                <span class="fpv-tools__hint">整栋楼「盒子」(亮顶面+连续暗色前墙) + 横向走廊带 + 房间(平铺色块) + 房间之间抬升隔墙(灰，表达凹凸感) + 每间正中心四行文字(号码/名称/部门/两面积)。左键拖拽平移；滚轮缩放；右键拖拽(或 Shift+拖拽)调整俯仰角(纵向旋转)。</span>
               </div>
               <div class="fpv-tools__row">
                 <el-button-group>
@@ -2330,16 +2334,11 @@ function enterEdit(): void {
           <el-button size="small" @click="resetView">复位</el-button>
         </el-button-group>
         <div class="fpv-tools__row fpv-tools__row--embed">
-          <span class="fpv-tools__label">倾角</span>
-          <el-slider v-model="pitchDeg" :min="0" :max="80" :step="1" :show-tooltip="true" class="fpv__lift fpv__lift--embed" />
-          <span class="fpv-tools__val">{{ pitchDeg }}°</span>
-        </div>
-        <div class="fpv-tools__row fpv-tools__row--embed">
           <el-checkbox v-model="alignToAxisEnabled" size="small">源对齐</el-checkbox>
         </div>
       </div>
     </div>
-    <div class="fpv-stage" ref="stageRef" @wheel.prevent="onWheel" @mousedown="onStageMouseDown" @mouseleave="onStageMouseLeave">
+    <div class="fpv-stage" ref="stageRef" @wheel.prevent="onWheel" @mousedown="onStageMouseDown" @contextmenu.prevent @mouseleave="onStageMouseLeave">
       <svg
         :viewBox="`0 0 ${VIEW_W} ${VIEW_H}`"
         class="fpv-svg fpv-svg--embed"
@@ -2615,28 +2614,33 @@ function enterEdit(): void {
 .fpv-pop {
   position: absolute;
   z-index: 30;
-  width: 252px;
+  width: 340px;
   background: #fff;
   border: 1px solid #e5e7eb;
   border-radius: 12px;
   box-shadow: 0 10px 30px rgba(15, 23, 42, .18);
-  padding: 10px 12px;
-  font-size: 13px;
+  padding: 14px 16px;
+  font-size: 15px;
   color: #111827;
 }
-.fpv-pop__hd { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
-.fpv-pop__title { font-size: 14px; font-weight: 700; color: #111827; }
-.fpv-pop__x { border: 0; background: transparent; font-size: 18px; line-height: 1; color: #9ca3af; cursor: pointer; padding: 0 2px; }
+.fpv-pop__hd { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.fpv-pop__title { font-size: 18px; font-weight: 700; color: #111827; }
+.fpv-pop__x { border: 0; background: transparent; font-size: 22px; line-height: 1; color: #9ca3af; cursor: pointer; padding: 0 2px; }
 .fpv-pop__x:hover { color: #374151; }
-.fpv-pop__img { position: relative; width: 100%; height: 132px; margin-bottom: 10px; background: #f8fafc; border: 1px solid #eef0f3; border-radius: 8px; overflow: hidden; }
+.fpv-pop__img { position: relative; width: 100%; height: 168px; margin-bottom: 12px; background: #f8fafc; border: 1px solid #eef0f3; border-radius: 8px; overflow: hidden; }
 .fpv-pop__img svg { width: 100%; height: 100%; display: block; }
-.fpv-pop__img-tag { position: absolute; left: 6px; bottom: 4px; font-size: 10px; color: #9ca3af; background: rgba(255,255,255,.75); padding: 0 4px; border-radius: 4px; }
-.fpv-pop__img--empty { display: flex; align-items: center; justify-content: center; color: #9ca3af; font-size: 12px; }
-.fpv-pop__info { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 12px; margin-bottom: 8px; }
-.fpv-pop__cell { display: flex; flex-direction: column; gap: 1px; padding: 4px 6px; background: #f8fafc; border-radius: 6px; }
-.fpv-pop__cell span { color: #6b7280; font-size: 11px; }
-.fpv-pop__cell b { font-weight: 600; color: #111827; font-size: 13px; }
-.fpv-pop__acts { display: flex; gap: 8px; margin-bottom: 4px; }
-.fpv-pop__form { border-top: 1px dashed #eef0f3; padding-top: 8px; margin-top: 4px; }
+.fpv-pop__img-tag { position: absolute; left: 6px; bottom: 4px; font-size: 12px; color: #9ca3af; background: rgba(255,255,255,.75); padding: 0 4px; border-radius: 4px; }
+.fpv-pop__img--empty { display: flex; align-items: center; justify-content: center; color: #9ca3af; font-size: 14px; }
+.fpv-pop__info { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 14px; margin-bottom: 10px; }
+.fpv-pop__cell { display: flex; flex-direction: column; gap: 2px; padding: 6px 8px; background: #f8fafc; border-radius: 6px; }
+.fpv-pop__cell span { color: #6b7280; font-size: 13px; }
+.fpv-pop__cell b { font-weight: 600; color: #111827; font-size: 16px; }
+.fpv-pop__acts { display: flex; gap: 8px; margin-bottom: 6px; }
+.fpv-pop__form { border-top: 1px dashed #eef0f3; padding-top: 10px; margin-top: 6px; }
+/* 弹窗内按钮 / 输入框文字同步放大 */
+.fpv-pop .el-button { font-size: 14px; padding: 8px 14px; }
+.fpv-pop :deep(.el-input__inner),
+.fpv-pop :deep(.el-textarea__inner) { font-size: 14px; }
+.fpv-pop .fpv-edit__row label { font-size: 14px; width: 64px; }
 .fpv-tools__row--embed { margin-left: 10px; min-width: 160px; }
 </style>

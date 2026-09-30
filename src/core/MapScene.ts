@@ -115,6 +115,31 @@ export class MapScene {
   private raycaster = new THREE.Raycaster();
   /** 上一帧的地图视角签名，用于检测视角变化 */
   private lastViewSig = '';
+  /**
+   * fitToBuildings 取景后的迭代微调数据。
+   * 「距离→缩放」换算依赖高德内部相机模型，可能与实际有偏差（偏近/偏远），
+   * 故取景后在 render() 里用真实相机逐帧复核：按实测「出画倍率」比例修正 zoom，
+   * 直到全部建筑角点都落在屏幕安全区（收敛于「刚好能看到全部建筑」的最大缩放）。
+   * startedAt 超时后放弃（避免与用户操作打架）。
+   */
+  private fitRefine: {
+    corners: THREE.Vector3[];
+    minX: number;
+    maxX: number;
+    minY: number;
+    maxY: number;
+    /** 取景中心（GCJ-02 [lng, lat]，= 建筑群实际中心，保证模型居中于屏幕） */
+    center: [number, number];
+    /** 取景俯仰角（自适应搜索所得，微调全程保持不变） */
+    pitch: number;
+    /** 上一次我们主动设置的 zoom / center（识别相机是否已生效 / 是否被用户改动） */
+    lastZoom: number;
+    lastCenter: [number, number];
+    /** 剩余迭代次数 */
+    tries: number;
+    /** 开始时间戳（ms），超时放弃 */
+    startedAt: number;
+  } | null = null;
 
   private gcjCenter: [number, number];
   private gcjAnchor: [number, number];
@@ -411,6 +436,8 @@ export class MapScene {
         );
 
         this.markDirty();
+        // 取景：按当前屏幕把缩放精确推到「刚好能看到全部建筑」的最大级别
+        this.fitToBuildings();
         this.callbacks.onModelReady?.();
       },
       (event: ProgressEvent) => {
@@ -422,6 +449,429 @@ export class MapScene {
         this.callbacks.onModelError?.(err);
       },
     );
+  }
+
+  /**
+   * 模型就绪后自动取景：以「建筑群实际中心」为可见区中心（模型居中），
+   * 把缩放推到最大——建筑角点刚好触及可见区边缘，即「模型刚好填满整个屏幕」。
+   * 可见区 = 屏幕 − 顶部/底部悬浮 UI（标题徽标/搜索框/工具栏、操作提示胶囊）
+   * − 左右 8px 防裁边。
+   *
+   * 做法：
+   * 1. 取全部「建筑节点」（buildingNodeNames）的逐楼栋角点（模型没有命名建筑节点时
+   *    退化为整模型包围盒），并求建筑群中心 → 相机中心（而非配置的 center，
+   *    因为道路/地形等非建筑网格会让模型整体中心偏离建筑群中心，导致「模型不在屏幕中间」）；
+   * 2. 俯仰角自适应：单一俯仰角下投影高宽比 ≠ 屏幕高宽比时，最大放大只能贴满
+   *    横或竖一边（另一边留白）。二分搜索使「投影高宽比 == 可见区高宽比」的俯仰角
+   *    （保持正面斜视观感，夹在 [35°, 75°]），使最大放大同时贴满四边；
+   * 3. 沿视线方向二分搜索「能让全部角点都落在可见区内」的最小相机距离（透视投影
+   *    逐角点精确计算），再按实测屏幕偏移平移取景中心（双向居中）并重新收紧距离；
+   * 4. 由「相机到视中心距离 ∝ 2^(-zoom)」关系（以当前实测 zoom/距离为基准）换算出
+   *    目标缩放级别并立即应用，从而在任意分辨率屏幕上都刚好框住全部建筑；
+   *    残余偏差由 refineFitStep 在 render() 里用真实相机逐帧收敛（居中 + 填满）。
+   */
+  private fitToBuildings(): void {
+    if (!this.map || !this.customCoords || !this.modelRoot) return;
+    const params = this.customCoords.getCameraParams?.();
+    if (!params?.position || !params?.lookAt || !params?.up) return;
+    if (!(params.fov > 0 && params.fov < 180)) return;
+
+    // 1) 全部建筑的世界包围盒与角点。逐楼栋（逐 mesh）取角点而非只取整体包围盒的
+    //    8 个角：校园呈 L 形 / 凹形 / 斜向布局时更贴身，能在「全部建筑都可见」的
+    //    前提下放得更大（整体包围盒的空白角会把取景无谓地推远）。
+    //    同时按「建筑节点」归并各自的包围盒，用于诊断最外侧节点（检查是否有远离
+    //    主楼群的小构筑物把取景范围撑大）。
+    const box = new THREE.Box3();
+    const corners: THREE.Vector3[] = [];
+    const nodeBoxes = new Map<string, THREE.Box3>();
+    const pushCorners = (b: THREE.Box3): void => {
+      for (const x of [b.min.x, b.max.x]) {
+        for (const y of [b.min.y, b.max.y]) {
+          for (const z of [b.min.z, b.max.z]) corners.push(new THREE.Vector3(x, y, z));
+        }
+      }
+    };
+    let hasBuilding = false;
+    this.modelRoot.traverse((o) => {
+      const mesh = o as THREE.Mesh;
+      if (!mesh.isMesh || !mesh.visible) return;
+      const owner = this.owningBuildingOf(mesh);
+      if (!owner) return;
+      hasBuilding = true;
+      const meshBox = new THREE.Box3().setFromObject(mesh);
+      box.union(meshBox);
+      pushCorners(meshBox);
+      const known = nodeBoxes.get(owner.name);
+      if (known) known.union(meshBox);
+      else nodeBoxes.set(owner.name, meshBox.clone());
+    });
+    if (!hasBuilding) {
+      box.setFromObject(this.modelRoot);
+      pushCorners(box);
+    }
+    if (box.isEmpty()) return;
+
+    // 诊断：水平/深度方向最外侧的建筑节点名（发现「远离主楼群的小构筑物撑大取景」时便于排查）
+    const extremeNodes = (): string => {
+      let minXn = '', maxXn = '', minYn = '', maxYn = '';
+      nodeBoxes.forEach((b, n) => {
+        if (!minXn || b.min.x < (nodeBoxes.get(minXn)?.min.x ?? Infinity)) minXn = n;
+        if (!maxXn || b.max.x > (nodeBoxes.get(maxXn)?.max.x ?? -Infinity)) maxXn = n;
+        if (!minYn || b.min.y < (nodeBoxes.get(minYn)?.min.y ?? Infinity)) minYn = n;
+        if (!maxYn || b.max.y > (nodeBoxes.get(maxYn)?.max.y ?? -Infinity)) maxYn = n;
+      });
+      return `x[${minXn}~${maxXn}] y[${minYn}~${maxYn}]`;
+    };
+
+    // 2) 当前相机基准（customCoords 世界坐标，z 为高度）：
+    //    - bearing：相机方位（视中心→相机的水平单位向量），取景全程保持当前朝向不变；
+    //    - (zoom0, dist0)：实测「缩放级别 ↔ 相机到视中心距离」基准，用于距离→zoom 换算。
+    //    视中心 look 取「建筑群中心在地面上的投影」（高德 lookAt 即地面中心点）。
+    const centerWorld = box.getCenter(new THREE.Vector3());
+    let look = new THREE.Vector3(centerWorld.x, centerWorld.y, 0);
+    const camPos = new THREE.Vector3(params.position[0], params.position[1], params.position[2]);
+    const oldLook = new THREE.Vector3(params.lookAt[0], params.lookAt[1], params.lookAt[2]);
+    const dist0 = camPos.distanceTo(oldLook);
+    const zoom0 = Number(this.map.getZoom?.());
+    if (!(dist0 > 0) || !Number.isFinite(zoom0)) return;
+    const bearing = new THREE.Vector3(camPos.x - oldLook.x, camPos.y - oldLook.y, 0);
+    if (bearing.lengthSq() < 1e-6) bearing.set(0, -1, 0); // 纯俯视的极端情况下退化为朝北
+    bearing.normalize();
+    const UP = new THREE.Vector3(0, 0, 1);
+
+    // 屏幕边距（px → NDC）：目标是「模型刚好填满整个屏幕」，但顶 / 底要避开
+    // SceneView 的悬浮 UI（顶部 16px 起有标题徽标 / 搜索框 / 工具栏一行，底部有
+    // 操作提示胶囊），模型顶 / 底不能藏到这些浮层后面；左右无浮层仅留 8px 防裁边。
+    // 注意 NDC y=+1 是屏幕顶部、-1 是底部。
+    const padX = 8;
+    const padTop = 58;
+    const padBottom = 52;
+    const W = this.container.clientWidth || 1;
+    const H = this.container.clientHeight || 1;
+    const minX = -1 + (padX / W) * 2;
+    const maxX = 1 - (padX / W) * 2;
+    const minY = -1 + (padBottom / H) * 2;
+    const maxY = 1 - (padTop / H) * 2;
+    /** 可见区（避开顶 / 底悬浮 UI）的屏幕中心（px）——「居中」以它为准 */
+    const visCy = (padTop + (H - padBottom)) / 2;
+
+    // 解析试验相机：在指定俯仰角 pitchDeg（高德约定 0=正上方俯视，越大越平视）、
+    // 视中心与距离下透视投影全部角点，检查是否都落在屏幕边距内。
+    const testCam = new THREE.PerspectiveCamera(params.fov, W / H, 1, 1e7);
+    const tmp = new THREE.Vector3();
+    const dirAt = (pitchDeg: number): THREE.Vector3 => {
+      const elev = THREE.MathUtils.degToRad(90 - pitchDeg); // 相机仰角（高于地平线）
+      const c = Math.cos(elev);
+      return new THREE.Vector3(bearing.x * c, bearing.y * c, Math.sin(elev));
+    };
+    const placeTestCam = (lk: THREE.Vector3, dir: THREE.Vector3, d: number): void => {
+      testCam.up.copy(UP);
+      testCam.position.copy(lk).addScaledVector(dir, d);
+      testCam.lookAt(lk);
+      testCam.updateMatrixWorld(true);
+    };
+    const inMargins = (): boolean =>
+      corners.every((c) => {
+        const p = tmp.copy(c).project(testCam);
+        return p.x >= minX && p.x <= maxX && p.y >= minY && p.y <= maxY;
+      });
+
+    /** 在俯仰角 pitchDeg 下二分搜索「全部角点都在屏幕内」的最小相机距离，并量测此时的角点包围盒 */
+    const searchAt = (pitchDeg: number): { d: number; w: number; h: number } => {
+      const dir = dirAt(pitchDeg);
+      const fitsAt = (d: number): boolean => {
+        placeTestCam(look, dir, d);
+        return inMargins();
+      };
+      const radius = box.getBoundingSphere(new THREE.Sphere()).radius;
+      let lo = Math.max(radius, 1);
+      let hi = dist0 * 4;
+      let guard = 0;
+      while (!fitsAt(hi) && guard++ < 8) hi *= 2;
+      if (!fitsAt(hi)) return { d: Infinity, w: 0, h: 0 };
+      for (let i = 0; i < 36 && hi - lo > 1; i++) {
+        const mid = (lo + hi) / 2;
+        if (fitsAt(mid)) hi = mid;
+        else lo = mid;
+      }
+      placeTestCam(look, dir, hi);
+      let bxMin = Infinity, bxMax = -Infinity, byMin = Infinity, byMax = -Infinity;
+      for (const c of corners) {
+        const p = tmp.copy(c).project(testCam);
+        bxMin = Math.min(bxMin, (p.x * 0.5 + 0.5) * W);
+        bxMax = Math.max(bxMax, (p.x * 0.5 + 0.5) * W);
+        byMin = Math.min(byMin, (-p.y * 0.5 + 0.5) * H);
+        byMax = Math.max(byMax, (-p.y * 0.5 + 0.5) * H);
+      }
+      return { d: hi, w: bxMax - bxMin, h: byMax - byMin };
+    };
+
+    // 3) 俯仰角自适应：找一个俯仰角使「最大放大时建筑群投影的高宽比 == 屏幕高宽比」，
+    //    此时最大放大会同时贴满横竖四边（模型刚好填满整个屏幕）。
+    //    投影高宽比随俯仰角增大（越平视）而单调减小；搜索范围夹在 [PITCH_MIN, PITCH_MAX]
+    //    保持正面斜视观感，两端仍不匹配时取更接近的一端（另一方向留少量空白）。
+    const PITCH_MIN = 35;
+    const PITCH_MAX = 75;
+    // 俯仰角匹配目标：可见区（避开顶 / 底悬浮 UI）的高宽比，而非整屏
+    const screenRatio = (H - padTop - padBottom) / Math.max(W - 2 * padX, 1);
+    let pitch = THREE.MathUtils.clamp(this.config.pitch, PITCH_MIN, PITCH_MAX);
+    let fit = searchAt(pitch);
+    if (fit.d === Infinity) return;
+    if (Math.abs(fit.h / fit.w - screenRatio) > 0.01) {
+      const fa = searchAt(PITCH_MIN);
+      const fb = searchAt(PITCH_MAX);
+      if (fa.d !== Infinity && fa.h / fa.w <= screenRatio) {
+        pitch = PITCH_MIN; // 最俯视一端投影仍偏「扁」：宽度贴满、垂直留白
+        fit = fa;
+      } else if (fb.d !== Infinity && fb.h / fb.w >= screenRatio) {
+        pitch = PITCH_MAX; // 最平视一端投影仍偏「高」：高度贴满、水平留白
+        fit = fb;
+      } else {
+        // 二分逼近「投影高宽比 == 屏幕高宽比」
+        let a = PITCH_MIN;
+        let b = PITCH_MAX;
+        for (let i = 0; i < 14; i++) {
+          const mid = (a + b) / 2;
+          const fm = searchAt(mid);
+          if (fm.d === Infinity) { a = mid; continue; }
+          pitch = mid;
+          fit = fm;
+          if (Math.abs(fm.h / fm.w - screenRatio) < 0.004) break;
+          if (fm.h / fm.w > screenRatio) a = mid;
+          else b = mid;
+        }
+      }
+    }
+
+    // —— 屏幕双向居中 + 距离收紧 ——
+    // 距离二分只保证「全部角点都在屏幕内」，但视中心取包围盒几何中心时，
+    // 透视近大远小会让包围盒在屏幕上整体偏侧 / 偏低（模型不在屏幕中间）。
+    // 用同一解析相机实测包围盒中心的屏幕偏移，沿「相机右方向 / 前方向」的
+    // 地面投影按实测灵敏度（px/米）平移取景中心；平移后再重新二分收紧距离
+    // （居中后往往还能放得更大）。「全部建筑可见」优先：收紧失败即回退平移。
+    const pxOf = (pt: THREE.Vector3): { x: number; y: number } => {
+      const p = pt.clone().project(testCam);
+      return { x: (p.x * 0.5 + 0.5) * W, y: (-p.y * 0.5 + 0.5) * H };
+    };
+    const bboxOffset = (): { offX: number; offY: number } => {
+      let bxMin = Infinity, bxMax = -Infinity, byMin = Infinity, byMax = -Infinity;
+      for (const c of corners) {
+        const s = pxOf(c);
+        bxMin = Math.min(bxMin, s.x); bxMax = Math.max(bxMax, s.x);
+        byMin = Math.min(byMin, s.y); byMax = Math.max(byMax, s.y);
+      }
+      // 「居中」目标 = 可见区中心（水平仍取屏幕中心，垂直避开顶 / 底悬浮 UI）
+      return { offX: (bxMin + bxMax) / 2 - W / 2, offY: (byMin + byMax) / 2 - visCy };
+    };
+    for (let iter = 0; iter < 3; iter++) {
+      placeTestCam(look, dirAt(pitch), fit.d);
+      const { offX, offY } = bboxOffset();
+      if (Math.abs(offX) < 1 && Math.abs(offY) < 1) break;
+      // 相机右方向 / 前方向在地面（xoy 平面，z 为高度）上的投影，作为平移基向量
+      const right = new THREE.Vector3().setFromMatrixColumn(testCam.matrixWorld, 0);
+      const fwd = look.clone().sub(testCam.position);
+      const rightG = new THREE.Vector3(right.x, right.y, 0);
+      const fwdG = new THREE.Vector3(fwd.x, fwd.y, 0);
+      if (rightG.lengthSq() < 1e-6 || fwdG.lengthSq() < 1e-6) break;
+      rightG.normalize();
+      fwdG.normalize();
+      // 灵敏度探测：视中心沿基向量走 1 米对应的屏幕位移（px/米）。
+      // 方向推导：视中心右移 Δ → 画面内容整体左移 Δ·dx px（内容与相机反向移动），
+      // 故居中修正取 +off/d（旧实现取负号，方向反了导致越修越偏、被复核回退）。
+      const p0 = pxOf(look);
+      const dx = pxOf(look.clone().addScaledVector(rightG, 1)).x - p0.x;
+      const dy = pxOf(look.clone().addScaledVector(fwdG, 1)).y - p0.y;
+      const look2 = look.clone();
+      if (Math.abs(dx) > 1e-6) look2.addScaledVector(rightG, offX / dx);
+      if (Math.abs(dy) > 1e-6) look2.addScaledVector(fwdG, offY / dy);
+      // 平移后重新收紧距离（居中后常可再放大）；放不下 / 距离异常暴涨则回退平移
+      const prevLook = look.clone();
+      look.copy(look2);
+      const fit2 = searchAt(pitch);
+      if (fit2.d === Infinity || fit2.d > fit.d * 1.3) {
+        look.copy(prevLook); // fit 仍对应 prevLook，无需重算
+      } else {
+        fit = fit2;
+      }
+    }
+
+    // 取景中心（建筑群屏幕居中后的地面点）→ GCJ-02 经纬度
+    const [wlng, wlat] = this.worldToWgs84(look);
+    const fitCenter: [number, number] = wgs84ToGcj02(wlng, wlat);
+
+    // 距离 → 缩放级别：d ∝ 2^(-zoom)，以实测 (zoom0, dist0) 为基准换算；夹在地图缩放范围 [3, 20] 内
+    const zoomFit = Math.min(Math.max(zoom0 + Math.log2(dist0 / fit.d), 3), 20);
+    // 先应用自适应俯仰角（config.maxPitch 已放宽到与 PITCH_MAX 一致，不会被俯仰钳制拉回）
+    this.setPitchSafe(pitch);
+    this.map.setZoomAndCenter(+zoomFit.toFixed(3), fitCenter, true);
+    // eslint-disable-next-line no-console
+    console.info(
+      `[MapScene] 自动取景：估算 zoom=${zoomFit.toFixed(2)}、pitch=${pitch.toFixed(1)}（建筑角点 ${corners.length} 个，` +
+        `最近取景距离 ${fit.d.toFixed(0)}m / 当前 ${dist0.toFixed(0)}m，投影宽高 ${fit.w.toFixed(0)}×${fit.h.toFixed(0)}px ` +
+        `vs 屏幕 ${W}×${H}px，最外侧节点 ${extremeNodes()}）`,
+    );
+
+    // 挂迭代微调：上面的换算若与高德实际相机模型有偏差，会在 render() 里用真实相机
+    // 逐帧修正（先居中、再按「填满倍率」收紧缩放），见 refineFitStep。
+    this.fitRefine = {
+      corners,
+      minX,
+      maxX,
+      minY,
+      maxY,
+      center: fitCenter,
+      pitch,
+      lastZoom: +zoomFit.toFixed(3),
+      lastCenter: fitCenter,
+      tries: 20,
+      startedAt: performance.now(),
+    };
+  }
+
+  /**
+   * 取景迭代微调（在 render() 中相机已与地图同步后调用，每帧最多一步）。
+   * 用真实相机投影全部建筑角点得到屏幕包围盒，按优先级逐步收敛到「居中 + 填满」：
+   *  1) 包围盒中心偏离可见区中心 → 按实测灵敏度（px/米）平移取景中心（居中优先：
+   *     已在屏幕内的包围盒居中后必然仍在屏幕内，收紧缩放不会把它推出屏幕）；
+   *  2) 两方向填满率失衡（fX≠fY，解析俯仰角估计与真实相机有系统偏差）→ 微调
+   *     俯仰角使投影高宽比贴合可见区高宽比（俯仰角越大越平视、投影越扁）；
+   *  3) 填满倍率 f = min(fX, fY) 偏离 1 → 按 log2(f) 修正 zoom（f>1 还能放大、
+   *     f<1 出画需拉远；f<1 与居中状态无关，必定成立）。
+   * 包围盒居中（±3px）且两方向 |log2(f)| < 0.01、或迭代用尽 / 超时即结束。
+   */
+  private refineFitStep(): void {
+    const v = this.fitRefine;
+    if (!v || !this.map || !this.camera || !this.customCoords) return;
+    if (performance.now() - v.startedAt > 5000) {
+      this.fitRefine = null; // 超时放弃（如用户已开始操作地图）
+      return;
+    }
+    const zoomNow = Number(this.map.getZoom?.());
+    if (!Number.isFinite(zoomNow)) return;
+    // 相机还停在旧状态（本次设置的 zoom / center / pitch 尚未生效）或已被外部
+    // 改动 → 本帧跳过，等待设置的视角真正落地后再测量
+    if (Math.abs(zoomNow - v.lastZoom) > 0.01) return;
+    const cNow = this.map.getCenter?.();
+    if (cNow) {
+      if (Math.abs(Number(cNow.lng) - v.lastCenter[0]) > 1e-6) return;
+      if (Math.abs(Number(cNow.lat) - v.lastCenter[1]) > 1e-6) return;
+    }
+    if (Math.abs(Number(this.map.getPitch?.()) - v.pitch) > 0.2) return;
+
+    // 真实相机投影全部角点 → 屏幕包围盒
+    this.camera.updateMatrixWorld(true);
+    const W = this.container.clientWidth || 1;
+    const H = this.container.clientHeight || 1;
+    let lx = Infinity, hx = -Infinity, ly = Infinity, hy = -Infinity;
+    for (const c of v.corners) {
+      const p = c.clone().project(this.camera);
+      lx = Math.min(lx, (p.x * 0.5 + 0.5) * W);
+      hx = Math.max(hx, (p.x * 0.5 + 0.5) * W);
+      ly = Math.min(ly, (-p.y * 0.5 + 0.5) * H);
+      hy = Math.max(hy, (-p.y * 0.5 + 0.5) * H);
+    }
+    // 可见区（NDC 边距 → px）：左右对称；顶 / 底边距不同（避开悬浮 UI）
+    const leftPx = ((1 + v.minX) / 2) * W;
+    const rightPx = ((1 + v.maxX) / 2) * W;
+    const topPx = ((1 - v.maxY) / 2) * H;
+    const bottomPx = ((1 - v.minY) / 2) * H;
+    const visCy = (topPx + bottomPx) / 2;
+    const offX = (lx + hx) / 2 - (leftPx + rightPx) / 2;
+    const offY = (ly + hy) / 2 - visCy;
+    // 两方向填满率：包围盒宽 / 高分别占可见区宽 / 高的比例（>1 有富余、<1 出画）
+    const availW = Math.max(rightPx - leftPx, 1);
+    const availH = Math.max(bottomPx - topPx, 1);
+    const fX = availW / Math.max(hx - lx, 1e-6);
+    const fY = availH / Math.max(hy - ly, 1e-6);
+    const err = Math.log2(Math.min(fX, fY));
+    const done = (reason: string): void => {
+      this.fitRefine = null;
+      // eslint-disable-next-line no-console
+      console.info(
+        `[MapScene] 取景收敛（${reason}）：zoom=${zoomNow.toFixed(2)}、pitch=${v.pitch.toFixed(1)}，` +
+          `角点屏幕范围 x[${lx.toFixed(0)}~${hx.toFixed(0)}]/${W}，y[${ly.toFixed(0)}~${hy.toFixed(0)}]/${H}`,
+      );
+    };
+    if (
+      Math.abs(offX) <= 3 && Math.abs(offY) <= 3 &&
+      Math.abs(Math.log2(fX)) < 0.01 && Math.abs(Math.log2(fY)) < 0.01
+    ) {
+      done('居中且填满'); // 已收敛：两方向都贴满可见区
+      return;
+    }
+    if (v.tries <= 0) {
+      done('迭代用尽'); // 兜底结束并输出诊断
+      return;
+    }
+    v.tries -= 1;
+
+    // 1) 居中优先：平移取景中心（保持 zoom 不变），下一帧再复核 / 收紧缩放
+    if (Math.abs(offX) > 3 || Math.abs(offY) > 3) {
+      const params = this.customCoords.getCameraParams?.();
+      if (!params?.lookAt) return;
+      const lookW = new THREE.Vector3(params.lookAt[0], params.lookAt[1], params.lookAt[2]);
+      const rightW = new THREE.Vector3().setFromMatrixColumn(this.camera.matrixWorld, 0);
+      const rightG = new THREE.Vector3(rightW.x, rightW.y, 0);
+      const fwdG = new THREE.Vector3(
+        lookW.x - this.camera.position.x,
+        lookW.y - this.camera.position.y,
+        0,
+      );
+      if (rightG.lengthSq() < 1e-6 || fwdG.lengthSq() < 1e-6) {
+        done('无法居中'); // 纯俯视等极端情况，放弃居中
+        return;
+      }
+      rightG.normalize();
+      fwdG.normalize();
+      // 灵敏度探测（真实相机）：视中心沿基向量走 1 米对应的屏幕位移（px/米）
+      const cam = this.camera; // 闭包内 TS 不保留 this.camera 的非空收窄，取局部引用
+      const prj = (pt: THREE.Vector3): { x: number; y: number } => {
+        const q = pt.clone().project(cam);
+        return { x: (q.x * 0.5 + 0.5) * W, y: (-q.y * 0.5 + 0.5) * H };
+      };
+      const p0 = prj(lookW);
+      const dx = prj(lookW.clone().addScaledVector(rightG, 1)).x - p0.x;
+      const dy = prj(lookW.clone().addScaledVector(fwdG, 1)).y - p0.y;
+      // 修正方向：视中心右移 → 内容左移，故取 +off/d；0.9 阻尼防过冲
+      const look2 = lookW.clone();
+      if (Math.abs(dx) > 1e-6) look2.addScaledVector(rightG, (0.9 * offX) / dx);
+      if (Math.abs(dy) > 1e-6) look2.addScaledVector(fwdG, (0.9 * offY) / dy);
+      const [wl, wt] = this.worldToWgs84(look2);
+      v.center = wgs84ToGcj02(wl, wt);
+      v.lastCenter = v.center;
+      this.map.setZoomAndCenter(zoomNow, v.center, true);
+      return;
+    }
+
+    // 2) 俯仰角均衡：两方向填满率失衡（解析估计与真实相机有系统偏差）时，
+    //    微调俯仰角把投影高宽比拉到与可见区一致——fY 富余（偏扁）→ 俯仰角调小
+    //    （更俯视、投影变高），fX 富余（偏高）→ 俯仰角调大。
+    //    高度投影 ln(h) 对俯仰角的灵敏度 ≈ -cot(仰角)（弧度→度换算后每度），
+    //    需要的相对高度变化 = fY/fX - 1，据此估算步长；0.8 阻尼防过冲。
+    if (Math.abs(Math.log2(fY / fX)) > 0.02) {
+      const theta = THREE.MathUtils.degToRad(90 - v.pitch); // 相机仰角
+      // |d ln h / d pitch| = cot(仰角)（每弧度）→ 每度；俯视极限下灵敏度趋 0，兜底 0.05
+      const sens = Math.max(1 / Math.max(Math.tan(theta), 1e-3), 0.05) * (Math.PI / 180);
+      const dp = THREE.MathUtils.clamp(-(Math.log(fY / fX) / sens) * 0.8, -3, 3);
+      const pMin = Math.max(this.config.minPitch ?? 0, 5);
+      const pMax = Math.min(this.config.maxPitch ?? 75, 80);
+      const pNew = THREE.MathUtils.clamp(v.pitch + dp, pMin, pMax);
+      if (Math.abs(pNew - v.pitch) >= 0.05) {
+        v.pitch = +pNew.toFixed(2);
+        this.setPitchSafe(v.pitch);
+        return; // 等俯仰角生效后下一帧复测（zoom / center 不动）
+      }
+      // 已抵俯仰角上下限：不再均衡，退化为只按短板收紧缩放（另一方向留白）
+    }
+
+    // 3) 收紧扣缩放：f>1 拉近放大、f<1 拉远保证全部建筑可见；0.9 阻尼防过冲
+    const z = Math.min(Math.max(zoomNow + 0.9 * err, 3), 20);
+    if (Math.abs(z - zoomNow) < 0.001) {
+      done('已抵 zoom 上下限');
+      return;
+    }
+    v.lastZoom = +z.toFixed(3);
+    this.map.setZoomAndCenter(v.lastZoom, v.center, true);
   }
 
   /**
@@ -1792,6 +2242,15 @@ export class MapScene {
     this.camera.up.set(up[0], up[1], up[2]);
     this.camera.lookAt(lookAt[0], lookAt[1], lookAt[2]);
     this.camera.updateProjectionMatrix();
+
+    // 取景迭代微调：此刻相机已与地图真实状态同步，按实测出画倍率逐步收敛到「刚好」
+    if (this.fitRefine) {
+      try {
+        this.refineFitStep();
+      } catch {
+        this.fitRefine = null; // 微调失败不影响渲染
+      }
+    }
 
     this.renderer.render(this.scene, this.camera);
 

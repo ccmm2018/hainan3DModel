@@ -153,11 +153,17 @@ export interface SceneConfig {
  */
 export const DEFAULT_SCENE_CONFIG: SceneConfig = {
   center: [110.280328, 19.75491],
-  zoom: 16.5,
-  pitch: 55,
-  // 旋转限制：地图可水平旋转（绕竖直轴），但俯仰角被锁在 [0, 55] 之间，
-  // 不允许把地图「翻过来」或掀得过高。下限 0 = 正上方俯视。
-  maxPitch: 55,
+  // 加载阶段即「近距离正面斜视」；模型就绪后 MapScene.fitToBuildings() 会按当前
+  // 屏幕尺寸把缩放精确推到「刚好能看到全部建筑」的最大级别（自动适配不同分辨率）。
+  zoom: 17,
+  // 正面倾斜视角：相机在模型正前方、高于地平线 30° 俯瞰（俯角 30°），
+  // 对应高德 pitch = 90° - 30° = 60（pitch 0 为正上方俯视，越大越「平视」）。
+  pitch: 60,
+  // 旋转限制：地图可水平旋转（绕竖直轴），俯仰角（pitch）被锁在 [0, 75] 之间，
+  // 不允许把地图「翻过来」。上限 75 与 fitToBuildings 的俯仰角自适应搜索上限
+  // （PITCH_MAX=75）一致：宽屏上「模型刚好填满屏幕」需要的俯仰角会超过 60。
+  // 下限 0 = 正上方俯视。
+  maxPitch: 75,
   minPitch: 0,
   // 数字孪生底色：浅灰白底图，周边建筑以浅灰「白模」呈现，路网/绿地/水系清晰可见
   mapStyle: 'amap://styles/whitesmoke',

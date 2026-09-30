@@ -78,6 +78,13 @@ export const DEFAULT_CALIBRATION: ModelCalibration = {
 export interface MapSceneCallbacks {
   onModelProgress?: (percent: number) => void;
   onModelReady?: () => void;
+  /**
+   * 自动取景完成（视角已收敛稳定）时触发。
+   * 加载遮罩应保持到本回调之后才揭开——初始取景与迭代微调的视角跳变
+   * 都发生在遮罩后面，用户看到的第一个画面就是最终稳定视角。
+   * （fitToBuildings 未挂微调时也会同步触发一次。）
+   */
+  onFitComplete?: () => void;
   onModelError?: (err: unknown) => void;
   onMapError?: (err: unknown) => void;
   /** 悬停（未命中时为 null） */
@@ -436,8 +443,12 @@ export class MapScene {
         );
 
         this.markDirty();
-        // 取景：按当前屏幕把缩放精确推到「刚好能看到全部建筑」的最大级别
+        // 取景：按当前屏幕把缩放精确推到「刚好能看到全部建筑」的最大级别。
+        // 取景挂了迭代微调时，onFitComplete 由 endFitRefine() 在收敛后触发；
+        // 未挂微调（fitToBuildings 内部提前返回）时在这里同步补一次，
+        // 保证上层（加载遮罩）总能等到「取景完成」。
         this.fitToBuildings();
+        if (!this.fitRefine) this.callbacks.onFitComplete?.();
         this.callbacks.onModelReady?.();
       },
       (event: ProgressEvent) => {
@@ -712,7 +723,11 @@ export class MapScene {
     );
 
     // 挂迭代微调：上面的换算若与高德实际相机模型有偏差，会在 render() 里用真实相机
-    // 逐帧修正（先居中、再按「填满倍率」收紧缩放），见 refineFitStep。
+    // 逐帧修正（先居中、再俯仰均衡、最后按「填满倍率」收紧缩放），见 refineFitStep。
+    // 微调期间隐藏模型：各步修正都是立即生效的跳变，若模型可见，逐帧摆动会被
+    // 看成「加载时模型抖动两下」；底图自身调整无参照物、肉眼几乎无感。
+    // 收敛 / 超时 / 异常时由 endFitRefine() 恢复显示（模型出现即在最终稳定位置）。
+    this.modelRoot.visible = false;
     this.fitRefine = {
       corners,
       minX,
@@ -728,6 +743,18 @@ export class MapScene {
     };
   }
 
+  /** 结束取景微调：恢复模型显示（微调期间隐藏以避免逐帧修正被看成「加载时抖动」），
+   *  并通知上层取景已完成（加载遮罩可以揭开了） */
+  private endFitRefine(): void {
+    if (!this.fitRefine) return; // 幂等：重复调用不重复回调
+    this.fitRefine = null;
+    if (this.modelRoot && !this.modelRoot.visible) {
+      this.modelRoot.visible = true;
+      this.markDirty();
+    }
+    this.callbacks.onFitComplete?.();
+  }
+
   /**
    * 取景迭代微调（在 render() 中相机已与地图同步后调用，每帧最多一步）。
    * 用真实相机投影全部建筑角点得到屏幕包围盒，按优先级逐步收敛到「居中 + 填满」：
@@ -741,11 +768,12 @@ export class MapScene {
    */
   private refineFitStep(): void {
     const v = this.fitRefine;
-    if (!v || !this.map || !this.camera || !this.customCoords) return;
+    if (!v) return;
     if (performance.now() - v.startedAt > 5000) {
-      this.fitRefine = null; // 超时放弃（如用户已开始操作地图）
+      this.endFitRefine(); // 超时放弃（如用户已开始操作地图），恢复模型显示
       return;
     }
+    if (!this.map || !this.camera || !this.customCoords) return;
     const zoomNow = Number(this.map.getZoom?.());
     if (!Number.isFinite(zoomNow)) return;
     // 相机还停在旧状态（本次设置的 zoom / center / pitch 尚未生效）或已被外部
@@ -785,7 +813,7 @@ export class MapScene {
     const fY = availH / Math.max(hy - ly, 1e-6);
     const err = Math.log2(Math.min(fX, fY));
     const done = (reason: string): void => {
-      this.fitRefine = null;
+      this.endFitRefine(); // 结束微调并恢复模型显示
       // eslint-disable-next-line no-console
       console.info(
         `[MapScene] 取景收敛（${reason}）：zoom=${zoomNow.toFixed(2)}、pitch=${v.pitch.toFixed(1)}，` +
@@ -2248,7 +2276,7 @@ export class MapScene {
       try {
         this.refineFitStep();
       } catch {
-        this.fitRefine = null; // 微调失败不影响渲染
+        this.endFitRefine(); // 微调失败不影响渲染（并恢复模型显示）
       }
     }
 

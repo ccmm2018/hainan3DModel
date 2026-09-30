@@ -1353,16 +1353,31 @@ onMounted(async () => {
     const AMap = await loadAMap({ key, securityJsCode: securityCode });
 
     if (!mapContainer.value) return;
+    // 自动取景（fitToBuildings + 迭代微调）期间视角会跳变，加载遮罩必须
+    // 保持到「模型就绪 && 取景收敛」双条件齐备后才揭开，用户看到的第一个
+    // 画面就是最终稳定视角（否则会看到底图 / 模型先跳几下再稳定）。
+    let modelReady = false;
+    let fitDone = false;
+    const tryReveal = (): void => {
+      if (modelReady && fitDone && status.value === 'loading-model') {
+        status.value = 'ready';
+      }
+    };
     scene = new MapScene(mapContainer.value, config, {
       onModelProgress: (p) => (modelProgress.value = p),
       onModelReady: () => {
-        status.value = 'ready';
+        modelReady = true;
         objectList.value = scene?.listObjects() ?? [];
         // 把 GLB 里真实存在的建筑节点名（0–25）登记进楼栋表，
         // 否则 DXF 第 6 步「确认归属」候选列表里找不到当前选中的建筑。
         buildingStore.registerBuildings(objectList.value.map((o) => o.name));
         // 同步已保存的校准值到滑块（若此前已微调过）
         if (scene) Object.assign(cal, scene.getCalibration());
+        tryReveal();
+      },
+      onFitComplete: () => {
+        fitDone = true;
+        tryReveal();
       },
       onModelError: () => {
         status.value = 'error';
@@ -1477,7 +1492,9 @@ onBeforeUnmount(() => {
   justify-content: center;
   gap: 12px;
   color: #dce6f5;
-  background: rgba(14, 20, 32, 0.82);
+  /* 近不透明：遮罩后面自动取景的视角跳变（缩放/俯仰/平移）完全不可见，
+     揭开遮罩时直接呈现最终稳定视角 */
+  background: rgba(14, 20, 32, 0.97);
   backdrop-filter: blur(6px);
 }
 .scene-overlay strong { font-size: 15px; font-weight: 500; }

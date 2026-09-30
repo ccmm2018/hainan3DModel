@@ -116,6 +116,7 @@ export class MapScene {
   private glLayer: any = null;
 
   private renderer: THREE.WebGLRenderer | null = null;
+  private lowEnd = false; // 低配设备标记：用于降低渲染负载（关阴影 / 跳过 PMREM / 像素比封顶）
   private scene: THREE.Scene | null = null;
   private camera: THREE.PerspectiveCamera | null = null;
   private modelRoot: THREE.Object3D | null = null;
@@ -300,6 +301,7 @@ export class MapScene {
     const lowEnd =
       (navigator.hardwareConcurrency || 4) <= 4 ||
       (((navigator as unknown as { deviceMemory?: number }).deviceMemory ?? 8) <= 4);
+    this.lowEnd = lowEnd;
     try {
       this.renderer = new THREE.WebGLRenderer({
         context: gl,
@@ -318,6 +320,16 @@ export class MapScene {
     this.renderer.autoClear = false;
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
 
+    // 阴影策略（低配 CPU 100% 的首要根因）：
+    // 校园场景是静态的，阴影图只需在模型放置后计算一次。three 的 shadowMap.autoUpdate 默认为 true，
+    // 会令 AMap 自定义图层每帧回调 render() 时都把整张阴影图从光源视角重绘一遍（≈整场景双倍绘制），
+    // 取景动画期间持续渲染 → 低配机器 CPU 瞬间打满。这里改为「自动更新关闭 + needsUpdate 单次触发」，
+    // 阴影只在模型就绪后渲染一次，之后每帧复用缓存，负载骤降。
+    // 低配机器则直接关闭阴影（由环境光/半球光/主补光兜底），换取流畅加载。
+    this.renderer.shadowMap.enabled = !this.lowEnd;
+    this.renderer.shadowMap.type = this.lowEnd ? THREE.BasicShadowMap : THREE.PCFSoftShadowMap;
+    this.renderer.shadowMap.autoUpdate = false;
+
     this.scene = new THREE.Scene();
     this.camera = new THREE.PerspectiveCamera(60, width / height, 1, 1 << 30);
 
@@ -333,13 +345,17 @@ export class MapScene {
     // 环境贴图（IBL）：PBR 材质需要环境光照才能呈现正确质感（尤其是金属度/粗糙度与边缘反射）。
     // 缺少 scene.environment 时，很多外立面材质会因为没有环境反射而显得「发灰、发暗、像没贴图」，
     // 这正是「GLB 材质丢失」最常见的原因。这里用 RoomEnvironment 程序化生成一张轻量环境贴图。
-    try {
-      const pmrem = new THREE.PMREMGenerator(this.renderer);
-      const envTex = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
-      this.scene.environment = envTex;
-      pmrem.dispose();
-    } catch {
-      /* 极少数 WebGL 环境下 PMREM 不可用，退化为基础灯光照明（不影响几何显示） */
+    // 低配机器跳过 PMREM 生成（其 fromScene 需在初始化时渲染多遍立方体贴图，是一次性 GPU 峰值），
+    // 直接由下方的环境光 + 半球光 + 主/补光提供基础照明，避免加载瞬间 CPU/GPU 被打满。
+    if (!this.lowEnd) {
+      try {
+        const pmrem = new THREE.PMREMGenerator(this.renderer);
+        const envTex = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+        this.scene.environment = envTex;
+        pmrem.dispose();
+      } catch {
+        /* 极少数 WebGL 环境下 PMREM 不可用，退化为基础灯光照明（不影响几何显示） */
+      }
     }
 
     // 量算图层：独立于模型，始终绘制在模型之上
@@ -436,10 +452,12 @@ export class MapScene {
         // 以免误伤楼栋原本正常的材质/屋顶/地面。
         const materialFixed = this.fixMaterialTextures(this.modelRoot);
         const caps = this.renderer?.capabilities;
+        const shadowState = this.renderer?.shadowMap?.enabled ? '单次(静态缓存)' : '关(低配)';
         // eslint-disable-next-line no-console
         console.info(
           `[MapScene] GLB 加载完成：isWebGL2=${caps?.isWebGL2 ?? '?'}，MAX_TEXTURE_SIZE=${caps?.maxTextureSize ?? '?'}，` +
-            `超限缩放=${clampedCount} 张，NPOT 材质降级=${npotFixed} 张，黑图替换=${materialFixed} 张`,
+            `低配=${this.lowEnd}，阴影=${shadowState}，`
+            + `超限缩放=${clampedCount} 张，NPOT 材质降级=${npotFixed} 张，黑图替换=${materialFixed} 张`,
         );
 
         this.markDirty();
@@ -448,6 +466,9 @@ export class MapScene {
         // 未挂微调（fitToBuildings 内部提前返回）时在这里同步补一次，
         // 保证上层（加载遮罩）总能等到「取景完成」。
         this.fitToBuildings();
+        // 阴影只算一次：模型已放置/取景完毕，唤醒一次阴影图渲染（shadowMap.autoUpdate=false 时
+        // 需靠 needsUpdate 触发；渲染后 three 会自清零，后续帧复用缓存，不再每帧重绘）。
+        if (this.renderer?.shadowMap?.enabled) this.renderer.shadowMap.needsUpdate = true;
         if (!this.fitRefine) this.callbacks.onFitComplete?.();
         this.callbacks.onModelReady?.();
       },
@@ -1266,6 +1287,9 @@ export class MapScene {
   setCalibration(partial: Partial<ModelCalibration>): void {
     this.calibration = { ...this.calibration, ...partial };
     this.applyCalibration();
+    // 模型位移/旋转/缩放后，缓存的阴影图需重算一次（autoUpdate=false 时靠 needsUpdate 触发；
+    // 仅阴影开启时生效，低配已关闭阴影则无操作）。
+    if (this.renderer?.shadowMap?.enabled) this.renderer.shadowMap.needsUpdate = true;
   }
 
   /** 读取当前生效的校准参数 */

@@ -117,6 +117,7 @@ export class MapScene {
 
   private renderer: THREE.WebGLRenderer | null = null;
   private lowEnd = false; // 低配设备标记：用于降低渲染负载（关阴影 / 跳过 PMREM / 像素比封顶）
+  private loadStartTs = 0; // 首次加载起始时间戳（用于日志输出首屏总耗时，便于定位加载瓶颈）
   private scene: THREE.Scene | null = null;
   private camera: THREE.PerspectiveCamera | null = null;
   private modelRoot: THREE.Object3D | null = null;
@@ -156,6 +157,21 @@ export class MapScene {
 
   /** 当前高亮对象（用于 clearHighlight 还原） */
   private highlightedObject: THREE.Object3D | null = null;
+
+  // —— 悬停拾取节流相关字段 ——
+  /** 由 mousemove 写入的最新待拾取坐标。
+   *  拾取必须「随鼠标移动立即触发」，不能依赖 render() 每帧消费——
+   *  AMap 自定义图层在地图静止时未必每帧回调 render，若把拾取挂到 render 里，
+   *  鼠标在静止地图上移动就不会触发高亮（这正是高亮失效的根因）。 */
+  private hoverLatest: { x: number; y: number } | null = null;
+  /** 当前帧是否已排程一次拾取（合并一帧内多次 mousemove，保证每帧至多一次 raycast） */
+  private hoverRafScheduled = false;
+  /** 上一次实际执行拾取的坐标（位移 < 1px 视为同位置跳过，避免原地抖动重复拾取） */
+  private lastHoverPos: { x: number; y: number } | null = null;
+  /** 各建筑的世界轴对齐包围盒（AABB），用于 raycast 前做廉价粗筛，避免对整模型全量求交 */
+  private buildingBoxes: { obj: THREE.Object3D; box: THREE.Box3 }[] = [];
+  /** 校准拖拽时阴影重算的防抖定时器（避免每次 setCalibration 都重算阴影图） */
+  private shadowUpdateTimer: number | null = null;
 
   /** 楼盘表：房间格子可视化 */
   private roomGroup: THREE.Group | null = null;
@@ -401,6 +417,7 @@ export class MapScene {
       (gltf) => {
         if (this.disposed) return;
         this.modelRoot = gltf.scene;
+        this.loadStartTs = performance.now();
 
         // 按配置过滤节点：隐藏 Blender 一并导出的辅助几何（屋顶棚/女儿墙/大门/廊架/骨架/空物体等），
         // 只保留楼本体，避免地图上出现无关网格。需在居中/命名解析前执行。
@@ -451,16 +468,20 @@ export class MapScene {
         // 程序化立面纹理。此一类修复经用户确认有效（「墙面发黑问题已修复」），不再做其它运行时材质改写，
         // 以免误伤楼栋原本正常的材质/屋顶/地面。
         const materialFixed = this.fixMaterialTextures(this.modelRoot);
+        // 低配：大贴图关 mipmap，降低首帧上传 / mip 生成开销（首帧 CPU 峰值来源之一）
+        const textureReduced = this.reduceTextureQualityForLowEnd(this.modelRoot);
         const caps = this.renderer?.capabilities;
         const shadowState = this.renderer?.shadowMap?.enabled ? '单次(静态缓存)' : '关(低配)';
         // eslint-disable-next-line no-console
         console.info(
           `[MapScene] GLB 加载完成：isWebGL2=${caps?.isWebGL2 ?? '?'}，MAX_TEXTURE_SIZE=${caps?.maxTextureSize ?? '?'}，` +
             `低配=${this.lowEnd}，阴影=${shadowState}，`
-            + `超限缩放=${clampedCount} 张，NPOT 材质降级=${npotFixed} 张，黑图替换=${materialFixed} 张`,
+            + `超限缩放=${clampedCount} 张，NPOT 材质降级=${npotFixed} 张，黑图替换=${materialFixed} 张，低配贴图降级=${textureReduced} 张`,
         );
 
         this.markDirty();
+        // 取景前先构建各建筑世界 AABB，供后续悬停拾取做粗筛（避免全模型 raycast）。
+        this.refreshBuildingBoxes();
         // 取景：按当前屏幕把缩放精确推到「刚好能看到全部建筑」的最大级别。
         // 取景挂了迭代微调时，onFitComplete 由 endFitRefine() 在收敛后触发；
         // 未挂微调（fitToBuildings 内部提前返回）时在这里同步补一次，
@@ -469,7 +490,13 @@ export class MapScene {
         // 阴影只算一次：模型已放置/取景完毕，唤醒一次阴影图渲染（shadowMap.autoUpdate=false 时
         // 需靠 needsUpdate 触发；渲染后 three 会自清零，后续帧复用缓存，不再每帧重绘）。
         if (this.renderer?.shadowMap?.enabled) this.renderer.shadowMap.needsUpdate = true;
-        if (!this.fitRefine) this.callbacks.onFitComplete?.();
+        if (!this.fitRefine) {
+          if (this.loadStartTs) {
+            // eslint-disable-next-line no-console
+            console.info(`[MapScene] 取景完成（低配跳过微调），首次加载总耗时约 ${Math.round(performance.now() - this.loadStartTs)}ms`);
+          }
+          this.callbacks.onFitComplete?.();
+        }
         this.callbacks.onModelReady?.();
       },
       (event: ProgressEvent) => {
@@ -743,6 +770,14 @@ export class MapScene {
         `vs 屏幕 ${W}×${H}px，最外侧节点 ${extremeNodes()}）`,
     );
 
+    // 低配设备：跳过逐帧迭代微调。微调每帧调用 setZoomAndCenter 会反复触发高德底图瓦片重载，
+    // 是加载期 CPU 瞬间 100% 且 loading 拖到 5~10s 的主要来源；直接以估算 zoom 取景并立即显示模型，
+    // 换取更快的首次加载。取景精度略有下降，但对低配机器利大于弊。
+    if (this.lowEnd) {
+      if (this.modelRoot) this.modelRoot.visible = true;
+      return; // 不挂 fitRefine → loadModel 中 `if (!this.fitRefine) onFitComplete()` 会照常揭开遮罩
+    }
+
     // 挂迭代微调：上面的换算若与高德实际相机模型有偏差，会在 render() 里用真实相机
     // 逐帧修正（先居中、再俯仰均衡、最后按「填满倍率」收紧缩放），见 refineFitStep。
     // 微调期间隐藏模型：各步修正都是立即生效的跳变，若模型可见，逐帧摆动会被
@@ -769,6 +804,10 @@ export class MapScene {
   private endFitRefine(): void {
     if (!this.fitRefine) return; // 幂等：重复调用不重复回调
     this.fitRefine = null;
+    if (this.loadStartTs) {
+      // eslint-disable-next-line no-console
+      console.info(`[MapScene] 取景完成，首次加载总耗时约 ${Math.round(performance.now() - this.loadStartTs)}ms`);
+    }
     if (this.modelRoot && !this.modelRoot.visible) {
       this.modelRoot.visible = true;
       this.markDirty();
@@ -790,7 +829,7 @@ export class MapScene {
   private refineFitStep(): void {
     const v = this.fitRefine;
     if (!v) return;
-    if (performance.now() - v.startedAt > 5000) {
+    if (performance.now() - v.startedAt > 3000) {
       this.endFitRefine(); // 超时放弃（如用户已开始操作地图），恢复模型显示
       return;
     }
@@ -1174,6 +1213,44 @@ export class MapScene {
   }
 
   /**
+   * 低配设备：对尺寸较大的贴图关闭 mipmap，降低「首帧把 108 张贴图上传到 GPU 并生成 mip 链」的开销
+   * （首帧 CPU/GPU 峰值的主要来源之一）。代价是远处略有锯齿，但低配机器优先保证加载速度与流畅度。
+   * 仅在 lowEnd 时生效；非低配机器保留 mipmap 以保证画质。
+   * @returns 被降级的贴图数量
+   */
+  private reduceTextureQualityForLowEnd(root: THREE.Object3D): number {
+    if (!this.lowEnd) return 0;
+    const seen = new Set<THREE.Texture>();
+    let reduced = 0;
+    root.traverse((child) => {
+      const mesh = child as THREE.Mesh;
+      if (!mesh.isMesh) return;
+      const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+      for (const m of mats) {
+        const mat = m as THREE.MeshStandardMaterial;
+        const maps: Array<THREE.Texture | null | undefined> = [
+          mat.map, mat.roughnessMap, mat.metalnessMap, mat.normalMap, mat.emissiveMap, mat.aoMap, mat.alphaMap,
+        ];
+        for (const tex of maps) {
+          if (!tex || seen.has(tex)) continue;
+          seen.add(tex);
+          const img = tex.image as { width?: number; height?: number } | undefined;
+          const w = img?.width ?? 0;
+          const h = img?.height ?? 0;
+          // 仅对较大贴图降级（小贴图 mip 开销可忽略，保留以保证远处观感）
+          if (w > 512 || h > 512) {
+            tex.generateMipmaps = false;
+            tex.minFilter = THREE.LinearFilter;
+            tex.needsUpdate = true;
+            reduced++;
+          }
+        }
+      }
+    });
+    return reduced;
+  }
+
+  /**
    * 按 modelNodeFilter 配置隐藏/保留模型节点。
    * 子串匹配节点名（不区分大小写）；命中后对该节点整棵子树设置 visible=false。
    */
@@ -1280,7 +1357,24 @@ export class MapScene {
     // 缩放：config.modelScale × 校准倍率
     this.modelRoot.scale.setScalar(this.config.modelScale * c.scale);
     this.modelRoot.updateMatrixWorld(true);
+    this.refreshBuildingBoxes(); // 校准后重建建筑 AABB，保证悬停粗筛与模型位置同步
     this.markDirty();
+  }
+
+  /** 重建各建筑的世界 AABB（校准/加载后调用），供悬停拾取做廉价粗筛，避免全模型 raycast */
+  private refreshBuildingBoxes(): void {
+    if (!this.modelRoot) {
+      this.buildingBoxes = [];
+      return;
+    }
+    this.modelRoot.updateMatrixWorld(true);
+    const boxes: { obj: THREE.Object3D; box: THREE.Box3 }[] = [];
+    for (const name of this.buildingNames) {
+      const obj = this.modelRoot.getObjectByName(name);
+      if (!obj) continue;
+      boxes.push({ obj, box: new THREE.Box3().setFromObject(obj) });
+    }
+    this.buildingBoxes = boxes;
   }
 
   /** 设置/微调校准参数（增量叠加到基准，传入部分字段即可） */
@@ -1289,7 +1383,19 @@ export class MapScene {
     this.applyCalibration();
     // 模型位移/旋转/缩放后，缓存的阴影图需重算一次（autoUpdate=false 时靠 needsUpdate 触发；
     // 仅阴影开启时生效，低配已关闭阴影则无操作）。
-    if (this.renderer?.shadowMap?.enabled) this.renderer.shadowMap.needsUpdate = true;
+    // 用防抖取代「每次调用都重算」：拖拽滑块/模型时 setCalibration 每帧触发，若每帧都重绘阴影图
+    // 会让整场景每帧双倍绘制，CPU 飙到 50%+。改为停手 120ms 后才算一次，拖拽期间复用旧阴影。
+    this.scheduleShadowUpdate();
+  }
+
+  /** 阴影图重算防抖：连续校准期间不每帧重绘阴影（否则拖模型 CPU 50%+），停手后算一次即可 */
+  private scheduleShadowUpdate(): void {
+    if (!this.renderer?.shadowMap?.enabled) return;
+    if (this.shadowUpdateTimer !== null) clearTimeout(this.shadowUpdateTimer);
+    this.shadowUpdateTimer = window.setTimeout(() => {
+      this.shadowUpdateTimer = null;
+      if (this.renderer?.shadowMap) this.renderer.shadowMap.needsUpdate = true;
+    }, 120);
   }
 
   /** 读取当前生效的校准参数 */
@@ -1358,7 +1464,24 @@ export class MapScene {
       return;
     }
     const { x, y } = this.pixelOf(e);
-    this.callbacks.onHover?.(this.pick(x, y));
+    // 位移 < 1px 视为同位置，跳过重复拾取（避免原地抖动反复 raycast）
+    if (this.lastHoverPos && Math.abs(this.lastHoverPos.x - x) < 1 && Math.abs(this.lastHoverPos.y - y) < 1) {
+      return;
+    }
+    this.hoverLatest = { x, y };
+    // rAF 节流：把连续 mousemove 合并到下一帧最多拾取一次。
+    // 既保证高亮随鼠标即时触发（不依赖 render 每帧回调），又压住 CPU（每帧至多一次 raycast）。
+    if (this.hoverRafScheduled) return;
+    this.hoverRafScheduled = true;
+    requestAnimationFrame(() => {
+      this.hoverRafScheduled = false;
+      if (this.disposed) return;
+      const p = this.hoverLatest;
+      if (!p) return;
+      const result = this.pick(p.x, p.y);
+      this.lastHoverPos = { x: p.x, y: p.y };
+      this.callbacks.onHover?.(result);
+    });
   }
 
   private handleClick(e: any): void {
@@ -1388,8 +1511,23 @@ export class MapScene {
     const ndc = new THREE.Vector2((px / width) * 2 - 1, -(py / height) * 2 + 1);
 
     this.raycaster.setFromCamera(ndc, this.camera);
+
+    // 候选收窄（性能优化）：先用廉价 AABB 测试，只对「射线可能穿过」的建筑做精确求交，
+    // 悬停命中建筑时仅对该建筑子树求交（mesh 数大幅减少），这是把悬停 CPU 降下来的关键。
+    // 但若粗筛未命中任何建筑，则回退到「整模型求交」——因为某些建筑节点可能为不含 mesh 的
+    // 空 Group（其 AABB 退化），或 AABB 随校准/取景存在偏差，直接据此拒绝会漏选、导致高亮失效。
+    // 回退整模型虽略增开销，但 mousemove 已节流到每帧最多一次，实际负载可控，且保证高亮 100% 正确。
+    const candidates: THREE.Object3D[] = [];
+    for (const { obj, box } of this.buildingBoxes) {
+      if (this.raycaster.ray.intersectsBox(box)) candidates.push(obj);
+    }
+
     const targets: THREE.Object3D[] = [];
-    if (this.modelRoot) targets.push(this.modelRoot);
+    if (candidates.length > 0) {
+      for (const c of candidates) targets.push(c); // fast path：仅命中建筑子树
+    } else if (this.modelRoot) {
+      targets.push(this.modelRoot); // 粗筛未命中：回退整模型，避免漏选导致高亮失效
+    }
     if (this.roomGroup) targets.push(this.roomGroup);
     if (targets.length === 0) return null;
 
@@ -1469,6 +1607,8 @@ export class MapScene {
    *  - 保留建筑原有外观细节，仅叠加高亮色发光，选中/悬停反馈清晰且不空洞。
    */
   highlight(obj: THREE.Object3D | null, color: string): void {
+    // 幂等：已是同一对象则跳过克隆/还原，避免每次 mousemove 都重复重建材质（高亮 churn 是悬停 CPU 的次要来源）。
+    if (obj && obj === this.highlightedObject) return;
     this.clearHighlight();
     if (!obj) return;
     const tint = new THREE.Color(color);

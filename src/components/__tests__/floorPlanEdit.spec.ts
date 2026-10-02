@@ -95,6 +95,13 @@ describe('FloorPlan2D 房间编辑/隐藏/重新显示', () => {
     await editBtn!.trigger('click');
     await nextTick();
 
+    // 新 UX：就地编辑，不应再出现独立的「修改信息」表单块（避免与上方信息重复）
+    expect(wrapper.find('.fpv-pop__form').exists()).toBe(false);
+    expect(wrapper.find('.fpv-pop__info--edit').exists()).toBe(true);
+    // 就地编辑区应直接包含 名称 输入框（绑定 editRoom.name）
+    const editNameInput = wrapper.findAll('input.el-input-stub')[1];
+    expect(editNameInput.exists()).toBe(true);
+
     // 找到名称输入框并写入新名称
     const nameInput = wrapper.findAll('input.el-input-stub')[1]; // 第2个输入框=名称
     await nameInput.setValue('测试会议室A');
@@ -243,7 +250,11 @@ describe('FloorPlan2D 房间编辑/隐藏/重新显示', () => {
     await nextTick();
     await nextTick();
 
-    // 保存后：标题与名称格都应更新为新名称
+    // 保存后：先收起编辑态，只读信息格才会渲染
+    const editBtn2 = wrapper.findAll('button').find((b) => b.text().includes('修改信息'));
+    await editBtn2!.trigger('click');
+    await nextTick();
+    await nextTick();
     const title1 = wrapper.find('.fpv-pop__title').text();
     const nameCell1 = findCell(wrapper, '名称');
     console.log('USER title1=', title1, 'nameCell1=', nameCell1);
@@ -331,7 +342,12 @@ describe('FloorPlan2D 房间编辑/隐藏/重新显示', () => {
     await nextTick();
     await nextTick();
 
-    // 保存后：标题必须显示「101」，且不再显示未命名
+    // 保存后：先收起编辑态，只读信息格才会渲染
+    const editBtn2 = wrapper.findAll('button').find((b) => b.text().includes('修改信息'));
+    await editBtn2!.trigger('click');
+    await nextTick();
+    await nextTick();
+    // 标题必须显示「101」，且不再显示未命名
     const title1 = wrapper.find('.fpv-pop__title').text();
     const nameCell1 = findCell(wrapper, '名称');
     console.log('ISSUE2 title1=', title1, 'nameCell1=', nameCell1);

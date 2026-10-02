@@ -63,6 +63,11 @@ describe('REPRO: name literally "未命名"', () => {
     await nextTick();
     await nextTick();
 
+    // 保存后：先收起编辑态，只读信息格才会渲染
+    const editBtn2 = wrapper.findAll('button').find((b) => b.text().includes('修改信息'));
+    await editBtn2!.trigger('click');
+    await nextTick();
+    await nextTick();
     const title1 = wrapper.find('.fpv-pop__title').text();
     const nameCell1 = findCell(wrapper, '名称');
     console.log('REPRO title1=', title1, 'nameCell1=', nameCell1);

@@ -1540,6 +1540,16 @@ const roomTitle = computed<string>(() => {
   return r.code || '未命名房间';
 });
 
+/** 弹窗标题：编辑模式下实时跟随输入框中的名称，让用户打字时顶部立即反馈 */
+const displayTitle = computed<string>(() => {
+  if (popMode.value === 'edit') {
+    const n = cleanName(editRoom.name);
+    if (n !== '（未命名）') return n;
+    return editRoom.code || '未命名房间';
+  }
+  return roomTitle.value;
+});
+
 /** 弹窗 DOM 引用，用于测量真实尺寸后夹取在舞台内（展开子面板后尺寸变化也能重新适配） */
 const popupEl = ref<HTMLElement | null>(null);
 
@@ -1643,7 +1653,20 @@ const roomInfoPairs = computed<{ label: string; value: string }[]>(() => {
 watch(liveRoom, (r) => loadMaint(r), { immediate: true });
 
 /** 展开 / 收起子面板（修改信息、维护房间信息）会改变弹窗高度，重新夹取位置避免超出界面 */
-watch(popMode, () => nextTick(fitPopupInStage));
+watch(popMode, (m) => {
+  // 进入「修改信息」时，把当前房间字段重新载入表单，避免残留上次未保存的编辑
+  if (m === 'edit' && liveRoom.value) {
+    const r = liveRoom.value;
+    editRoom.code = r.code;
+    editRoom.number = r.number;
+    editRoom.name = r.name;
+    editRoom.dept = r.dept;
+    editRoom.usePurpose = r.usePurpose;
+    editRoom.useArea = String(r.useArea);
+    editRoom.buildArea = String(r.buildArea);
+  }
+  nextTick(fitPopupInStage);
+});
 
 function onSelect(room: RoomLike, ev?: MouseEvent): void {
   if (props.embedded) {
@@ -2300,7 +2323,7 @@ function enterEdit(): void {
             @mouseup.stop
           >
             <div class="fpv-pop__hd">
-              <span class="fpv-pop__title">{{ roomTitle }}</span>
+              <span class="fpv-pop__title">{{ displayTitle }}</span>
               <button class="fpv-pop__x" type="button" @click="closePop">×</button>
             </div>
             <div v-if="roomThumb" class="fpv-pop__img">
@@ -2310,16 +2333,9 @@ function enterEdit(): void {
               <span class="fpv-pop__img-tag">房间缩略图</span>
             </div>
             <div v-else class="fpv-pop__img fpv-pop__img--empty">暂无图形</div>
-            <div class="fpv-pop__info">
-              <div v-for="p in roomInfoPairs" :key="p.label" class="fpv-pop__cell">
-                <span>{{ p.label }}</span><b>{{ p.value }}</b>
-              </div>
-            </div>
-            <div class="fpv-pop__acts">
-              <el-button size="small" :type="popMode === 'edit' ? 'primary' : 'default'" @click="popMode = popMode === 'edit' ? null : 'edit'">修改信息</el-button>
-              <el-button size="small" :type="popMode === 'maint' ? 'primary' : 'default'" @click="popMode = popMode === 'maint' ? null : 'maint'">维护房间信息</el-button>
-            </div>
-            <div v-if="popMode === 'edit'" class="fpv-pop__form">
+
+            <!-- 修改信息：直接在上方信息区就地编辑，不再重复一份表单 -->
+            <div v-if="popMode === 'edit'" class="fpv-pop__info fpv-pop__info--edit">
               <div class="fpv-edit__row"><label>房间号</label><el-input v-model="editRoom.code" size="small" /></div>
               <div class="fpv-edit__row"><label>名称</label><el-input v-model="editRoom.name" size="small" /></div>
               <div class="fpv-edit__row"><label>部门</label><el-input v-model="editRoom.dept" size="small" /></div>
@@ -2339,6 +2355,18 @@ function enterEdit(): void {
               <div class="fpv-info__actions">
                 <el-button size="small" type="danger" plain @click="hideRoom">隐藏此房间</el-button>
               </div>
+            </div>
+
+            <!-- 只读信息展示 -->
+            <div v-else class="fpv-pop__info">
+              <div v-for="p in roomInfoPairs" :key="p.label" class="fpv-pop__cell">
+                <span>{{ p.label }}</span><b>{{ p.value }}</b>
+              </div>
+            </div>
+
+            <div class="fpv-pop__acts">
+              <el-button size="small" :type="popMode === 'edit' ? 'primary' : 'default'" @click="popMode = popMode === 'edit' ? null : 'edit'">修改信息</el-button>
+              <el-button size="small" :type="popMode === 'maint' ? 'primary' : 'default'" @click="popMode = popMode === 'maint' ? null : 'maint'">维护房间信息</el-button>
             </div>
             <div v-if="popMode === 'maint'" class="fpv-pop__form">
               <div class="fpv-edit__row"><label>责任部门</label><el-input v-model="maintForm.responsibleDept" size="small" /></div>
@@ -2749,6 +2777,9 @@ function enterEdit(): void {
 .fpv-pop__img-tag { position: absolute; left: 6px; bottom: 4px; font-size: 12px; color: #9ca3af; background: rgba(255,255,255,.75); padding: 0 4px; border-radius: 4px; }
 .fpv-pop__img--empty { display: flex; align-items: center; justify-content: center; color: #9ca3af; font-size: 14px; }
 .fpv-pop__info { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 14px; margin-bottom: 10px; }
+/* 修改信息：就地编辑时改为单列，避免与 2 列网格冲突 */
+.fpv-pop__info--edit { display: flex; flex-direction: column; gap: 8px; }
+.fpv-pop__info--edit .fpv-info__actions { margin-top: 2px; }
 .fpv-pop__cell { display: flex; flex-direction: column; gap: 2px; padding: 6px 8px; background: #f8fafc; border-radius: 6px; }
 .fpv-pop__cell span { color: #6b7280; font-size: 13px; }
 .fpv-pop__cell b { font-weight: 600; color: #111827; font-size: 16px; }

@@ -71,7 +71,7 @@ const visible = computed({
 
 const floors = computed(() => store.floorsOf(props.buildingName ?? ''));
 const selectedFloor = ref<number>(1);
-const colorMode = ref<ColorMode>('inspect');
+const colorMode = ref<ColorMode>('use');
 
 // ---- 缩放 / 平移（楼层切换保留）----
 // 注意：必须声明在下方 immediate watch 之前——该 watch 会在 setup 阶段同步调用
@@ -434,6 +434,33 @@ function lighten(hex: string, amt: number): string {
   return `#${((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1)}`;
 }
 
+/** 判断颜色是否偏亮（用于决定顶面文字用深字还是白字），支持 #rgb / #rrggbb / rgba()。 */
+function isLight(hex: string): boolean {
+  let r = 255, g = 255, b = 255;
+  if (/^rgba?\(/i.test(hex)) {
+    const m = hex.match(/[\d.]+/g);
+    if (m && m.length >= 3) {
+      r = +m[0];
+      g = +m[1];
+      b = +m[2];
+    }
+  } else {
+    const h = hex.replace('#', '').trim();
+    if (h.length === 3) {
+      r = parseInt(h[0] + h[0], 16);
+      g = parseInt(h[1] + h[1], 16);
+      b = parseInt(h[2] + h[2], 16);
+    } else if (h.length === 6) {
+      r = parseInt(h.slice(0, 2), 16);
+      g = parseInt(h.slice(2, 4), 16);
+      b = parseInt(h.slice(4, 6), 16);
+    }
+  }
+  // 感知亮度（Rec.601 约数）
+  const lum = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+  return lum > 0.6;
+}
+
 /** 中性灰：凸起的墙面（白/灰对比里的「灰」）与界定每个格子的边框线 */
 const WALL_GRAY = '#c4cbd4';
 const CELL_STROKE = '#8b94a0';
@@ -442,6 +469,55 @@ function hashHue(s: string): number {
   let h = 0;
   for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) & 0xffffffff;
   return Math.abs(h) % 360;
+}
+
+/**
+ * 合成预览 / demo 房间的本地覆盖合并：把 synthOverrides 中用户对「名称 / 状态 / 隐藏」等的修改套回房间对象。
+ * - 真实入库房间：修改已落 store，store 数据为权威来源，无需覆盖；
+ * - 合成 / demo 房间：store 中不存在，全部修改都落在 synthOverrides，渲染时须合并回来，否则「改了看不到」。
+ */
+function effectiveRoom(room: RoomLike): RoomLike {
+  const o = synthOverrides[room.id];
+  return o ? { ...room, ...o } : room;
+}
+
+/** 合成 / demo 的 12 个样例房间（6×2 网格）。无真实楼层时用于铺满平面图，且与隐藏/恢复逻辑共用同一份数据。 */
+function genDemoRooms(): { room: RoomLike; meta: { number: string; name: string; dept: string; area: string; isSpecial: boolean } }[] {
+  return Array.from({ length: GRID_ROWS * ROOM_COLS }, (_, i) => {
+    const bi = Math.floor(i / ROOM_COLS);
+    const c = i % ROOM_COLS;
+    const sp = SPECIAL[`${bi}_${c}`];
+    const number = sp ? sp.number : `${bi === 0 ? '1' : '2'}${String(c + 1).padStart(2, '0')}`;
+    const name = sp ? sp.name : ROOM_SAMPLE.names[c]!;
+    const dept = sp ? sp.dept : ROOM_SAMPLE.depts[c]!;
+    const area = sp ? sp.area : ROOM_SAMPLE.areas[c]!;
+    const base: ParsedRoom = {
+      id: `demo_${i}`,
+      buildingName: props.buildingName ?? '',
+      floorNo: selectedFloor.value,
+      code: number,
+      number,
+      name,
+      dept,
+      usePurpose: '',
+      useArea: 0,
+      buildArea: 0,
+      polygon: [
+        [0, 0],
+        [1, 0],
+        [1, 1],
+        [0, 1],
+      ],
+      centroid: [0.5, 0.5],
+      area: 0,
+      inspectStatus: 'normal',
+      useStatus: '' as UseStatus,
+      selected: true,
+      layers: [],
+      unmatchedTexts: [],
+    };
+    return { room: base as RoomLike, meta: { number, name, dept, area, isSpecial: !!sp } };
+  });
 }
 
 /** 兼容 Room.outline 与 ParsedRoom.polygon */
@@ -512,7 +588,15 @@ const outlinePoints = computed<[number, number][]>(() => {
   if (props.embedded && props.preview) {
     return (props.preview.outline as unknown as [number, number][]) ?? [];
   }
-  return (currentFloor.value?.outline as [number, number][]) ?? [];
+  const of = (currentFloor.value?.outline as [number, number][]) ?? [];
+  if (of.length >= 3) return of;
+  // 兜底：未导入楼层（demo 态）时合成一个矩形，使 12 间示意房仍能布局渲染，而非整层空白
+  return [
+    [-30, -20],
+    [30, -20],
+    [30, 20],
+    [-30, 20],
+  ];
 });
 
 /** 求源楼层的「主方向」：最长边方向角 θ（绕质心旋转 -θ 可把矩形转正到坐标轴）。对矩形鲁棒：最长边即矩形边。 */
@@ -780,48 +864,15 @@ const roomBlocks = computed<RoomBlock[]>(() => {
   const blocks: RoomBlock[] = [];
 
   // 演示态：无真实房间时，用 12 个样例房间铺满 6×2 网格
-  const demos: { room: RoomLike; meta: { number: string; name: string; dept: string; area: string; isSpecial: boolean } }[] = hasReal
-    ? []
-    : Array.from({ length: GRID_ROWS * ROOM_COLS }, (_, i) => {
-        const bi = Math.floor(i / ROOM_COLS);
-        const c = i % ROOM_COLS;
-        const sp = SPECIAL[`${bi}_${c}`];
-        const number = sp ? sp.number : `${bi === 0 ? '1' : '2'}${String(c + 1).padStart(2, '0')}`;
-        const name = sp ? sp.name : ROOM_SAMPLE.names[c]!;
-        const dept = sp ? sp.dept : ROOM_SAMPLE.depts[c]!;
-        const area = sp ? sp.area : ROOM_SAMPLE.areas[c]!;
-        const base: ParsedRoom = {
-          id: `demo_${i}`,
-          buildingName: props.buildingName ?? '',
-          floorNo: selectedFloor.value,
-          code: number,
-          number,
-          name,
-          dept,
-          usePurpose: '',
-          useArea: 0,
-          buildArea: 0,
-          polygon: [
-            [0, 0],
-            [1, 0],
-            [1, 1],
-            [0, 1],
-          ],
-          centroid: [0.5, 0.5],
-          area: 0,
-          inspectStatus: 'normal',
-          useStatus: '' as UseStatus,
-          selected: true,
-          layers: [],
-          unmatchedTexts: [],
-        };
-        return { room: base as RoomLike, meta: { number, name, dept, area, isSpecial: !!sp } };
-      });
+  const demos = hasReal ? [] : genDemoRooms();
 
-  const items = hasReal ? displayedRooms.value : demos.map((d) => d.room);
-  items.forEach((room, idx) => {
-    const biF = Math.floor(idx / ROOM_COLS);
-    const cF = idx % ROOM_COLS;
+  // 真实房间：过滤掉被「隐藏此房间」的房间（visibleRooms，真正从图层移除而非仅变暗）；
+  // 合成预览房间：套用本地覆盖(synthOverrides)并过滤被隐藏的，使「改了看得到」。
+  const source: RoomLike[] = hasReal
+    ? visibleRooms.value
+    : demos.map((d) => effectiveRoom(d.room)).filter((r) => r.selected !== false);
+
+  source.forEach((room, idx) => {
     const span = hasReal ? gridPos[room.id] ?? idxToSpan(idx) : idxToSpan(idx);
     const [wx0, wy0, wx1, wy1] = spanToRect(span);
     const t0 = P(wx0, wy0, zTop);
@@ -837,33 +888,30 @@ const roomBlocks = computed<RoomBlock[]>(() => {
     const sizeOther = Math.min(Math.max(gap * 0.62, 7.5), 11);
     const top = cy - gap * 1.5;
 
-    const sp = SPECIAL[`${biF}_${cF}`]!;
-    const meta = hasReal
-      ? {
-          number: room.number || room.code || `房${idx + 1}`,
-          name: cleanName(room.name),
-          dept: room.dept || '—',
-          area: `${room.useArea > 0 ? room.useArea.toFixed(2) : '—'}㎡ / ${room.buildArea > 0 ? room.buildArea.toFixed(2) : '—'}㎡`,
-          isSpecial: SPECIAL_BY_IDX.has(idx),
-        }
-      : demos[idx]!.meta;
+    // 顶面填充色：跟随「着色」模式（业务=使用状态 / 审图=审图状态 / 部门 / 用途），使状态修改即时体现在图层上
+    const fill = colorFor(room);
+    const textColor = isLight(fill) ? '#1f2937' : '#ffffff';
+    const number = room.number || room.code || `房${idx + 1}`;
+    const name = cleanName(room.name);
+    const dept = room.dept || '—';
+    const area = `${room.useArea > 0 ? room.useArea.toFixed(2) : '—'}㎡ / ${room.buildArea > 0 ? room.buildArea.toFixed(2) : '—'}㎡`;
 
     blocks.push({
       id: room.id,
       room,
       topPoints,
       sidePoints: '',
-      topFill: meta.isSpecial ? sp.fill : NORMAL_TOP,
-      sideFill: meta.isSpecial ? sp.side : NORMAL_SIDE,
-      stroke: meta.isSpecial ? sp.stroke : NORMAL_STROKE,
+      topFill: fill,
+      sideFill: NORMAL_SIDE,
+      stroke: NORMAL_STROKE,
       cx,
       cy,
-      number: meta.number,
-      name: meta.name,
-      dept: meta.dept,
-      area: meta.area,
-      special: meta.isSpecial,
-      textColor: meta.isSpecial ? '#ffffff' : '#2d3a47',
+      number,
+      name,
+      dept,
+      area,
+      special: false,
+      textColor,
       yNumber: top,
       yName: top + gap,
       yDept: top + gap * 2,
@@ -1076,14 +1124,16 @@ interface RoomFill {
   labelX: number;
 }
 
-/** 房间文字标签：固定 4 项（房间号 / 名称 / 建筑面积 / 使用面积），房间号缺省兜底「未命名」。 */
-function buildLabelLines(room: RoomLike, special: boolean): Omit<LabelLine, 'y'>[] {
+/** 房间文字标签：固定 4 项（房间号 / 名称 / 建筑面积 / 使用面积），房间号缺省兜底「未命名」。
+ *  文字颜色由顶面填充色亮度自动决定：深色填充用深字、浅色/彩色填充用白字。 */
+function buildLabelLines(room: RoomLike, fill: string): Omit<LabelLine, 'y'>[] {
   const code = (room.code || room.number || room.name || '').trim();
   const d = (s: string) => (s.trim() !== '' ? s.trim() : '—');
   // 与合成网格（roomBlocks）完全一致的四行：号码(大字) / 名称 / 部门 / 使用面积㎡ / 建筑面积㎡；
-  // 普通房间深色字，特殊房间白色字（与彩色顶面对比）。
-  const main = special ? '#ffffff' : '#2d3a47';
-  const sub = special ? 'rgba(255,255,255,0.92)' : '#4b5563';
+  // 深色顶面用深字、浅色/彩色顶面用白字（与顶面对比，保证可读）。
+  const light = isLight(fill);
+  const main = light ? '#2d3a47' : '#ffffff';
+  const sub = light ? '#4b5563' : 'rgba(255,255,255,0.92)';
   return [
     { text: code !== '' ? code : '未命名房间', size: 13, weight: 700, color: main, badge: false },
     { text: d(room.name), size: 9, weight: 400, color: sub, badge: false },
@@ -1316,7 +1366,8 @@ function centroidOf(room: RoomLike): [number, number] {
  *  顶面(z=H, 较亮) + 朝向观察者的可见侧墙(z=0→H, 较暗)；由远及近排序绘制使近处盒子盖住远处；
  *  盒子之间未被覆盖的底板(①层 light 灰)即自然露出「走廊」。 */
 const roomFills = computed<RoomFill[]>(() => {
-  const blocks = displayedRooms.value.map((room) => {
+  // 仅渲染「可见」房间（剔除点过「隐藏此房间」的房间，实现真正隐藏而非仅变暗）
+  const blocks = visibleRooms.value.map((room) => {
     const poly = polyOf(room);
     const H = wallHeight.value;
     // 房间盒子不做内缩（INSET 恒为 0）：真实房间之间的分隔由真实墙体（wallSide/wallTopFaces）负责，
@@ -1387,8 +1438,9 @@ const roomFills = computed<RoomFill[]>(() => {
     const gap = Math.max(roomHpx * 0.21, 8);
     const sizeNumber = Math.min(Math.max(gap * 0.95, 10), 16);
     const sizeOther = Math.min(Math.max(gap * 0.62, 7.5), 11);
-    const isSpecial = SPECIAL_BY_IDX.has(displayedRooms.value.indexOf(room));
-    const baseLines = buildLabelLines(room, isSpecial).map((ln, i) =>
+    // 顶面填充色：跟随「着色」模式（业务=使用状态 / 审图=审图状态 / 部门 / 用途），使状态修改即时体现在图层上
+    const fill = colorFor(room);
+    const baseLines = buildLabelLines(room, fill).map((ln, i) =>
       i === 0 ? { ...ln, size: sizeNumber } : { ...ln, size: sizeOther },
     );
     const startY = c[1] - ((baseLines.length - 1) * gap) / 2;
@@ -1397,7 +1449,7 @@ const roomFills = computed<RoomFill[]>(() => {
       id: room.id,
       room,
       points,
-      fill: fillFor(room),
+      fill,
       stroke: NORMAL_STROKE,
       dimmed: room.selected === false,
       sides,
@@ -1473,7 +1525,19 @@ const selectedRoom = ref<RoomLike | null>(null);
 const liveRoom = computed<RoomLike | null>(() => {
   const id = selectedId.value || (selectedIds.value.length ? selectedIds.value[selectedIds.value.length - 1] : null);
   if (!id) return null;
-  return displayedRooms.value.find((r) => r.id === id) ?? selectedRoom.value;
+  const base = displayedRooms.value.find((r) => r.id === id) ?? selectedRoom.value;
+  // 套用本地覆盖（合成 / demo 房间的修改落在 synthOverrides，弹窗标题 / 信息须即时反映）
+  return base ? effectiveRoom(base) : null;
+});
+
+/** 弹窗标题：房间名称优先；名称是「面积/纯房号」等被误当成名称的无效文本、或为空时，回退到房间号，再否则「未命名房间」。
+ *  关键：必须走 cleanName，否则面积文本(如「45.2㎡」)会被原样当成名称显示在标题上。 */
+const roomTitle = computed<string>(() => {
+  const r = liveRoom.value;
+  if (!r) return '';
+  const n = cleanName(r.name);
+  if (n !== '（未命名）') return n;
+  return r.code || '未命名房间';
 });
 
 /** 弹窗 DOM 引用，用于测量真实尺寸后夹取在舞台内（展开子面板后尺寸变化也能重新适配） */
@@ -1726,8 +1790,8 @@ watch(
 function saveEdit(): void {
   const f = currentFloor.value;
   const r = liveRoom.value;
-  if (!f || !r) return;
-  store.updateRoom(f.id, r.id, {
+  if (!r) return;
+  const patch = {
     code: editRoom.code.trim(),
     number: editRoom.number.trim() || editRoom.code.trim(),
     name: editRoom.name.trim(),
@@ -1735,10 +1799,43 @@ function saveEdit(): void {
     usePurpose: editRoom.usePurpose.trim(),
     useArea: Number(editRoom.useArea) || 0,
     buildArea: Number(editRoom.buildArea) || 0,
-  });
-  // 保存后把 selectedRoom 重新指向 store 最新对象，确保读视图立即刷新（避免陈旧引用显示旧面积）
+  };
+  if (isRealRoom(r) && f) {
+    // 真实入库房间：写入 store（响应式，读视图立即刷新）
+    store.updateRoom(f.id, r.id, patch);
+  } else {
+    // 合成 / demo 房间：store 中不存在，写入本地覆盖（synthOverrides），渲染时由 effectiveRoom 合并回来
+    synthOverrides[r.id] = { ...(synthOverrides[r.id] ?? {}), ...patch };
+  }
+  // 保存后把 selectedRoom 重新指向最新对象，确保读视图立即刷新（避免陈旧引用显示旧面积）
   selectedRoom.value = liveRoom.value;
   ElMessage.success('已保存房间信息');
+}
+
+/** 当前被「隐藏此房间」移除的房间列表（真实模式来自 store；demo 模式来自本地覆盖），用于侧栏恢复。 */
+const hiddenRooms = computed<RoomLike[]>(() => {
+  if (props.preview) return props.preview.rooms.filter((r) => r.selected === false);
+  const f = currentFloor.value;
+  if (f) return store.roomsOfFloor(f.id).filter((r) => r.selected === false);
+  // demo 模式：demo 房间套用本地覆盖后，selected===false 的即为隐藏房间
+  return genDemoRooms()
+    .map((d) => effectiveRoom(d.room))
+    .filter((r) => r.selected === false);
+});
+
+/** 重新显示单间被隐藏的房间（隐藏的逆操作）。 */
+function showRoom(room: RoomLike): void {
+  if (isRealRoom(room)) {
+    const f = currentFloor.value;
+    if (f) store.setRoomSelected(f.id, room.id, true);
+  } else {
+    synthOverrides[room.id] = { ...(synthOverrides[room.id] ?? {}), selected: true };
+  }
+}
+
+/** 一键恢复所有被隐藏的房间。 */
+function showAllRooms(): void {
+  hiddenRooms.value.forEach((r) => showRoom(r));
 }
 
 // ---- 楼层编辑模式：房间 增 / 删 / 改 / 查（合并 / 移动 / 缩放 / 新增） ----
@@ -2032,10 +2129,9 @@ for (const [k, v] of Object.entries(SPECIAL)) {
   SPECIAL_BY_IDX.set(b * ROOM_COLS + c, v.fill);
 }
 
-/** 真实房间的顶面填充色：普通统一浅蓝，少数特殊房间醒目色（与合成网格按格位配色一致） */
+/** 真实房间的顶面填充色：与「着色」模式一致（业务=使用状态 / 审图=审图状态 / 部门 / 用途）。 */
 function fillFor(room: RoomLike): string {
-  const idx = displayedRooms.value.indexOf(room);
-  return SPECIAL_BY_IDX.get(idx) ?? NORMAL_TOP;
+  return colorFor(room);
 }
 
 /** 进入编辑模式：先对当前楼层房间拍快照，供「未点完成直接关闭」时回滚 */
@@ -2073,11 +2169,11 @@ function enterEdit(): void {
         <el-button link type="primary" @click="visible = false">← 返回室外</el-button>
       </div>
     </template>
-    <el-empty v-if="!floors.length" description="暂无室内图纸，请先导入">
+    <el-empty v-if="!floors.length" description="该楼尚未导入楼层平面图（DXF），下方为示意预览，可先浏览；导入后可编辑真实房间">
       <el-button type="primary" @click="requestImport">导入图纸</el-button>
     </el-empty>
 
-    <div v-else class="fpv fpv--ws">
+    <div class="fpv fpv--ws">
       <div v-if="isFailed" class="fpv-state fpv-state--failed">
         <el-icon class="fpv-state__icon"><CircleCloseFilled /></el-icon>
         <div class="fpv-state__body">
@@ -2183,8 +2279,8 @@ function enterEdit(): void {
             <!-- ⑥ 房间文字（四行：号码/名称/部门/面积）：始终显示 -->
             <g v-if="renderStage >= 4" class="fpv-labels" pointer-events="none">
               <g v-for="rb in roomBlocks" :key="'L' + rb.id">
-                <text :x="rb.cx" :y="rb.yNumber" text-anchor="middle" :font-size="rb.sizeNumber" font-weight="700" :fill="rb.textColor" dominant-baseline="middle">{{ rb.number }}</text>
-                <text :x="rb.cx" :y="rb.yName" text-anchor="middle" :font-size="rb.sizeOther" :fill="rb.textColor" dominant-baseline="middle">{{ rb.name }}</text>
+                <text :x="rb.cx" :y="rb.yName" text-anchor="middle" :font-size="rb.sizeNumber" font-weight="700" :fill="rb.textColor" dominant-baseline="middle">{{ rb.name }}</text>
+                <text :x="rb.cx" :y="rb.yNumber" text-anchor="middle" :font-size="rb.sizeOther" :fill="rb.textColor" dominant-baseline="middle">{{ rb.number }}</text>
                 <text :x="rb.cx" :y="rb.yDept" text-anchor="middle" :font-size="rb.sizeOther" :fill="rb.textColor" dominant-baseline="middle">{{ rb.dept }}</text>
                 <text :x="rb.cx" :y="rb.yArea" text-anchor="middle" :font-size="rb.sizeOther" :fill="rb.textColor" dominant-baseline="middle">{{ rb.area }}</text>
               </g>
@@ -2204,7 +2300,7 @@ function enterEdit(): void {
             @mouseup.stop
           >
             <div class="fpv-pop__hd">
-              <span class="fpv-pop__title">{{ liveRoom.code || cleanName(liveRoom.name) || '未命名房间' }}</span>
+              <span class="fpv-pop__title">{{ roomTitle }}</span>
               <button class="fpv-pop__x" type="button" @click="closePop">×</button>
             </div>
             <div v-if="roomThumb" class="fpv-pop__img">
@@ -2310,6 +2406,18 @@ function enterEdit(): void {
                   <el-button size="small" @click="resetView">复位</el-button>
                 </el-button-group>
               </div>
+            </div>
+          </section>
+
+          <!-- 已隐藏房间：隐藏后可在此恢复显示 -->
+          <section class="fpv-sec" v-if="hiddenRooms.length">
+            <h4 class="fpv-sec__title">已隐藏房间（{{ hiddenRooms.length }}）</h4>
+            <div class="fpv-hide-list">
+              <div v-for="h in hiddenRooms" :key="h.id" class="fpv-hide-item">
+                <span class="fpv-hide-item__name">{{ h.code || h.name || '未命名房间' }}</span>
+                <el-button size="small" @click="showRoom(h)">显示</el-button>
+              </div>
+              <el-button size="small" type="primary" plain class="fpv-hide-all" @click="showAllRooms">显示全部</el-button>
             </div>
           </section>
 
@@ -2521,6 +2629,15 @@ function enterEdit(): void {
 .fpv-sec { display: flex; flex-direction: column; gap: 8px; }
 .fpv-sec__title { margin: 0; font-size: 13px; font-weight: 700; color: #374151; }
 .fpv-sec--grow { flex: 1; min-height: 0; }
+
+/* 已隐藏房间恢复列表 */
+.fpv-hide-list { display: flex; flex-direction: column; gap: 6px; }
+.fpv-hide-item {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 5px 8px; background: #fff7ed; border: 1px solid #fed7aa; border-radius: 8px;
+}
+.fpv-hide-item__name { font-size: 13px; color: #9a3412; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fpv-hide-all { align-self: flex-start; }
 
 /* 楼层格子 */
 .fpv-floorgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(92px, 1fr)); gap: 8px; }

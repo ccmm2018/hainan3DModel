@@ -62,11 +62,12 @@ export const ROOM_LABEL_FIELDS: RoomLabelField[] = [
   { key: 'user', label: '使用人' },
 ];
 
-/** 状态 → 显示配置 */
-export const ROOM_STATUS_CONFIG: Record<RoomStatus, { label: string; color: string }> = {
-  occupied: { label: '使用中', color: '#3b82f6' },
-  noaccess: { label: '无权限', color: '#f59e0b' },
-  vacant: { label: '空置', color: '#22c55e' },
+/** 状态 → 显示配置（2026-10-03 与 FloorPlan2D 业务四态配色统一：
+ *  color=底色（图例圆点/房间格子填充），deep=深色调（描边/文字/3D 格子，保证可读可见） */
+export const ROOM_STATUS_CONFIG: Record<RoomStatus, { label: string; color: string; deep: string }> = {
+  occupied: { label: '使用中', color: '#C8E6C9', deep: '#66BB6A' },
+  noaccess: { label: '无权限', color: '#E0E0E0', deep: '#9E9E9E' },
+  vacant: { label: '空置', color: '#BBDEFB', deep: '#64B5F6' },
 };
 
 export const ROOM_STATUS_ORDER: RoomStatus[] = ['occupied', 'noaccess', 'vacant'];

@@ -1,0 +1,14 @@
+// D:/HNJCXY_PJ/vitest.config.ts
+import { defineConfig } from "file:///D:/HNJCXY_PJ/node_modules/vitest/dist/config.js";
+import vue from "file:///D:/HNJCXY_PJ/node_modules/@vitejs/plugin-vue/dist/index.mjs";
+var vitest_config_default = defineConfig({
+  plugins: [vue()],
+  test: {
+    environment: "node",
+    include: ["src/**/*.spec.ts", "src/**/*.test.ts"]
+  }
+});
+export {
+  vitest_config_default as default
+};
+//# sourceMappingURL=data:application/json;base64,ewogICJ2ZXJzaW9uIjogMywKICAic291cmNlcyI6IFsiRDovSE5KQ1hZX1BKL3ZpdGVzdC5jb25maWcudHMiXSwKICAic291cmNlc0NvbnRlbnQiOiBbImNvbnN0IF9fdml0ZV9pbmplY3RlZF9vcmlnaW5hbF9kaXJuYW1lID0gXCJEOlxcXFxITkpDWFlfUEpcIjtjb25zdCBfX3ZpdGVfaW5qZWN0ZWRfb3JpZ2luYWxfZmlsZW5hbWUgPSBcIkQ6XFxcXEhOSkNYWV9QSlxcXFx2aXRlc3QuY29uZmlnLnRzXCI7Y29uc3QgX192aXRlX2luamVjdGVkX29yaWdpbmFsX2ltcG9ydF9tZXRhX3VybCA9IFwiZmlsZTovLy9EOi9ITkpDWFlfUEovdml0ZXN0LmNvbmZpZy50c1wiO2ltcG9ydCB7IGRlZmluZUNvbmZpZyB9IGZyb20gJ3ZpdGVzdC9jb25maWcnO1xuaW1wb3J0IHZ1ZSBmcm9tICdAdml0ZWpzL3BsdWdpbi12dWUnO1xuXG5leHBvcnQgZGVmYXVsdCBkZWZpbmVDb25maWcoe1xuICBwbHVnaW5zOiBbdnVlKCldLFxuICB0ZXN0OiB7XG4gICAgZW52aXJvbm1lbnQ6ICdub2RlJyxcbiAgICBpbmNsdWRlOiBbJ3NyYy8qKi8qLnNwZWMudHMnLCAnc3JjLyoqLyoudGVzdC50cyddLFxuICB9LFxufSk7XG4iXSwKICAibWFwcGluZ3MiOiAiO0FBQThOLFNBQVMsb0JBQW9CO0FBQzNQLE9BQU8sU0FBUztBQUVoQixJQUFPLHdCQUFRLGFBQWE7QUFBQSxFQUMxQixTQUFTLENBQUMsSUFBSSxDQUFDO0FBQUEsRUFDZixNQUFNO0FBQUEsSUFDSixhQUFhO0FBQUEsSUFDYixTQUFTLENBQUMsb0JBQW9CLGtCQUFrQjtBQUFBLEVBQ2xEO0FBQ0YsQ0FBQzsiLAogICJuYW1lcyI6IFtdCn0K

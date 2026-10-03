@@ -378,10 +378,20 @@ const INSPECT_COLORS: Record<InspectStatus, string> = {
   warning: '#8E44AD',
   partial: '#F5B041',
 };
+// 业务状态配色（2026-10-03 二次调整：整体加深一档，同时保持底色亮度 > 0.6 → 顶面文字仍用深色可读）
 const USE_COLORS: Record<Exclude<UseStatus, ''>, string> = {
-  occupied: '#3b82f6',
-  noaccess: '#f59e0b',
-  vacant: '#22c55e',
+  occupied: '#C8E6C9', // 使用中：绿(100)底
+  vacant: '#BBDEFB', // 空置：蓝(100)底
+  noaccess: '#E0E0E0', // 无权限：灰(300)底（顶面渲染时叠加斜纹图案）
+};
+/** 未分配底色 */
+const UNASSIGNED_FILL = '#F0F0F0';
+/** 各业务状态的描边样式（'use' 着色模式生效）：颜色 + 实/虚线 */
+const USE_STROKES: Record<UseStatus, { stroke: string; dash?: string }> = {
+  occupied: { stroke: '#66BB6A' }, // 使用中：绿(400)实线
+  vacant: { stroke: '#64B5F6' }, // 空置：蓝(400)实线
+  noaccess: { stroke: '#9E9E9E' }, // 无权限：灰(500)实线
+  '': { stroke: '#9E9E9E', dash: '5 4' }, // 未分配：灰(500)虚线
 };
 
 const USE_LABELS: Record<UseStatus, string> = {
@@ -414,6 +424,7 @@ function hslToHex(h: number, s: number, l: number): string {
 
 /** 颜色加深 amt∈[0,1]，用于由房间顶面色推导墙面（侧面）色，制造 2.5D 立体感 */
 function darken(hex: string, amt: number): string {
+  if (!hex.startsWith('#')) return hex; // 非十六进制（如 url(#…) 图案填充）原样返回，避免产生 #NaN
   const h = hex.replace('#', '');
   const full = h.length === 3 ? h.split('').map((c) => c + c).join('') : h;
   const n = parseInt(full, 16);
@@ -436,6 +447,7 @@ function lighten(hex: string, amt: number): string {
 
 /** 判断颜色是否偏亮（用于决定顶面文字用深字还是白字），支持 #rgb / #rrggbb / rgba()。 */
 function isLight(hex: string): boolean {
+  if (/^url\(/i.test(hex)) return true; // 图案填充（无权限斜纹）：底色 #EEE 偏亮 → 用深色文字
   let r = 255, g = 255, b = 255;
   if (/^rgba?\(/i.test(hex)) {
     const m = hex.match(/[\d.]+/g);
@@ -482,6 +494,13 @@ function effectiveRoom(room: RoomLike): RoomLike {
 }
 
 /** 合成 / demo 的 12 个样例房间（6×2 网格）。无真实楼层时用于铺满平面图，且与隐藏/恢复逻辑共用同一份数据。 */
+/** 演示房间的业务状态分布：固定覆盖四种状态（使用中/空置/无权限/未分配各若干），
+ *  使「业务」着色模式下四种配色一眼可核对，而不是全部落在「未分配」灰。 */
+const DEMO_USE_STATUS: UseStatus[] = [
+  'occupied', 'vacant', 'occupied', '', 'noaccess', 'vacant',
+  'vacant', 'occupied', '', 'occupied', 'noaccess', 'vacant',
+];
+
 function genDemoRooms(): { room: RoomLike; meta: { number: string; name: string; dept: string; area: string; isSpecial: boolean } }[] {
   return Array.from({ length: GRID_ROWS * ROOM_COLS }, (_, i) => {
     const bi = Math.floor(i / ROOM_COLS);
@@ -511,7 +530,8 @@ function genDemoRooms(): { room: RoomLike; meta: { number: string; name: string;
       centroid: [0.5, 0.5],
       area: 0,
       inspectStatus: 'normal',
-      useStatus: '' as UseStatus,
+      // 特殊房间语义化：机房/控制室=使用中，档案涉密室=无权限；普通演示房间按固定分布覆盖四态
+      useStatus: (sp ? (sp.number === '204' ? 'noaccess' : 'occupied') : DEMO_USE_STATUS[i]) as UseStatus,
       selected: true,
       layers: [],
       unmatchedTexts: [],
@@ -566,12 +586,48 @@ function colorFor(room: RoomLike): string {
     case 'inspect':
       return INSPECT_COLORS[room.inspectStatus];
     case 'use':
-      return room.useStatus ? USE_COLORS[room.useStatus] : '#cbd5e1';
+      return room.useStatus ? USE_COLORS[room.useStatus] : UNASSIGNED_FILL;
     case 'dept':
-      return room.dept ? hslToHex(hashHue(room.dept), 65, 55) : '#cbd5e1';
+      return room.dept ? hslToHex(hashHue(room.dept), 65, 55) : UNASSIGNED_FILL;
     case 'purpose':
-      return room.usePurpose ? hslToHex(hashHue(room.usePurpose), 65, 55) : '#cbd5e1';
+      return room.usePurpose ? hslToHex(hashHue(room.usePurpose), 65, 55) : UNASSIGNED_FILL;
   }
+}
+
+/** 房间顶面填充：业务着色模式下「无权限」用斜纹图案（#EEE 底 + 斜线纹理），其余走 colorFor */
+function roomFill(room: RoomLike): string {
+  if (effectiveColorMode.value === 'use' && room.useStatus === 'noaccess') {
+    return 'url(#fpvNoaccessHatch)';
+  }
+  return colorFor(room);
+}
+
+/** 业务着色模式下按状态取描边（颜色 + 实/虚线）；其他着色模式返回 null → 用默认描边 */
+function useStrokeStyle(room: RoomLike): { stroke: string; dash?: string } | null {
+  if (effectiveColorMode.value !== 'use') return null;
+  return USE_STROKES[room.useStatus];
+}
+
+/** 选中态「内嵌描边」多边形：把顶面四边形各边沿法向内缩 d px（平行四边形各边平移后取角点），
+ *  再以 2px 描边绘制 → 描边完全落在房间内部，不会被相邻隔墙盖住（外描边会被隔墙覆盖，
+ *  这正是此前「选中了却完全看不出来」的根因）。 */
+function insetQuadPoints(pts: [number, number][], d: number): string {
+  if (pts.length !== 4) return '';
+  const [p0, p1, p2, p3] = pts;
+  const u: [number, number] = [p1[0] - p0[0], p1[1] - p0[1]];
+  const v: [number, number] = [p3[0] - p0[0], p3[1] - p0[1]];
+  const lu = Math.hypot(u[0], u[1]) || 1;
+  const lv = Math.hypot(v[0], v[1]) || 1;
+  let n0: [number, number] = [-u[1] / lu, u[0] / lu];
+  if (n0[0] * v[0] + n0[1] * v[1] < 0) n0 = [-n0[0], -n0[1]];
+  let n1: [number, number] = [-v[1] / lv, v[0] / lv];
+  if (n1[0] * u[0] + n1[1] * u[1] > 0) n1 = [-n1[0], -n1[1]];
+  const q = (p: [number, number], su: number, sv: number): string =>
+    `${(p[0] + d * (su * n0[0] + sv * n1[0])).toFixed(1)},${(
+      p[1] +
+      d * (su * n0[1] + sv * n1[1])
+    ).toFixed(1)}`;
+  return `${q(p0, 1, -1)} ${q(p1, 1, 1)} ${q(p2, -1, 1)} ${q(p3, -1, -1)}`;
 }
 
 // ---- 源楼层「转正」对齐（关键修复：DXF 里斜画的矩形必须先转正到坐标轴，再做斜投影，否则会被画成竖向斜片、与 fit 包围盒错位）----
@@ -889,7 +945,8 @@ const roomBlocks = computed<RoomBlock[]>(() => {
     const top = cy - gap * 1.5;
 
     // 顶面填充色：跟随「着色」模式（业务=使用状态 / 审图=审图状态 / 部门 / 用途），使状态修改即时体现在图层上
-    const fill = colorFor(room);
+    const fill = roomFill(room);
+    const useStyle = useStrokeStyle(room);
     const textColor = isLight(fill) ? '#1f2937' : '#ffffff';
     const number = room.number || room.code || `房${idx + 1}`;
     const name = cleanName(room.name);
@@ -903,7 +960,9 @@ const roomBlocks = computed<RoomBlock[]>(() => {
       sidePoints: '',
       topFill: fill,
       sideFill: NORMAL_SIDE,
-      stroke: NORMAL_STROKE,
+      stroke: useStyle?.stroke ?? NORMAL_STROKE,
+      dash: useStyle?.dash,
+      selPoints: insetQuadPoints([t0, t1, t2, t3], 1),
       cx,
       cy,
       number,
@@ -1074,7 +1133,12 @@ interface RoomBlock {
   sidePoints: string;
   topFill: string;
   sideFill: string;
+  /** 顶面描边颜色：业务状态分色时按状态取色（使用中绿/空置蓝/未分配灰虚线…），其余模式用 NORMAL_STROKE */
   stroke: string;
+  /** 描边虚线样式（stroke-dasharray）；undefined = 实线 */
+  dash?: string;
+  /** 选中态内嵌描边多边形：顶面四边形向内缩 1px（画 2px #1976D2，完全落在房间内部不被隔墙盖住） */
+  selPoints: string;
   /** 房间顶面的屏幕几何中心，文字锚点 */
   cx: number;
   cy: number;
@@ -1117,6 +1181,8 @@ interface RoomFill {
   points: string;
   fill: string;
   stroke: string;
+  /** 描边虚线样式（stroke-dasharray）；undefined = 实线 */
+  dash?: string;
   dimmed: boolean;
   /** 朝向观察者的可见侧墙（z=0→H，较顶面更暗） */
   sides: Face[];
@@ -1439,7 +1505,8 @@ const roomFills = computed<RoomFill[]>(() => {
     const sizeNumber = Math.min(Math.max(gap * 0.95, 10), 16);
     const sizeOther = Math.min(Math.max(gap * 0.62, 7.5), 11);
     // 顶面填充色：跟随「着色」模式（业务=使用状态 / 审图=审图状态 / 部门 / 用途），使状态修改即时体现在图层上
-    const fill = colorFor(room);
+    const fill = roomFill(room);
+    const useStyle = useStrokeStyle(room);
     const baseLines = buildLabelLines(room, fill).map((ln, i) =>
       i === 0 ? { ...ln, size: sizeNumber } : { ...ln, size: sizeOther },
     );
@@ -1450,7 +1517,8 @@ const roomFills = computed<RoomFill[]>(() => {
       room,
       points,
       fill,
-      stroke: NORMAL_STROKE,
+      stroke: useStyle?.stroke ?? NORMAL_STROKE,
+      dash: useStyle?.dash,
       dimmed: room.selected === false,
       sides,
       lines,
@@ -1493,7 +1561,7 @@ const legend = computed(() => {
   if (effectiveColorMode.value === 'use') {
     return (Object.keys(USE_COLORS) as Exclude<UseStatus, ''>[])
       .map((k) => ({ label: USE_LABELS[k], color: USE_COLORS[k] }))
-      .concat([{ label: USE_LABELS[''], color: '#cbd5e1' }]);
+      .concat([{ label: USE_LABELS[''], color: UNASSIGNED_FILL }]);
   }
   // dept / purpose：取实际出现的类别
   const map = new Map<string, string>();
@@ -1908,6 +1976,12 @@ const stageG = ref<SVGGraphicsElement | null>(null);
 function isSelected(id: string): boolean {
   return selectedIds.value.includes(id);
 }
+/** 房间是否处于「选中高亮」：编辑态多选走 selectedIds，浏览态单击走 selectedId */
+function isHighlighted(id: string): boolean {
+  return selectedId.value === id || isSelected(id);
+}
+/** 当前选中的房间块（供「内嵌描边」选中高亮渲染） */
+const selectedBlocks = computed(() => roomBlocks.value.filter((rb) => isHighlighted(rb.room.id)));
 function toggleSelect(id: string): void {
   const i = selectedIds.value.indexOf(id);
   if (i >= 0) selectedIds.value = selectedIds.value.filter((x) => x !== id);
@@ -2249,6 +2323,11 @@ function enterEdit(): void {
                 <stop offset="0%" stop-color="#d9dee5" />
                 <stop offset="100%" stop-color="#aeb6c2" />
               </linearGradient>
+              <!-- 无权限房间：#E0E0E0 底 + 45° 斜纹 -->
+              <pattern id="fpvNoaccessHatch" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+                <rect width="8" height="8" fill="#E0E0E0" />
+                <line x1="0" y1="0" x2="0" y2="8" stroke="#BDBDBD" stroke-width="3" />
+              </pattern>
             </defs>
             <g>
             <!-- 楼栋盒子（第 1 步）：整栋楼=一块躺下去的地板。先画朝观察者的侧墙(暗)，再画顶面地板(亮) -->
@@ -2286,7 +2365,7 @@ function enterEdit(): void {
                 @click="onSelect(rb.room, $event)"
                 @mousedown="editMode ? onRoomDown(rb.room, $event) : undefined"
               >
-                <polygon :points="rb.topPoints" :fill="rb.topFill" :stroke="rb.stroke" stroke-width="1" />
+                <polygon :points="rb.topPoints" :fill="rb.topFill" :stroke="rb.stroke" :stroke-dasharray="rb.dash" stroke-width="1" />
               </g>
               <!-- 选中单间：以描边加粗 + 角标小三角提示「可拖拽移动」，不再用含义不清的空心圆圈手柄 -->
             </template>
@@ -2298,6 +2377,15 @@ function enterEdit(): void {
             >
               <polygon v-for="(s, si) in w.sides" :key="'ws' + si" :points="s" fill="rgba(140,148,162,0.97)" :stroke="w.stroke" stroke-width="0.5" pointer-events="none" />
               <polygon :points="w.top" fill="#cdd5df" :stroke="w.stroke" stroke-width="0.5" pointer-events="none" />
+            </template>
+            <!-- ③c 选中房间高亮（2026-10-03 优化）：内嵌描边 2px #1976D2 —— 多边形向内缩 1px 后描边，
+                 视觉上 2px 全部落在房间内部；画在隔墙之后（之上），彻底解决「选中描边被隔墙盖住看不出」 -->
+            <template
+              v-if="renderStage >= 3"
+              v-for="rb in selectedBlocks"
+              :key="'sel' + rb.id"
+            >
+              <polygon :points="rb.selPoints" fill="none" stroke="#1976D2" stroke-width="2" pointer-events="none" />
             </template>
             <!-- ⑥ 房间文字（四行：号码/名称/部门/面积）：始终显示 -->
             <g v-if="renderStage >= 4" class="fpv-labels" pointer-events="none">
@@ -2489,6 +2577,11 @@ function enterEdit(): void {
                 <stop offset="0%" stop-color="#d9dee5" />
                 <stop offset="100%" stop-color="#aeb6c2" />
               </linearGradient>
+              <!-- 无权限房间：#E0E0E0 底 + 45° 斜纹（与主视图同 id：url(#) 按 document 顺序解析，两个 defs 内容一致） -->
+              <pattern id="fpvNoaccessHatch" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+                <rect width="8" height="8" fill="#E0E0E0" />
+                <line x1="0" y1="0" x2="0" y2="8" stroke="#BDBDBD" stroke-width="3" />
+              </pattern>
             </defs>
         <g>
         <!-- 楼栋盒子（第 1 步）：整栋楼=一块躺下去的地板。先画朝观察者的侧墙(暗)，再画顶面地板(亮) -->
@@ -2520,11 +2613,11 @@ function enterEdit(): void {
         >
           <g
             class="fpv-room"
-            :class="{ 'fpv-room--sel': rb.id === selectedId }"
+            :class="{ 'fpv-room--sel': isSelected(rb.room.id) }"
             @click="onSelect(rb.room, $event)"
             style="cursor: pointer"
           >
-            <polygon :points="rb.topPoints" :fill="rb.topFill" :stroke="rb.stroke" stroke-width="1" />
+            <polygon :points="rb.topPoints" :fill="rb.topFill" :stroke="rb.stroke" :stroke-dasharray="rb.dash" stroke-width="1" />
           </g>
         </template>
         <!-- ③b 房间之间的隔墙（第 5 步）：平铺房间之间抬升 0.5m 的矮墙，房间平、墙凸 → 凹凸感 -->
@@ -2535,6 +2628,14 @@ function enterEdit(): void {
         >
           <polygon v-for="(s, si) in w.sides" :key="'ws' + si" :points="s" fill="rgba(140,148,162,0.97)" :stroke="w.stroke" stroke-width="0.5" pointer-events="none" />
           <polygon :points="w.top" fill="#cdd5df" :stroke="w.stroke" stroke-width="0.5" pointer-events="none" />
+        </template>
+        <!-- ③c 选中房间高亮：内嵌描边 2px #1976D2，画在隔墙之上、完全落在房间内部（与主视图一致） -->
+        <template
+          v-if="renderStage >= 3"
+          v-for="rb in selectedBlocks"
+          :key="'sel' + rb.id"
+        >
+          <polygon :points="rb.selPoints" fill="none" stroke="#1976D2" stroke-width="2" pointer-events="none" />
         </template>
         <!-- ⑥ 房间文字（第 4 步）：每个房间顶面正中心四行（号码最大加粗 / 名称 / 部门 / 两面积），水平不倾斜 -->
         <g v-if="renderStage >= 4" class="fpv-labels" pointer-events="none">
@@ -2571,6 +2672,7 @@ function enterEdit(): void {
               :points="rf.points"
               :fill="rf.fill"
               :stroke="rf.stroke"
+              :stroke-dasharray="rf.dash"
               stroke-width="1"
             />
           </g>

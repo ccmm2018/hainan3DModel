@@ -362,9 +362,9 @@
             v-for="s in ROOM_STATUS_ORDER"
             :key="s"
             class="room-mgmt__pill"
-            :style="{ '--c': ROOM_STATUS_CONFIG[s].color }"
+            :style="{ '--c': ROOM_STATUS_CONFIG[s].color, '--cd': ROOM_STATUS_CONFIG[s].deep }"
           >
-            <i :style="{ background: ROOM_STATUS_CONFIG[s].color }"></i>
+            <i :style="{ background: ROOM_STATUS_CONFIG[s].color, borderColor: ROOM_STATUS_CONFIG[s].deep }"></i>
             {{ ROOM_STATUS_CONFIG[s].label }}
             <b>{{ roomMgmtCounts[s] }}</b>
           </span>
@@ -384,7 +384,7 @@
                   v-for="room in sec.rooms"
                   :key="room.id"
                   class="room-mgmt__cell"
-                  :style="{ '--c': ROOM_STATUS_CONFIG[room.status].color }"
+                  :style="{ '--c': ROOM_STATUS_CONFIG[room.status].color, '--cd': ROOM_STATUS_CONFIG[room.status].deep }"
                   :title="`${room.roomNo} · ${ROOM_STATUS_CONFIG[room.status].label}${room.roomName ? ' · ' + room.roomName : ''}`"
                 >
                   <span class="room-mgmt__no">{{ room.roomNo }}</span>
@@ -418,7 +418,7 @@
       </div>
       <div class="legend">
         <span v-for="s in ROOM_STATUS_ORDER" :key="s">
-          <i :style="{ background: ROOM_STATUS_CONFIG[s].color }"></i>
+          <i :style="{ background: ROOM_STATUS_CONFIG[s].color, borderColor: ROOM_STATUS_CONFIG[s].deep }"></i>
           {{ ROOM_STATUS_CONFIG[s].label }}
         </span>
       </div>
@@ -885,7 +885,7 @@ const roomStatusLabel = (room?: Room): string =>
   room ? (ROOM_STATUS_CONFIG[room.status]?.label ?? '') : '';
 
 const roomStatusColor = (room?: Room): string =>
-  room ? (ROOM_STATUS_CONFIG[room.status]?.color ?? '#888') : '#888';
+  room ? (ROOM_STATUS_CONFIG[room.status]?.deep ?? '#888') : '#888';
 
 function estimateHeight(obj: THREE.Object3D): string {
   const box = new THREE.Box3().setFromObject(obj);
@@ -1990,8 +1990,8 @@ onBeforeUnmount(() => {
   color: #4a4436;
   font-size: 13px;
 }
-.room-mgmt__pill i { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
-.room-mgmt__pill b { color: var(--c); font-size: 14px; }
+.room-mgmt__pill i { width: 9px; height: 9px; border-radius: 50%; display: inline-block; border: 1.5px solid transparent; }
+.room-mgmt__pill b { color: var(--cd, var(--c)); font-size: 14px; }
 .room-mgmt__body {
   flex: 1 1 auto;
   min-height: 0;
@@ -2024,7 +2024,7 @@ onBeforeUnmount(() => {
   gap: 4px;
   padding: 14px 6px;
   border: 1px solid #e3d9c4;
-  border-left: 5px solid var(--c);
+  border-left: 5px solid var(--cd, var(--c));
   border-radius: 8px;
   background: rgba(0, 0, 0, 0.03);
   background: color-mix(in srgb, var(--c) 18%, #f3ecdb);
@@ -2244,6 +2244,7 @@ onBeforeUnmount(() => {
   width: 10px;
   height: 10px;
   border-radius: 2px;
+  border: 1.5px solid transparent; /* 描边色由内联样式按状态传入（deep），浅色底点在浅背景上仍有边界 */
 }
 
 /* 房间详情（位置由 JS 按被点击的房间格子动态计算） */

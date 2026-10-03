@@ -1752,7 +1752,7 @@ export class MapScene {
         const x = center.x - footprintW / 2 + (col + 0.5) * cellW;
         const y = center.y - footprintD / 2 + (row + 0.5) * cellD;
 
-        const color = ROOM_STATUS_CONFIG[room.status]?.color ?? '#888888';
+        const color = ROOM_STATUS_CONFIG[room.status]?.deep ?? '#888888';
         const mat = new THREE.MeshStandardMaterial({
           color,
           roughness: 0.5,
@@ -1835,7 +1835,7 @@ export class MapScene {
     const mesh = this.roomCellMeshes.get(roomId);
     if (!mesh) return;
     const mat = mesh.material as THREE.MeshStandardMaterial;
-    mat.color.set(ROOM_STATUS_CONFIG[status]?.color ?? '#888888');
+    mat.color.set(ROOM_STATUS_CONFIG[status]?.deep ?? '#888888');
     if (mesh.userData.room) (mesh.userData.room as Room).status = status;
     this.markDirty();
   }

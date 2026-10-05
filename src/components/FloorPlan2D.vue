@@ -2294,22 +2294,8 @@ function enterEdit(): void {
           <el-button type="warning" plain @click="startFill">继续补填</el-button>
         </div>
 
-        <div class="fpv-editbar" v-if="!props.embedded">
-          <template v-if="!editMode">
-            <el-button size="small" type="primary" @click="enterEdit">编辑楼层（房间）</el-button>
-            <span class="fpv-editbar__tip">可新增 / 删除 / 移动 / 合并房间，或点「修改」编辑房间信息</span>
-          </template>
-          <template v-else>
-            <span class="fpv-editbar__hint">编辑中：</span>
-            <span class="fpv-editbar__sel">已选 {{ selectedIds.length }} 间</span>
-            <el-button size="small" :disabled="!canAddRoom" :title="canAddRoom ? '在空闲格新建一间房' : '当前楼层网格已放满，删除或合并房间后可新增'" @click="doAddRoom">＋ 新增房间</el-button>
-            <el-button size="small" :disabled="selectedIds.length < 2" :title="selectedIds.length < 2 ? '先点选 2 间及以上房间（点一间选中、再点另一间即多选）' : '将选中的多间房合并为一间大房间（如大会议室）'" @click="doMerge">合并所选（{{ selectedIds.length }}）</el-button>
-            <el-button size="small" type="danger" plain :disabled="!selectedIds.length" :title="!selectedIds.length ? '请先点选要删除的房间' : '删除选中的 ' + selectedIds.length + ' 间房（蓝色描边即选中）'" @click="doDelete">删除所选（{{ selectedIds.length }}）</el-button>
-            <el-button size="small" type="success" @click="exitEdit(true)">完成</el-button>
-            <el-button size="small" @click="exitEdit(false)">取消</el-button>
-            <span class="fpv-editbar__tip">点房间＝选中（蓝框高亮）；点多个房间可同时选中；拖动房间可换位置；要修改房间名称/部门等资料，请在「查看图纸」时点击房间→修改信息</span>
-          </template>
-        </div>
+        <!-- 楼层编辑操作已统一收进右侧面板的「楼层编辑」区（与楼层切换 / 导入图纸 / 复位同列），
+             画布顶部不再放操作按钮，避免用户在顶部与右侧之间来回找。 -->
 
         <div class="fpv-main" ref="mainRef">
           <div class="fpv-stage" ref="stageRef" @wheel.prevent="onWheel" @mousedown="onStageMouseDown" @contextmenu.prevent @mouseleave="onStageMouseLeave">
@@ -2481,6 +2467,36 @@ function enterEdit(): void {
               <i :style="{ background: l.color }"></i>{{ l.label }}
             </span>
           </div>
+
+          <!-- 楼层编辑：入口 + 编辑态操作（新增/合并/删除/完成/取消）统一放在这里，
+               与下方「楼层（切换楼层）」「工具（导入图纸/复位）」同列，操作入口只此一处 -->
+          <section class="fpv-sec">
+            <h4 class="fpv-sec__title">楼层编辑</h4>
+            <div class="fpv-tools">
+              <template v-if="!editMode">
+                <el-button size="small" type="primary" @click="enterEdit">编辑楼层（房间）</el-button>
+                <span class="fpv-tools__hint">进入后可新增 / 删除 / 拖动 / 合并房间</span>
+              </template>
+              <template v-else>
+                <div class="fpv-tools__row">
+                  <span class="fpv-editbar__hint">编辑中</span>
+                  <span class="fpv-editbar__sel">已选 {{ selectedIds.length }} 间</span>
+                </div>
+                <el-button size="small" :disabled="!canAddRoom" @click="doAddRoom">＋ 新增房间</el-button>
+                <span v-if="!canAddRoom" class="fpv-tools__hint fpv-tools__hint--warn">
+                  楼层网格（6×2＝12 格）已放满：删除或合并房间空出格子后才能新增
+                </span>
+                <el-button size="small" :disabled="selectedIds.length < 2" @click="doMerge">合并所选（{{ selectedIds.length }}）</el-button>
+                <el-button size="small" type="danger" plain :disabled="!selectedIds.length" @click="doDelete">删除所选（{{ selectedIds.length }}）</el-button>
+                <span v-if="selectedIds.length < 2" class="fpv-tools__hint">点房间＝选中（蓝框）；再点另一间＝多选，合并需同时选 ≥2 间</span>
+                <div class="fpv-tools__row">
+                  <el-button size="small" type="success" @click="exitEdit(true)">完成</el-button>
+                  <el-button size="small" @click="exitEdit(false)">取消</el-button>
+                </div>
+                <span class="fpv-tools__hint">拖动房间可换位置；房间号 / 名称 / 部门等资料请在退出编辑后点房间 →「修改信息」填写</span>
+              </template>
+            </div>
+          </section>
 
           <!-- 楼层格子：按已上传 DXF 动态生成，每格显示楼层信息 -->
           <section class="fpv-sec">
@@ -2822,13 +2838,11 @@ function enterEdit(): void {
 .fpv-room { cursor: pointer; }
 /* 编辑态选中高亮：明显蓝框 + 轻微外发光，确保「删/改/合并」前用户清楚知道选中了哪几间 */
 .fpv-room--sel polygon { stroke: #1257e0; stroke-width: 3.2; filter: drop-shadow(0 0 2.4px rgba(18, 87, 224, 0.9)); }
-.fpv-editbar {
-  display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px;
-  padding: 8px 12px; margin-bottom: 8px; background: #f8fafc; border: 1px solid #e5e7eb; border-radius: 10px;
-}
+/* 楼层编辑区（右侧面板）：按钮整行铺满，纵向排列更易扫读 */
+.fpv-tools > .el-button { width: 100%; margin-left: 0; }
+.fpv-tools__hint--warn { color: #b45309; background: #fffbeb; border: 1px solid #fde68a; border-radius: 6px; padding: 4px 8px; }
 .fpv-editbar__hint { font-size: 13px; font-weight: 600; color: #374151; }
 .fpv-editbar__sel { font-size: 13px; font-weight: 700; color: #fff; background: #1f6feb; border-radius: 999px; padding: 2px 10px; }
-.fpv-editbar__tip { font-size: 12px; color: #9ca3af; }
 .fpv-tip { line-height: 1.6; }
 .fpv-tip__no { font-weight: 700; margin-bottom: 2px; }
 .fpv-tip__row { font-size: 12px; white-space: nowrap; }

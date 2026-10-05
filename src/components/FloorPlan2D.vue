@@ -2766,7 +2766,7 @@ function enterEdit(): void {
 .fpv-edit__row label { width: 56px; font-size: 13px; color: #6b7280; flex-shrink: 0; }
 .fpv-edit__row :deep(.el-input) { flex: 1; }
 .fpv__top--embed { justify-content: space-between; }
-.fpv__head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 2px 2px 10px; }
+.fpv__head { display: flex; align-items: center; justify-content: flex-start; gap: 12px; padding: 2px 2px 10px; }
 .fpv__title { font-size: 16px; font-weight: 700; color: #111827; }
 
 /* 工作区主区：中央 stage + 右侧栏 */

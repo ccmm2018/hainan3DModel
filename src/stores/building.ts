@@ -426,7 +426,9 @@ export const useBuildingStore = defineStore('building', () => {
   /**
    * 合并多个房间为一个（楼层编辑：多选后合并）。
    * 合并轮廓取各房轮廓在对齐坐标系下的包围盒（见 geometry.mergeRectOutlines）。
-   * 房间字段以第一个房间为基准，名称记为「合并房间」。
+   * 面积：包围盒面积会虚大（两房深度不一致时含「空缺」区），故改为逐房求和——
+   * 每房优先取已填面积，未填（≤0）时回退该房轮廓的几何面积，保证合并值 = 原各房之和。
+   * 房号 / 名称留空：由用户在合并后弹出的信息表单中自行填写，不再默认继承第一个房间的「101」。
    */
   function mergeRooms(fid: string, ids: string[]): string | null {
     const list = rooms.value[fid];
@@ -435,18 +437,20 @@ export const useBuildingStore = defineStore('building', () => {
     if (sel.length < 2) return null;
     const outline = mergeRectOutlines(sel.map((r) => r.outline));
     const centroid = polygonCentroid(outline);
-    const area = polygonArea(outline);
-    const base = sel[0];
+    const partArea = (r: Room, key: 'useArea' | 'buildArea'): number =>
+      r[key] > 0 ? r[key] : polygonArea(r.outline);
+    const useArea = sel.reduce((s, r) => s + partArea(r, 'useArea'), 0);
+    const buildArea = sel.reduce((s, r) => s + partArea(r, 'buildArea'), 0);
     const merged: Room = {
       id: `${fid}-m${Date.now()}`,
       floorId: fid,
-      code: base.code ? `${base.code}合` : '合并房间',
-      number: base.number || base.code || '合并房间',
-      name: '合并房间',
+      code: '',
+      number: '',
+      name: '',
       dept: '',
       usePurpose: '',
-      useArea: area,
-      buildArea: area,
+      useArea,
+      buildArea,
       outline,
       centroid,
       inspectStatus: 'normal',

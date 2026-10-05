@@ -2121,6 +2121,11 @@ function doMerge(): void {
     selectedIds.value = [id];
     selectedRoom.value = displayedRooms.value.find((r) => r.id === id) ?? null;
     selectedId.value = id;
+    // 合并后的新房间号 / 名称留空，由用户填写：自动弹出信息编辑表单，避免默认沿用第一间房的「101」
+    nextTick(() => {
+      popMode.value = 'edit';
+      ElMessage.info('已合并为新房间，请在表单中填写房间号与名称后保存');
+    });
   } else {
     selectedIds.value = [];
     selectedRoom.value = null;

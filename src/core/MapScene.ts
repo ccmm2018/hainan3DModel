@@ -77,6 +77,8 @@ export const DEFAULT_CALIBRATION: ModelCalibration = {
 
 export interface MapSceneCallbacks {
   onModelProgress?: (percent: number) => void;
+  /** 模型加载后处理阶段进度（贴图解码 / 优化 / 检测等），用于在加载遮罩上显示当前步骤，避免「卡在 100%」的观感 */
+  onModelStage?: (label: string, done?: number, total?: number) => void;
   onModelReady?: () => void;
   /**
    * 自动取景完成（视角已收敛稳定）时触发。
@@ -192,12 +194,28 @@ export class MapScene {
   private captureResolve: ((dataUrl: string) => void) | null = null;
 
   /**
-   * 渲染策略：AMap 的 GL 自定义图层每帧都会清掉底图帧缓冲后回调 render()，
+   * 渲染策略：AMap 的 GL 自定义图层每帧都会清掉本层帧缓冲后回调 render()，
    * 因此每帧都必须重新叠加绘制模型（不可整帧跳过，否则模型会闪烁/隐藏）。
-   * 低配机器的性能压力由「低功耗渲染设置（关抗锯齿、像素比封顶为 1）」承担。
-   * 场景内容变化时调用 markDirty() 唤醒地图重绘即可。
+   *
+   * 低配机器的优化：整场景渲染结果缓存在离屏纹理（WebGLRenderTarget）里，
+   * 视角与场景内容都没变的帧只做「一次全屏贴图」（1 个 draw call）替代
+   * 「几百个 draw call 的整场景重绘」——这是低配机器空闲时 CPU 仍 90%+ 的主因。
+   * 视角变化（拖拽/缩放/旋转/飞行）或 markDirty()（高亮/房间/校准等内容变化）时
+   * 才重新渲染一次场景并刷新缓存。
    */
   private disposed = false;
+
+  /** 低配帧缓存：整场景的离屏渲染结果（视角/内容未变的帧直接贴这张图） */
+  private frameRt: THREE.WebGLRenderTarget | null = null;
+  /** 帧缓存对应的画布尺寸 key，尺寸变化时重建 */
+  private frameRtKey = '';
+  /** 全屏贴图用的最小场景（正交相机 + 一个 quad） */
+  private blitScene: THREE.Scene | null = null;
+  private blitCam: THREE.OrthographicCamera | null = null;
+  /** 缓存是否失效（视角变化 / markDirty / 尺寸变化时置真，重绘一次场景） */
+  private frameCacheDirty = true;
+  /** 高亮材质缓存（key: `颜色|原材质uuid`），跨悬停复用克隆材质，避免扫过楼群时反复克隆 */
+  private highlightMatCache = new Map<string, THREE.Material>();
 
   // 量算（测距 / 测面）状态
   private AMap: any = null;
@@ -317,9 +335,15 @@ export class MapScene {
 
     // 低配设备探测：CPU 核心数少 / 设备内存小 → 关闭抗锯齿、像素比封顶为 1，
     // 否则弱机平移/缩放地图时每帧渲染开销过大，CPU 瞬间 100%。
-    const lowEnd =
+    // 可用 URL 参数 ?lowend=1 / ?lowend=0 强制覆盖（用于测试/排查性能问题）。
+    let lowEnd =
       (navigator.hardwareConcurrency || 4) <= 4 ||
       (((navigator as unknown as { deviceMemory?: number }).deviceMemory ?? 8) <= 4);
+    try {
+      const forced = new URLSearchParams(location.search).get('lowend');
+      if (forced === '1') lowEnd = true;
+      else if (forced === '0') lowEnd = false;
+    } catch { /* ignore */ }
     this.lowEnd = lowEnd;
     try {
       this.renderer = new THREE.WebGLRenderer({
@@ -459,31 +483,64 @@ export class MapScene {
 
         this.placeModelAtAnchor();
 
-        // 把「整段贴图后处理」拆成多段、每段之间让出主线程一帧：否则 108 张贴图的处理 +
-        // 后续首帧 GPU 上传会在低配机器上连成一次数秒的同步阻塞，表现为「进度到 100% 后界面卡死 5 秒才出模型」。
-        // 让出帧后加载遮罩可继续刷新，CPU 也不会被一次性打满。
+        // —— 后处理整体重构为「分片 + 阶段进度」——
+        // 旧实现虽有 yield，但每段本身仍是一个整块同步循环（108 张贴图逐张处理），
+        // 低配机器上表现为「进度到 100% 后界面卡死近 30 秒才出模型」。
+        // 现在每段拆成 ~14ms 小片、片间让出一帧并回报阶段（onModelStage），
+        // 加载遮罩全程显示「正在做什么 / 做到第几张」，主线程也不再被一次性打满。
         await this.yieldToEventLoop();
         if (this.disposed) return;
-        // WebGL1（高德 GLCustomLayer 提供）对单张贴图尺寸有 MAX_TEXTURE_SIZE 上限，
-        // 超过上限的 JPEG 会上传失败、对应材质回退成白色/灰色平面，表现为「材质丢失」。
-        // 这里把所有超尺寸贴图等比缩到上限以内（仅重绘到 canvas，不改原始 GLB 文件）。
-        const clampedCount = this.clampTexturesToMaxSize(this.modelRoot);
-        await this.yieldToEventLoop();
+
+        // 一次性收集去重贴图（避免每段各 traverse 一遍），后续各段都基于这张列表分片执行
+        const textures = this.collectTextures(this.modelRoot);
+        const mapPairs = this.collectMatMapPairs(this.modelRoot);
+        this.facadeCache.clear();
+
+        // 并行预解码：ImageBitmap 路径（现代浏览器 GLTFLoader 默认）在解析阶段已完成解码，
+        // 此处为空操作；若回落到 HTMLImageElement 路径，则并行触发浏览器解码——
+        // 旧流程解码发生在首次 drawImage 时逐张串行触发，108 张在低配 CPU 上是十几秒的串行开销。
+        this.callbacks.onModelStage?.('解码贴图', 0, textures.length);
+        await this.predecodeTextures(textures);
         if (this.disposed) return;
-        // WebGL1 下「NPOT 尺寸贴图 + mipmap」会被驱动直接丢弃，导致部分建筑材质渲染失败（黑色/空白），
-        // 观感即「材质丢失」。主动降级为「无 mipmap + 线性过滤 + 边缘钳制」使其可正常显示（WebGL2 跳过）。
-        const npotFixed = this.makeTexturesWebGL1Safe(this.modelRoot);
-        await this.yieldToEventLoop();
-        if (this.disposed) return;
-        // GLB 文件本身存在「渲染后纯黑」的损坏立面贴图（导出/烘焙失败所致），会让对应楼栋渲染成黑墙，
-        // 观感即「材质丢失」。离线逐张解码已实证共 6 张（mean≈0/std≈0），加载后做启发式检测并替换为
-        // 程序化立面纹理。此一类修复经用户确认有效（「墙面发黑问题已修复」），不再做其它运行时材质改写，
-        // 以免误伤楼栋原本正常的材质/屋顶/地面。
-        const materialFixed = this.fixMaterialTextures(this.modelRoot);
-        await this.yieldToEventLoop();
-        if (this.disposed) return;
-        // 低配：大贴图缩尺寸 + 关 mipmap + 线性过滤，大幅削减首帧 GPU 上传量（首帧 CPU/GPU 峰值主源）
-        const textureReduced = this.reduceTextureQualityForLowEnd(this.modelRoot);
+
+        let clampedCount = 0;
+        let npotFixed = 0;
+        let materialFixed = 0;
+        let textureReduced = 0;
+        if (this.lowEnd) {
+          // 低配：先缩贴图、再检测黑图。尽早把大位图换成 ≤512 的 canvas，
+          // 降低整段后处理的内存峰值（4GB 机器上 450MB+ 峰值会触发交换，表现为整体卡顿）。
+          await this.runChunked(textures, '优化贴图', (tex) => {
+            if (this.reduceTextureForLowEnd(tex)) textureReduced++;
+          });
+          if (this.disposed) return;
+          await this.runChunked(mapPairs, '检测损坏贴图', (pair) => {
+            if (this.fixMatMapIfBlack(pair)) materialFixed++;
+          });
+          if (this.disposed) return;
+        } else {
+          // WebGL1（高德 GLCustomLayer 提供）对单张贴图尺寸有 MAX_TEXTURE_SIZE 上限，
+          // 超过上限的 JPEG 会上传失败、对应材质回退成白色/灰色平面，表现为「材质丢失」。
+          // 这里把所有超尺寸贴图等比缩到上限以内（仅重绘到 canvas，不改原始 GLB 文件）。
+          await this.runChunked(textures, '缩放超大贴图', (tex) => {
+            if (this.clampTextureToMaxSize(tex)) clampedCount++;
+          });
+          if (this.disposed) return;
+          // WebGL1 下「NPOT 尺寸贴图 + mipmap」会被驱动直接丢弃，导致部分建筑材质渲染失败（黑色/空白），
+          // 观感即「材质丢失」。主动降级为「无 mipmap + 线性过滤 + 边缘钳制」使其可正常显示（WebGL2 跳过）。
+          await this.runChunked(textures, '适配 WebGL1 贴图', (tex) => {
+            if (this.makeTextureWebGL1Safe(tex)) npotFixed++;
+          });
+          if (this.disposed) return;
+          // GLB 文件本身存在「渲染后纯黑」的损坏立面贴图（导出/烘焙失败所致），会让对应楼栋渲染成黑墙，
+          // 观感即「材质丢失」。离线逐张解码已实证共 6 张（mean≈0/std≈0），加载后做启发式检测并替换为
+          // 程序化立面纹理。此一类修复经用户确认有效（「墙面发黑问题已修复」），不再做其它运行时材质改写，
+          // 以免误伤楼栋原本正常的材质/屋顶/地面。
+          await this.runChunked(mapPairs, '检测损坏贴图', (pair) => {
+            if (this.fixMatMapIfBlack(pair)) materialFixed++;
+          });
+          if (this.disposed) return;
+        }
         // 所有贴图处理完成后再挂入场景：避免在「让出帧」期间 AMap 提前渲染、把全分辨率贴图先上传一遍 GPU
         // （那样低配机器仍会先承受一次 450MB 上传峰值）。挂入后 AMap 第一次渲染拿到的就是已降级的贴图。
         this.scene!.add(this.modelRoot);
@@ -496,6 +553,7 @@ export class MapScene {
             + `超限缩放=${clampedCount} 张，NPOT 材质降级=${npotFixed} 张，黑图替换=${materialFixed} 张，低配贴图降级=${textureReduced} 张`,
         );
 
+        this.callbacks.onModelStage?.('准备渲染');
         this.markDirty();
         // 取景前先构建各建筑世界 AABB，供后续悬停拾取做粗筛（避免全模型 raycast）。
         this.refreshBuildingBoxes();
@@ -983,25 +1041,17 @@ export class MapScene {
     this.map.setZoomAndCenter(v.lastZoom, v.center, true);
   }
 
-  /**
-   * 把模型里超过 WebGL 上下文 MAX_TEXTURE_SIZE 上限的贴图等比缩放到上限以内。
-   * 高德 GLCustomLayer 在多数环境下提供的是 WebGL1 上下文，其单张贴图尺寸上限
-   * （常见 4096 或更低）可能小于建模软件导出的大贴图；超限的贴图上传会失败，
-   * 对应材质退化为白色/灰色平面，观感即「材质丢失」。
-   * 仅在浏览器环境（存在 document）下生效，缩放通过离屏 canvas 重绘实现，不改原始模型文件。
-   * @returns 被缩放的贴图数量（用于诊断「是否因超限导致材质丢失」）
-   */
-  private clampTexturesToMaxSize(root: THREE.Object3D): number {
-    const maxSize = this.renderer?.capabilities?.maxTextureSize ?? 4096;
-    if (typeof document === 'undefined') return 0; // 非浏览器环境（如测试）跳过
+  /** 收集模型中所有去重后的贴图（7 个常用贴图槽位），供后处理各段分片执行 */
+  private collectTextures(root: THREE.Object3D): THREE.Texture[] {
     const seen = new Set<THREE.Texture>();
-    let clamped = 0;
+    const out: THREE.Texture[] = [];
     root.traverse((child) => {
       const mesh = child as THREE.Mesh;
       if (!mesh.isMesh) return;
       const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
       for (const m of mats) {
         const mat = m as THREE.MeshStandardMaterial;
+        if (!mat) continue;
         const maps: Array<THREE.Texture | null | undefined> = [
           mat.map,
           mat.roughnessMap,
@@ -1012,98 +1062,108 @@ export class MapScene {
           mat.alphaMap,
         ];
         for (const tex of maps) {
-          if (!tex || seen.has(tex)) continue;
-          seen.add(tex);
-          const img = tex.image as { width?: number; height?: number } | undefined;
-          if (!img || !img.width || !img.height) continue;
-          const longest = Math.max(img.width, img.height);
-          if (longest <= maxSize) continue;
-          const scale = maxSize / longest;
-          const w = Math.max(1, Math.round(img.width * scale));
-          const h = Math.max(1, Math.round(img.height * scale));
-          const canvas = document.createElement('canvas');
-          canvas.width = w;
-          canvas.height = h;
-          const ctx = canvas.getContext('2d');
-          if (!ctx) continue;
-          try {
-            ctx.drawImage(img as CanvasImageSource, 0, 0, w, h);
-          } catch {
-            continue; // 极少数 ImageBitmap/跨域情况下 drawImage 可能抛错，保留原贴图
+          if (tex && !seen.has(tex)) {
+            seen.add(tex);
+            out.push(tex);
           }
-          tex.image = canvas;
-          tex.needsUpdate = true;
-          clamped++;
         }
       }
     });
-    return clamped;
+    return out;
+  }
+
+  /** 收集（材质, baseColor 贴图）去重对：黑图检测按纹理去重（同一纹理在楼栋间共享材质时只处理一次） */
+  private collectMatMapPairs(
+    root: THREE.Object3D,
+  ): Array<{ mat: THREE.MeshStandardMaterial; tex: THREE.Texture }> {
+    const seen = new Set<THREE.Texture>();
+    const out: Array<{ mat: THREE.MeshStandardMaterial; tex: THREE.Texture }> = [];
+    root.traverse((child) => {
+      const mesh = child as THREE.Mesh;
+      if (!mesh.isMesh) return;
+      const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+      for (const m of mats) {
+        const mat = m as THREE.MeshStandardMaterial;
+        if (!mat || !mat.map || seen.has(mat.map)) continue;
+        seen.add(mat.map);
+        out.push({ mat, tex: mat.map });
+      }
+    });
+    return out;
   }
 
   /**
-   * 让模型所有贴图在 WebGL1 下可安全渲染（修复「部分建筑材质丢失」）。
+   * 把单张贴图缩放到 WebGL 上下文 MAX_TEXTURE_SIZE 上限以内（超过才处理，返回是否被缩放）。
+   * 高德 GLCustomLayer 在多数环境下提供的是 WebGL1 上下文，其单张贴图尺寸上限
+   * （常见 4096 或更低）可能小于建模软件导出的大贴图；超限的贴图上传会失败，
+   * 对应材质退化为白色/灰色平面，观感即「材质丢失」。
+   * 缩放通过离屏 canvas 重绘实现，不改原始模型文件。
+   */
+  private clampTextureToMaxSize(tex: THREE.Texture): boolean {
+    const maxSize = this.renderer?.capabilities?.maxTextureSize ?? 4096;
+    if (typeof document === 'undefined') return false; // 非浏览器环境（如测试）跳过
+    const img = tex.image as { width?: number; height?: number } | undefined;
+    if (!img || !img.width || !img.height) return false;
+    const longest = Math.max(img.width, img.height);
+    if (longest <= maxSize) return false;
+    const scale = maxSize / longest;
+    const w = Math.max(1, Math.round(img.width * scale));
+    const h = Math.max(1, Math.round(img.height * scale));
+    const canvas = document.createElement('canvas');
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return false;
+    try {
+      ctx.drawImage(img as CanvasImageSource, 0, 0, w, h);
+    } catch {
+      return false; // 极少数 ImageBitmap/跨域情况下 drawImage 可能抛错，保留原贴图
+    }
+    tex.image = canvas;
+    tex.needsUpdate = true;
+    return true;
+  }
+
+  /**
+   * 让单张贴图在 WebGL1 下可安全渲染（修复「部分建筑材质丢失」），返回是否被降级。
    *
    * 根因：高德 GLCustomLayer 多数环境给的是 **WebGL1** 上下文。GLTFLoader 默认给贴图开启
    * `generateMipmaps=true` + 三线性过滤，而 WebGL1 规范**不支持「非 2 的幂(NPOT)尺寸纹理 + mipmap」**——
    * 这类纹理会被驱动直接丢弃，对应材质渲染成黑色/空白，观感即「建筑材质丢失」（仅部分贴图为 NPOT，
    * 故表现为「某些」而非「全部」建筑）。
    *
-   * 处理：WebGL1 下统一降级为「关闭 mipmap + minFilter 退为 LinearFilter + wrap 退为 ClampToEdgeWrapping」，
-   * 这是 WebGL1 对 NPOT 纹理唯一合法的渲染方式（代价是远处略有锯齿，但材质能正常显示）。
-   * WebGL2 原生支持 NPOT + mipmap，直接跳过以保留画质。
-   * @returns 被降级的贴图数量（供诊断日志确认是否命中该根因）
+   * 处理：WebGL1 下对 NPOT 贴图降级为「关闭 mipmap + minFilter 退为 LinearFilter + wrap 退为
+   * ClampToEdgeWrapping」，这是 WebGL1 对 NPOT 纹理唯一合法的渲染方式（代价是远处略有锯齿）。
+   * WebGL2 原生支持 NPOT + mipmap，调用方直接跳过。且仅对「非 2 的幂(NPOT)」尺寸降级：
+   * POT 纹理（无论 wrap 是 Repeat 还是 Clamp）在 WebGL1 中均完全合法，必须原样保留——
+   * 否则会破坏本用于平铺(Repeat)的立面贴图：强制 ClampToEdge 后墙面只采样到贴图边缘像素，
+   * 整面渲染成纯色，观感即「材质丢失」。
    */
-  private makeTexturesWebGL1Safe(root: THREE.Object3D): number {
+  private makeTextureWebGL1Safe(tex: THREE.Texture): boolean {
     const caps = this.renderer?.capabilities;
-    if (!caps || caps.isWebGL2) return 0; // WebGL2 原生支持 NPOT，无需降级
-    const seen = new Set<THREE.Texture>();
-    let fixed = 0;
-    root.traverse((child) => {
-      const mesh = child as THREE.Mesh;
-      if (!mesh.isMesh) return;
-      const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-      for (const m of mats) {
-        const mat = m as THREE.MeshStandardMaterial;
-        const maps: Array<THREE.Texture | null | undefined> = [
-          mat.map,
-          mat.roughnessMap,
-          mat.metalnessMap,
-          mat.normalMap,
-          mat.emissiveMap,
-          mat.aoMap,
-          mat.alphaMap,
-        ];
-        for (const tex of maps) {
-          if (!tex || seen.has(tex)) continue;
-          seen.add(tex);
-          // 仅对「非 2 的幂(NPOT) 尺寸」或「非边缘钳制」的纹理降级：
-          // WebGL1 下 POT + ClampToEdge 的纹理原生支持 mipmap，应保留以保证远处画质；
-          // 只有 clampTexturesToMaxSize 产生的 NPOT 贴图或异常 wrap 模式才需降级。
-          const img = tex.image as { width?: number; height?: number } | undefined;
-          const w = img?.width ?? 0;
-          const h = img?.height ?? 0;
-          const isPOT = w > 0 && h > 0 && (w & (w - 1)) === 0 && (h & (h - 1)) === 0;
-          // WebGL1 仅对「非 2 的幂(NPOT)」纹理必须降级：NPOT + mipmap 在 WebGL1 下非法，会被驱动丢弃。
-          // 但 POT 纹理（无论 wrap 是 Repeat 还是 Clamp）在 WebGL1 中均完全合法，必须原样保留——
-          // 否则会破坏本用于平铺(Repeat)的立面贴图：强制 ClampToEdge 后墙面只采样到贴图边缘像素，
-          // 整面渲染成纯色，观感即「材质丢失」。
-          if (isPOT) continue;
-          tex.generateMipmaps = false;
-          tex.minFilter = THREE.LinearFilter;
-          tex.wrapS = THREE.ClampToEdgeWrapping;
-          tex.wrapT = THREE.ClampToEdgeWrapping;
-          tex.needsUpdate = true;
-          fixed++;
-        }
-      }
-    });
-    return fixed;
+    if (!caps || caps.isWebGL2) return false; // WebGL2 原生支持 NPOT，无需降级
+    const img = tex.image as { width?: number; height?: number } | undefined;
+    const w = img?.width ?? 0;
+    const h = img?.height ?? 0;
+    const isPOT = w > 0 && h > 0 && (w & (w - 1)) === 0 && (h & (h - 1)) === 0;
+    if (isPOT) return false;
+    tex.generateMipmaps = false;
+    tex.minFilter = THREE.LinearFilter;
+    tex.wrapS = THREE.ClampToEdgeWrapping;
+    tex.wrapT = THREE.ClampToEdgeWrapping;
+    tex.needsUpdate = true;
+    return true;
   }
+
+  /** 黑图检测的 32×32 采样画布上下文（懒创建、跨贴图复用；document 不存在时为 null） */
+  private blackSampleCtx: CanvasRenderingContext2D | null | undefined;
+  /** 黑图替换生成的立面纹理缓存（按原纹理 uuid），每次模型加载后处理前清空 */
+  private facadeCache = new Map<string, THREE.Texture>();
 
   /**
    * GLB 文件本身存在「渲染后纯黑」的损坏立面贴图（导出或贴图烘焙失败所致，其像素几乎
    * 完全一致、方差≈0），会让对应楼栋渲染成黑墙，观感即「材质丢失」。无法凭空还原真实立面
-   * 照片，因此在加载完成后，把「整体偏暗且方差极小（均匀黑占位图）」的 baseColor 贴图
+   * 照片，因此把「整体偏暗且方差极小（均匀黑占位图）」的 baseColor 贴图
    * 自动替换为程序化生成的建筑立面纹理（墙+窗格），让这些楼从「黑盒子」变成正常的墙+窗格外观。
    *
    * 判据刻意使用「方差极小」而非「平均亮/暗」或「贴图尺寸」：
@@ -1111,35 +1171,26 @@ export class MapScene {
    *  - 模型里大量 16×16 的小贴图（太阳能板、屋顶、女儿墙、沥青地面等）虽小但属合法材质，
    *    绝不以「尺寸」作为判定，避免把正常楼栋/屋顶/地面的材质误改。
    * 仅此「均匀黑」一类会被启发式替换，其余材质一律原样保留。
-   *
-   * 仅在浏览器环境（存在 document / canvas）下生效，不依赖任何外部图片资源。
-   * @returns 被替换的贴图数量（供诊断日志确认是否命中该根因）
+   * 返回是否发生了替换。（旧实现 fixMaterialTextures 的逐材质版本，拆出以便分片执行，行为一致。）
    */
-  private fixMaterialTextures(root: THREE.Object3D): number {
-    if (typeof document === 'undefined') return 0; // 非浏览器环境（如测试）跳过
-    const sampler = document.createElement('canvas');
-    sampler.width = 32;
-    sampler.height = 32;
-    const sctx = sampler.getContext('2d', { willReadFrequently: true });
-    if (!sctx) return 0;
-
-    // 同一张损坏黑图可能被多个材质复用；按原纹理 uuid 缓存生成的立面纹理，保证复用一致。
-    const cache = new Map<string, THREE.Texture>();
-    const facadeFor = (tex: THREE.Texture): THREE.Texture => {
-      const key = tex.uuid;
-      let t = cache.get(key);
-      if (!t) {
-        // 用原纹理 uuid 派生一个稳定变体，避免所有楼长得一模一样。
-        let h = 0;
-        for (let i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) >>> 0;
-        t = this.makeFacadeTexture(h % 4);
-        cache.set(key, t);
-      }
-      return t;
-    };
-
-    // 采样 32×32 算出灰度均值与标准差；仅「均值低且方差极小（均匀黑）」判定为损坏占位图。
-    const analyze = (data: Uint8ClampedArray): { mean: number; std: number } => {
+  private fixMatMapIfBlack(pair: { mat: THREE.MeshStandardMaterial; tex: THREE.Texture }): boolean {
+    if (typeof document === 'undefined') return false; // 非浏览器环境（如测试）跳过
+    if (this.blackSampleCtx === undefined) {
+      const sampler = document.createElement('canvas');
+      sampler.width = 32;
+      sampler.height = 32;
+      this.blackSampleCtx = sampler.getContext('2d', { willReadFrequently: true });
+    }
+    const sctx = this.blackSampleCtx;
+    if (!sctx) return false;
+    const { mat, tex } = pair;
+    const img = tex.image as CanvasImageSource | undefined;
+    if (!img) return false;
+    try {
+      // 采样 32×32 算出灰度均值与标准差；仅「均值低且方差极小（均匀黑）」判定为损坏占位图。
+      sctx.clearRect(0, 0, 32, 32);
+      sctx.drawImage(img, 0, 0, 32, 32);
+      const data = sctx.getImageData(0, 0, 32, 32).data;
       const n = data.length / 4;
       let sum = 0;
       for (let i = 0; i < data.length; i += 4) {
@@ -1151,39 +1202,29 @@ export class MapScene {
         const l = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
         varSum += (l - mean) * (l - mean);
       }
-      return { mean, std: Math.sqrt(varSum / n) };
-    };
-
-    let replaced = 0;
-    const done = new Set<THREE.Texture>();
-    root.traverse((child) => {
-      const mesh = child as THREE.Mesh;
-      if (!mesh.isMesh) return;
-      const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-      for (const m of mats) {
-        const mat = m as THREE.MeshStandardMaterial;
-        if (!mat || !mat.map) continue;
-        if (done.has(mat.map)) continue; // 同一纹理只处理一次（材质在楼栋间共享）
-        const img = mat.map.image as CanvasImageSource | undefined;
-        if (!img) continue;
-        try {
-          sctx.clearRect(0, 0, 32, 32);
-          sctx.drawImage(img, 0, 0, 32, 32);
-          const data = sctx.getImageData(0, 0, 32, 32).data;
-          const { mean, std } = analyze(data);
-          // 仅「均匀黑占位图」：均值低且方差极小（无色差/细节）。真实但偏深的合法贴图放行。
-          if (mean < 40 && std < 16) {
-            mat.map = facadeFor(mat.map);
-            mat.needsUpdate = true;
-            done.add(mat.map);
-            replaced++;
-          }
-        } catch {
-          // 采样失败（图片未就绪等）则跳过，不影响其它材质
-        }
+      const std = Math.sqrt(varSum / n);
+      if (mean < 40 && std < 16) {
+        mat.map = this.facadeFor(tex);
+        mat.needsUpdate = true;
+        return true;
       }
-    });
-    return replaced;
+    } catch {
+      // 采样失败（图片未就绪等）则跳过，不影响其它材质
+    }
+    return false;
+  }
+
+  /** 同一张损坏黑图可能被多个材质复用；按原纹理 uuid 缓存生成的立面纹理，保证复用一致 */
+  private facadeFor(tex: THREE.Texture): THREE.Texture {
+    let t = this.facadeCache.get(tex.uuid);
+    if (!t) {
+      // 用原纹理 uuid 派生一个稳定变体，避免所有楼长得一模一样。
+      let h = 0;
+      for (let i = 0; i < tex.uuid.length; i++) h = (h * 31 + tex.uuid.charCodeAt(i)) >>> 0;
+      t = this.makeFacadeTexture(h % 4);
+      this.facadeCache.set(tex.uuid, t);
+    }
+    return t;
   }
 
   /** 生成一张程序化建筑立面纹理（墙 + 窗格网格），variants 控制配色与窗格密度 */
@@ -1245,65 +1286,92 @@ export class MapScene {
   }
 
   /**
-   * 低配设备：激进削减贴图首帧开销（低配机器优先保证加载速度与流畅度，代价是远处略带锯齿）。
-   * 仅在 lowEnd 时生效；非低配机器跳过以保留画质。
+   * 分片执行逐项处理：每片耗时不超过 ~14ms，片间让出一帧并回报阶段进度（onModelStage）。
+   * 把原本「整块同步」的贴图循环拆开——低配机器上单段同步循环可达十几秒，表现为
+   * 「进度 100% 后遮罩卡死」；拆片后遮罩持续刷新、主线程不再被一次性打满。
+   */
+  private async runChunked<T>(
+    items: readonly T[],
+    label: string,
+    step: (item: T) => void,
+  ): Promise<void> {
+    if (items.length === 0) return;
+    const t0 = performance.now();
+    let sliceStart = t0;
+    for (let i = 0; i < items.length; i++) {
+      step(items[i]);
+      if (performance.now() - sliceStart > 14 && i < items.length - 1) {
+        this.callbacks.onModelStage?.(label, i + 1, items.length);
+        await this.yieldToEventLoop();
+        if (this.disposed) return;
+        sliceStart = performance.now();
+      }
+    }
+    this.callbacks.onModelStage?.(label, items.length, items.length);
+    // eslint-disable-next-line no-console
+    console.info(`[MapScene] ${label}：${items.length} 项，耗时 ${Math.round(performance.now() - t0)}ms`);
+  }
+
+  /**
+   * 并行触发贴图解码（仅 HTMLImageElement 路径需要；ImageBitmap 路径在 GLB 解析期已解码）。
+   * 旧流程里解码发生在首次 drawImage 时逐张串行触发，108 张在低配 CPU 上是十几秒的串行开销；
+   * 交给浏览器并行解码（img.decode() 在浏览器内部线程池执行）后墙钟时间大幅缩短。
+   */
+  private async predecodeTextures(textures: readonly THREE.Texture[]): Promise<void> {
+    if (typeof HTMLImageElement === 'undefined') return;
+    const imgs: HTMLImageElement[] = [];
+    for (const tex of textures) {
+      const img = tex.image;
+      if (img instanceof HTMLImageElement && typeof img.decode === 'function') imgs.push(img);
+    }
+    if (!imgs.length) return;
+    const t0 = performance.now();
+    await Promise.allSettled(imgs.map((img) => img.decode()));
+    // eslint-disable-next-line no-console
+    console.info(`[MapScene] 贴图并行解码：${imgs.length} 张，耗时 ${Math.round(performance.now() - t0)}ms`);
+  }
+
+  /**
+   * 低配设备：激进削减单张贴图的首帧开销（返回是否生效；低配下恒为 true，与旧实现的计数语义一致）。
+   * 低配机器优先保证加载速度与流畅度，代价是远处略带锯齿。
    *  - 对**所有**贴图关闭 mipmap + 退为线性过滤 + 各向异性=1：省掉 mip 链生成（纯 CPU 浪费）与三线性采样；
    *  - 对最长边 > 512 的贴图重绘到 ≤512 的 canvas：首帧 GPU 上传量最多降 4~16 倍
    *    （原 1024² 贴图 4MB/张 × 108 张 ≈ 450MB，缩到 512² 后仅约 110MB，且无需 mip 链）。
-   * @returns 被处理的贴图数量
    */
-  private reduceTextureQualityForLowEnd(root: THREE.Object3D): number {
-    if (!this.lowEnd) return 0;
-    if (typeof document === 'undefined') return 0; // 非浏览器环境（如测试）跳过
+  private reduceTextureForLowEnd(tex: THREE.Texture): boolean {
+    if (!this.lowEnd) return false;
+    if (typeof document === 'undefined') return false; // 非浏览器环境（如测试）跳过
     const MAX = 512; // 低配贴图尺寸上限（最长边）
-    const seen = new Set<THREE.Texture>();
-    let reduced = 0;
-    root.traverse((child) => {
-      const mesh = child as THREE.Mesh;
-      if (!mesh.isMesh) return;
-      const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-      for (const m of mats) {
-        const mat = m as THREE.MeshStandardMaterial;
-        const maps: Array<THREE.Texture | null | undefined> = [
-          mat.map, mat.roughnessMap, mat.metalnessMap, mat.normalMap, mat.emissiveMap, mat.aoMap, mat.alphaMap,
-        ];
-        for (const tex of maps) {
-          if (!tex || seen.has(tex)) continue;
-          seen.add(tex);
-          // 关闭 mipmap + 线性过滤 + 各向异性=1（低配优先首帧速度，避免 mip 链生成与三线性采样开销）
-          tex.generateMipmaps = false;
-          tex.minFilter = THREE.LinearFilter;
-          tex.anisotropy = 1;
+    // 关闭 mipmap + 线性过滤 + 各向异性=1（低配优先首帧速度，避免 mip 链生成与三线性采样开销）
+    tex.generateMipmaps = false;
+    tex.minFilter = THREE.LinearFilter;
+    tex.anisotropy = 1;
+    tex.needsUpdate = true;
+    const img = tex.image as { width?: number; height?: number } | undefined;
+    const w = img?.width ?? 0;
+    const h = img?.height ?? 0;
+    if (!w || !h) return true;
+    const longest = Math.max(w, h);
+    // 大贴图缩尺寸：重绘到较小 canvas，首帧 GPU 上传量随之下降
+    if (longest > MAX) {
+      const scale = MAX / longest;
+      const nw = Math.max(1, Math.round(w * scale));
+      const nh = Math.max(1, Math.round(h * scale));
+      try {
+        const canvas = document.createElement('canvas');
+        canvas.width = nw;
+        canvas.height = nh;
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.drawImage(img as CanvasImageSource, 0, 0, nw, nh);
+          tex.image = canvas;
           tex.needsUpdate = true;
-          reduced++;
-          const img = tex.image as { width?: number; height?: number } | undefined;
-          const w = img?.width ?? 0;
-          const h = img?.height ?? 0;
-          if (!w || !h) continue;
-          const longest = Math.max(w, h);
-          // 大贴图缩尺寸：重绘到较小 canvas，首帧 GPU 上传量随之下降
-          if (longest > MAX) {
-            const scale = MAX / longest;
-            const nw = Math.max(1, Math.round(w * scale));
-            const nh = Math.max(1, Math.round(h * scale));
-            try {
-              const canvas = document.createElement('canvas');
-              canvas.width = nw;
-              canvas.height = nh;
-              const ctx = canvas.getContext('2d');
-              if (ctx) {
-                ctx.drawImage(img as CanvasImageSource, 0, 0, nw, nh);
-                tex.image = canvas;
-                tex.needsUpdate = true;
-              }
-            } catch {
-              /* 个别 ImageBitmap/跨域 drawImage 抛错则保留原图 */
-            }
-          }
         }
+      } catch {
+        /* 个别 ImageBitmap/跨域 drawImage 抛错则保留原图 */
       }
-    });
-    return reduced;
+    }
+    return true;
   }
 
   /**
@@ -1385,6 +1453,21 @@ export class MapScene {
 
     // 应用（叠加）校准微调量
     this.applyCalibration();
+    this.freezeModelMatrices();
+  }
+
+  /**
+   * 冻结模型子树的本地矩阵自动更新：GLB 放置完成后变换永不变化（校准只改 modelRoot 自身），
+   * 关闭子节点的 matrixAutoUpdate 后，每帧 updateMatrixWorld 只遍历、不再对每个节点做
+   * 四元数→矩阵的合成运算——几百个节点的场景上这是每帧一笔可观的纯 CPU 开销。
+   * 校准仍可用：modelRoot 自身保持自动更新，applyCalibration 的 updateMatrixWorld(true) 会强制重算。
+   */
+  private freezeModelMatrices(): void {
+    if (!this.modelRoot) return;
+    this.modelRoot.traverse((o) => {
+      if (o !== this.modelRoot) o.matrixAutoUpdate = false;
+    });
+    this.modelRoot.updateMatrixWorld(true);
   }
 
   /**
@@ -1674,12 +1757,19 @@ export class MapScene {
       if (!mesh.userData.__origMaterial) mesh.userData.__origMaterial = mesh.material;
       const orig = mesh.userData.__origMaterial;
       const origArr = Array.isArray(orig) ? orig : [orig];
+      // 材质克隆缓存：同一（原材质, 高亮色）组合只克隆一次，跨悬停/跨楼栋复用。
+      // 低配机器上 mousemove 扫过楼群时每栋楼都要克隆整套材质，缓存后复用零克隆开销。
       const cloned = origArr.map((m) => {
-        const c = (m as THREE.Material).clone();
-        const anyMat = c as unknown as { emissive?: THREE.Color; emissiveIntensity?: number };
-        if (anyMat.emissive) {
-          anyMat.emissive.copy(tint);
-          anyMat.emissiveIntensity = Math.max(anyMat.emissiveIntensity ?? 0, 0.6);
+        const cacheKey = `${color}|${(m as THREE.Material).uuid}`;
+        let c = this.highlightMatCache.get(cacheKey);
+        if (!c) {
+          c = (m as THREE.Material).clone();
+          const anyMat = c as unknown as { emissive?: THREE.Color; emissiveIntensity?: number };
+          if (anyMat.emissive) {
+            anyMat.emissive.copy(tint);
+            anyMat.emissiveIntensity = Math.max(anyMat.emissiveIntensity ?? 0, 0.6);
+          }
+          this.highlightMatCache.set(cacheKey, c);
         }
         return c;
       });
@@ -1689,15 +1779,12 @@ export class MapScene {
     this.markDirty();
   }
 
-  /** 清除高亮：还原原材质，并释放克隆材质避免显存泄漏 */
+  /** 清除高亮：还原原材质（缓存的高亮材质保留复用，不 dispose，随 destroy 统一释放） */
   clearHighlight(): void {
     if (!this.highlightedObject) return;
     this.highlightedObject.traverse((child) => {
       const mesh = child as THREE.Mesh;
       if (mesh.isMesh && mesh.userData.__origMaterial) {
-        const cur = mesh.material;
-        if (Array.isArray(cur)) cur.forEach((m) => m.dispose());
-        else (cur as THREE.Material)?.dispose?.();
         mesh.material = mesh.userData.__origMaterial;
         mesh.userData.__origMaterial = undefined;
       }
@@ -1954,6 +2041,7 @@ export class MapScene {
     this.setBuildingTranslucent(building, true);
     this.indoorView = true;
     this.indoorTarget = building;
+    this.markDirty(); // 材质半透明化 + 楼层分组需立即上屏（不依赖相机动画触发）
   }
 
   /** 退出室内视角（恢复原视角、还原建筑材质） */
@@ -1968,6 +2056,7 @@ export class MapScene {
       this.map.setRotation(this.savedCamera.rotation);
       this.savedCamera = null;
     }
+    this.markDirty(); // 材质还原需立即上屏
   }
 
   get isIndoorView(): boolean {
@@ -2001,6 +2090,7 @@ export class MapScene {
       this.setPitchSafe(mode === '2.5d' ? 35 : this.config.pitch);
     }
     this.map.setZoomAndCenter(zoom, center, true);
+    this.markDirty(); // 视角参数变化需立即上屏
   }
 
   // -------------------------------------------------------------------------
@@ -2242,6 +2332,7 @@ export class MapScene {
 
   /** 强制地图（含 GLCustomLayer）重绘一帧，确保量算图形即时可见 */
   private requestRender(): void {
+    this.frameCacheDirty = true; // 低配帧缓存：内容可能已变化，强制重绘一次场景
     if (!this.map) return;
     try {
       if (typeof this.map.render === 'function') this.map.render();
@@ -2461,6 +2552,8 @@ export class MapScene {
   // -------------------------------------------------------------------------
   /** 场景内容发生变化（加载模型 / 切换楼层 / 高亮 / 业务状态），唤醒地图重绘以反映变化 */
   private markDirty(): void {
+    // 场景内容变了：离屏缓存帧过期，下一帧需重新渲染场景（低配帧缓存路径）
+    this.frameCacheDirty = true;
     // AMap 自定义图层每帧都会清底图帧缓冲后回调 render()，render() 内总是重新叠加绘制模型。
     // 若地图当前处于空闲（不再持续回调），需主动唤醒一次重绘，否则变更要等用户下次交互才显示。
     if (typeof this.map?.render === 'function') this.map.render();
@@ -2497,6 +2590,8 @@ export class MapScene {
       this.camera.up.set(up[0], up[1], up[2]);
       this.camera.lookAt(lookAt[0], lookAt[1], lookAt[2]);
       this.camera.updateProjectionMatrix();
+      // 视角变了：缓存帧已过期，本帧需要重新渲染场景
+      this.frameCacheDirty = true;
     }
 
     // 取景迭代微调：此刻相机已与地图真实状态同步，按实测出画倍率逐步收敛到「刚好」
@@ -2508,12 +2603,82 @@ export class MapScene {
       }
     }
 
-    this.renderer.render(this.scene, this.camera);
+    if (this.lowEnd) {
+      // 低配：整场景绘制进离屏缓存，再全屏贴到本层画布。
+      // 视角/内容未变的帧只有「贴图」这一步（1 个 draw call），
+      // 替代整场景几百个 draw call 的重绘——空闲帧 CPU 从 90%+ 降到个位数。
+      this.renderWithFrameCache();
+    } else {
+      this.renderer.render(this.scene, this.camera);
+    }
 
     // 截图捕获：在渲染后、buffer 失效前读取
     if (this.captureResolve) this.readSnapshot();
 
     this.renderer.resetState();
+  }
+
+  /**
+   * 低配帧缓存渲染：把整场景画进离屏纹理，再以一次全屏贴图合成到本层画布。
+   * - 视角变化 / markDirty（高亮、房间、校准、测量等内容变化）→ 重绘一次场景并刷新缓存；
+   * - 其余帧（空闲时占绝大多数）只做一次全屏贴图（1 个 draw call），
+   *   替代整场景几百个 draw call 的重绘——低配机器空闲 CPU 90%+ 的主因即在此。
+   * AMap 每帧都会清空本层画布，所以「贴图」这一步每帧都不能省（省了模型会消失）。
+   */
+  private renderWithFrameCache(): void {
+    if (!this.renderer || !this.scene || !this.camera) return;
+    const size = new THREE.Vector2();
+    this.renderer.getDrawingBufferSize(size);
+    const key = `${size.x}x${size.y}`;
+    if (!this.frameRt || this.frameRtKey !== key) {
+      // 首次创建或画布尺寸变化（含窗口 resize / dpr 变化）→ 重建缓存
+      this.frameRt?.dispose();
+      this.frameRt = new THREE.WebGLRenderTarget(Math.max(1, size.x), Math.max(1, size.y), {
+        minFilter: THREE.LinearFilter,
+        magFilter: THREE.LinearFilter,
+        generateMipmaps: false,
+        depthBuffer: true,
+        stencilBuffer: false,
+      });
+      this.frameRtKey = key;
+      this.blitScene = null; // 重建贴图场景（材质引用了旧 RT 纹理）
+      this.frameCacheDirty = true;
+    }
+    if (!this.blitScene || !this.blitCam) {
+      // 全屏 quad：采样缓存纹理直接输出。
+      // - texture colorSpace 保持默认（线性）：场景渲染进 RT 时不做 sRGB 编码，
+      //   贴图时由 MeshBasicMaterial 的 colorspace_fragment 完成编码，与直绘路径一致；
+      // - toneMapped=false：色调映射已在场景渲染进 RT 时应用，贴图时不能再来一次；
+      // - transparent=true：用标准 alpha 混合叠加到 AMap 清空后的画布上，底图从下层透出。
+      const mat = new THREE.MeshBasicMaterial({
+        map: this.frameRt!.texture,
+        transparent: true,
+        depthTest: false,
+        depthWrite: false,
+        toneMapped: false,
+      });
+      const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), mat);
+      quad.frustumCulled = false;
+      this.blitScene = new THREE.Scene();
+      this.blitScene.add(quad);
+      this.blitCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+      this.frameCacheDirty = true;
+    }
+    if (this.frameCacheDirty) {
+      const prevRt = this.renderer.getRenderTarget();
+      this.renderer.setRenderTarget(this.frameRt);
+      // autoClear 全局为 false（保留底图约定），离屏 RT 需手动清成透明
+      this.renderer.setClearColor(0x000000, 0);
+      this.renderer.clear(true, true, false);
+      this.renderer.render(this.scene, this.camera);
+      this.renderer.setRenderTarget(prevRt);
+      this.frameCacheDirty = false;
+    }
+    // 全屏贴图合成（不清屏：AMap 已清空本层画布，底图在下层 canvas 由 DOM 合成透出）
+    const prevAutoClear = this.renderer.autoClear;
+    this.renderer.autoClear = false;
+    this.renderer.render(this.blitScene, this.blitCam);
+    this.renderer.autoClear = prevAutoClear;
   }
 
   /**
@@ -2548,6 +2713,21 @@ export class MapScene {
   destroy(): void {
     this.disposed = true;
     this.clearRooms();
+    // 低配帧缓存 / 贴图场景 / 高亮材质缓存：随渲染器一起释放
+    this.frameRt?.dispose();
+    this.frameRt = null;
+    this.frameRtKey = '';
+    this.blitScene?.traverse((o) => {
+      const m = o as THREE.Mesh;
+      if (m.isMesh) {
+        m.geometry?.dispose?.();
+        (m.material as THREE.Material)?.dispose?.();
+      }
+    });
+    this.blitScene = null;
+    this.blitCam = null;
+    this.highlightMatCache.forEach((m) => m.dispose());
+    this.highlightMatCache.clear();
     try {
       if (this.glLayer && this.map) this.map.remove(this.glLayer);
     } catch {

@@ -11,7 +11,8 @@
       <template v-else-if="status === 'loading-model'">
         <span class="spinner"></span>
         <strong>正在加载校园 GLB 模型…</strong>
-        <small v-if="modelProgress >= 0">{{ modelProgress }}%</small>
+        <small v-if="modelProgress >= 0 && modelProgress < 100">{{ modelProgress }}%</small>
+        <small v-if="modelStageText">{{ modelStageText }}</small>
       </template>
       <template v-else-if="status === 'error'">
         <strong class="err">{{ errorMessage }}</strong>
@@ -527,6 +528,22 @@ const status = ref<Status>('loading-amap');
 const errorMessage = ref('');
 const keyConfigured = ref(false);
 const modelProgress = ref(-1);
+// 模型加载后处理阶段（解码贴图 / 优化贴图 / 检测损坏贴图…）：进度到 100% 后仍有
+// 解析 + 贴图后处理 + 首帧准备等重活，低配机器上可达数十秒，必须显示当前步骤
+// 避免「卡在 100%」的观感
+const modelStage = ref('');
+const modelStageDone = ref(0);
+const modelStageTotal = ref(0);
+const modelStageText = computed(() => {
+  if (modelStage.value) {
+    return modelStageTotal.value > 0
+      ? `${modelStage.value} ${modelStageDone.value}/${modelStageTotal.value}`
+      : modelStage.value;
+  }
+  // 下载完成后、首个阶段回调前的窗口期是 GLB 同步解析（含贴图解码）
+  if (modelProgress.value >= 100) return '解析模型数据…';
+  return '';
+});
 
 const config: SceneConfig = DEFAULT_SCENE_CONFIG;
 // 属性数据源：优先从 GeoJSON / 后端 API 读取，失败则回退到内置示例数据
@@ -1365,6 +1382,11 @@ onMounted(async () => {
     };
     scene = new MapScene(mapContainer.value, config, {
       onModelProgress: (p) => (modelProgress.value = p),
+      onModelStage: (label, done, total) => {
+        modelStage.value = label;
+        modelStageDone.value = done ?? 0;
+        modelStageTotal.value = total ?? 0;
+      },
       onModelReady: () => {
         modelReady = true;
         objectList.value = scene?.listObjects() ?? [];

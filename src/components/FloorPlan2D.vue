@@ -208,23 +208,33 @@ function onStageMouseMove(e: MouseEvent): void {
     return;
   }
   if (dragKind.value === 'move') {
-    if (dragRoomId.value) {
-      const cur = fromScreen(e.clientX, e.clientY);
-      const cell = floorToCell(cur[0], cur[1]);
-      // 移动：按拖拽经过的网格单元数平移房间（保持尺寸），夹紧在 6×2 内
-      const dBi = cell.bi - dragStartCell.bi;
-      const dC = cell.c - dragStartCell.c;
-      const next = clampSpanKeepSize({
-        bi0: dragStartSpan.bi0 + dBi,
-        bi1: dragStartSpan.bi1 + dBi,
-        c0: dragStartSpan.c0 + dC,
-        c1: dragStartSpan.c1 + dC,
-      });
-      // 若目标位置被其它房间占据，则与对方互换单元，保持网格整洁
-      const occupant = Object.keys(gridPos).find(
-        (id) => id !== dragRoomId.value && overlaps(next, gridPos[id]!),
-      );
-      applySpan(dragRoomId.value, next, occupant);
+    const rid = dragRoomId.value;
+    if (rid) {
+      const g = gridGeom.value;
+      if (g) {
+        const cur = fromScreen(e.clientX, e.clientY);
+        // 移动算法（2026-10-08 重写）：「抓取点跟随 + 房间左上角吸附到最近网格」。
+        // 旧实现用「光标所在格 − 按下时光标所在格」推位移，但起始格是按 Math.round 把光标
+        // 位置映射的——抓取点只要偏离房间左上角（如抓房间正中，round(0.5)=1 会落到邻格），
+        // 起始格就错了：表现为有时要把鼠标拖过第二个房间才换位、有时一碰就跳格，且
+        // 向左 / 向右阈值不对称，位置不准确。新算法让房间左上角 = 光标位置 − 按下时的
+        // 抓取偏移，再吸附到最近格，抓哪里都一致，左右方向对称。
+        const cellW = g.width / ROOM_COLS;
+        const tC0 = Math.round((cur[0] - dragGrab.dx - g.minX) / cellW);
+        const tBi0 = cur[1] - dragGrab.dy < g.midY ? 0 : 1;
+        const next = clampSpanKeepSize({
+          bi0: tBi0,
+          bi1: tBi0 + (dragStartSpan.bi1 - dragStartSpan.bi0),
+          c0: tC0,
+          c1: tC0 + (dragStartSpan.c1 - dragStartSpan.c0),
+        });
+        if (next.c0 !== gridPos[rid]!.c0 || next.bi0 !== gridPos[rid]!.bi0) {
+          // 拖拽途中只移动被拖房间本身（允许视觉上暂时压到别的房间），不与沿途房间交换——
+          // 交换统一留到松手时按落点格做一次。此前「沿途逐格互换」会把其它房间来回搬运：
+          // 两间外观相同的房间互换后像「没反应」，继续拖又像「其它房间被拖到对应位置」。
+          gridPos[rid] = next;
+        }
+      }
     }
     return;
   }
@@ -244,11 +254,44 @@ function onStageMouseUp(e?: MouseEvent): void {
     dragKind.value = null;
     return;
   }
-  // move 已在 mousemove 实时更新网格定位，此处把最终位置写回 store 持久化
+  // move：拖拽途中只动了被拖房间（mousemove 实时更新网格定位），松手时按落点做一次交换并持久化
   if (kind === 'move' && dragRoomId.value) {
-    commitSpan(dragRoomId.value);
-    // 发生过拖拽（非纯点击）→ 抑制随后触发的 click，避免误切换选中态
-    if (dragMoved.value) suppressClickSelect = true;
+    const rid = dragRoomId.value;
+    if (dragMoved.value) {
+      const drop = gridPos[rid]!;
+      const dropOccupants = Object.keys(gridPos).filter(
+        (id) => id !== rid && overlaps(drop, gridPos[id]!),
+      );
+      if (dropOccupants.length === 1) {
+        // 落点格恰被一个房间占据 → 与其互换：它搬回被拖房间按下时的原位（按其自身尺寸锚定夹紧）
+        const occupant = dropOccupants[0]!;
+        const og = gridPos[occupant]!;
+        const anchored = clampSpanKeepSize({
+          bi0: dragStartSpan.bi0,
+          bi1: dragStartSpan.bi0 + (og.bi1 - og.bi0),
+          c0: dragStartSpan.c0,
+          c1: dragStartSpan.c0 + (og.c1 - og.c0),
+        });
+        // 被换房间回到原位后若压到第三方房间（多格房间换入小格的少见场景）→ 放弃交换，回弹原位
+        const third = Object.keys(gridPos).some(
+          (id) => id !== rid && id !== occupant && overlaps(anchored, gridPos[id]!),
+        );
+        if (!third) {
+          gridPos[occupant] = anchored;
+          commitSpan(rid);
+          commitSpan(occupant);
+        } else {
+          gridPos[rid] = { ...dragStartSpan };
+          commitSpan(rid);
+        }
+      } else {
+        // 落点为空 → 直接落位；同时压到 2 个及以上房间 → 视为无效落点，回弹到按下时的原位
+        if (dropOccupants.length > 1) gridPos[rid] = { ...dragStartSpan };
+        commitSpan(rid);
+      }
+      // 发生过拖拽（非纯点击）→ 抑制随后触发的 click，避免误切换选中态
+      suppressClickSelect = true;
+    }
   }
   isDragging.value = false;
   dragKind.value = null;
@@ -686,14 +729,19 @@ function alignSource(p: [number, number]): [number, number] {
   return [dx * c - dy * s + cx, dx * s + dy * c + cy];
 }
 
-/** 投影中心：取本层全部点（外轮廓 + 房间）「源对齐转正」后的质心，用作错切的居中基准，
- *  使整栋建筑绕自身中心错切、不再整体向右偏移（避免右侧边被过度拉开成「右倾」）。 */
+/** 投影中心：取楼层外轮廓「源对齐转正」后的质心，用作错切的居中基准，
+ *  使整栋建筑绕自身中心错切、不再整体向右偏移（避免右侧边被过度拉开成「右倾」）。
+ *  注意（2026-10-08）：房间轮廓不参与 —— 否则拖拽换位提交新轮廓后质心变化，
+ *  整层会平移跳一下（表现为「互换后整个图层动一下」）。无外轮廓时才兜底用房间。 */
 const projectionCenter = computed(() => {
   const pts: [number, number][] = [];
   const outline =
     (props.embedded && props.preview ? props.preview.outline : currentFloor.value?.outline) ?? [];
-  for (const p of outline) pts.push(p);
-  for (const r of displayedRooms.value) for (const p of polyOf(r)) pts.push(p);
+  if (outline.length >= 3) {
+    for (const p of outline) pts.push(p);
+  } else {
+    for (const r of displayedRooms.value) for (const p of polyOf(r)) pts.push(p);
+  }
   if (!pts.length) return { x: 0, y: 0 };
   let sx = 0;
   let sy = 0;
@@ -732,7 +780,10 @@ function projectXY(ax: number, ay: number, z: number): [number, number] {
 }
 
 const fit = computed(() => {
-  // 先按投影算整层（含墙顶 z=wallHeight）的屏幕包围盒，再求缩放与居中
+  // 先按投影算整层的屏幕包围盒，再求缩放与居中。
+  // 注意（2026-10-08）：有外轮廓时只用外轮廓计算 —— 此前把房间轮廓也纳入，拖拽换位松手
+  // 提交新轮廓后包围盒变化 → 缩放/平移跳一下（「整个图层动一下」），房间布局不得影响取景。
+  // 外轮廓在 z=0 也纳入：房间块画在 z=0，其投影范围不会超出外轮廓，故包围盒仍然完整、不裁切。
   let minIX = Infinity, maxIX = -Infinity, minIY = Infinity, maxIY = -Infinity;
   const consider = (x: number, y: number, z: number) => {
     const [ax, ay] = alignSource([x, y]);
@@ -745,13 +796,17 @@ const fit = computed(() => {
   const outline =
     (props.embedded && props.preview ? props.preview.outline : currentFloor.value?.outline) ?? [];
   for (const pt of outline) {
+    consider(pt[0], pt[1], 0); // 楼板底面（外轮廓 z=0 投影，是整层最低点）
     consider(pt[0], pt[1], BUILDING_H); // 楼板顶面（第 1 步地板）须纳入包围盒，避免被裁切
     consider(pt[0], pt[1], BUILDING_H + WALL_H); // 房间之间隔墙顶面（抬升 0.5m）亦须纳入，避免被裁切
   }
-  for (const r of displayedRooms.value) {
-    for (const pt of polyOf(r)) {
-      consider(pt[0], pt[1], 0);
-      consider(pt[0], pt[1], wallHeight.value);
+  // 兜底：无外轮廓（未导入楼层）时用房间包围盒（演示房间轮廓静态不变，不影响取景稳定性）
+  if (outline.length < 3) {
+    for (const r of displayedRooms.value) {
+      for (const pt of polyOf(r)) {
+        consider(pt[0], pt[1], 0);
+        consider(pt[0], pt[1], wallHeight.value);
+      }
     }
   }
   if (!isFinite(minIX)) {
@@ -889,14 +944,6 @@ function rectToPolygon(r: [number, number, number, number]): [number, number][] 
     [x1, y1],
     [x0, y1],
   ];
-}
-/** 楼层世界坐标 → 网格单元（用于拖拽定位） */
-function floorToCell(fx: number, fy: number): { bi: number; c: number } {
-  const g = gridGeom.value;
-  if (!g) return { bi: 0, c: 0 };
-  const c = Math.min(ROOM_COLS - 1, Math.max(0, Math.round(((fx - g.minX) / g.width) * ROOM_COLS)));
-  const bi = fy < g.midY ? 0 : 1;
-  return { bi, c };
 }
 /** 按真实房间出现顺序铺入 6×2 网格；已存在（如编辑后）的单元定位保留 */
 function initGridPos(): void {
@@ -1955,17 +2002,11 @@ const dragCorner = ref(0);
 /** 编辑前房间快照（用于「未点完成直接关闭」时一键回滚） */
 let editSnapshot: ReturnType<typeof store.roomsOfFloor> | null = null;
 let editFid: string | null = null;
-const dragStartFloor = reactive({ x: 0, y: 0 });
-/** 拖拽起始时的网格单元（光标所在格）与房间原始 span，用于移动/缩放的增量计算 */
-let dragStartCell = { bi: 0, c: 0 };
+/** 按下时光标相对房间矩形左上角的世界坐标偏移：拖拽中房间左上角 = 光标 − 该偏移，再吸附到最近格 */
+let dragGrab = { dx: 0, dy: 0 };
+/** 拖拽起始时的房间原始 span，用于移动的增量计算 */
 let dragStartSpan = { bi0: 0, bi1: 0, c0: 0, c1: 0 };
 
-/** 把一个房间移动到新 span，若新位置与另一房间重叠则与之互换（保持网格整洁） */
-function applySpan(id: string, next: { bi0: number; bi1: number; c0: number; c1: number }, swapWith?: string): void {
-  const old = gridPos[id];
-  gridPos[id] = next;
-  if (swapWith && gridPos[swapWith] && old) gridPos[swapWith] = old;
-}
 /** 把某个单元范围夹紧在 6×2 内，并保持尺寸不变（用于移动） */
 function clampSpanKeepSize(s: { bi0: number; bi1: number; c0: number; c1: number }): { bi0: number; bi1: number; c0: number; c1: number } {
   const w = s.c1 - s.c0;
@@ -1999,6 +2040,15 @@ function isHighlighted(id: string): boolean {
 }
 /** 当前选中的房间块（供「内嵌描边」选中高亮渲染） */
 const selectedBlocks = computed(() => roomBlocks.value.filter((rb) => isHighlighted(rb.room.id)));
+/** 渲染顺序：拖拽中的房间置顶（最后绘制）。拖拽途中允许暂时压到别的房间，置顶保证被拖房间不被邻房/隔墙盖住看不清 */
+const dragTopBlocks = computed<RoomBlock[]>(() => {
+  const arr = [...roomBlocks.value];
+  if (dragKind.value === 'move' && dragRoomId.value) {
+    const i = arr.findIndex((rb) => rb.room.id === dragRoomId.value);
+    if (i >= 0) arr.push(arr.splice(i, 1)[0]!);
+  }
+  return arr;
+});
 function toggleSelect(id: string): void {
   const i = selectedIds.value.indexOf(id);
   if (i >= 0) selectedIds.value = selectedIds.value.filter((x) => x !== id);
@@ -2036,7 +2086,7 @@ function onSelectRoom(room: RoomLike, _ev?: MouseEvent): void {
   selectedId.value = room.id;
 }
 
-/** 编辑模式：在房间体上按下——仅启动拖拽移动的准备（记录起始格 / 房间 id），不改动选中态；
+/** 编辑模式：在房间体上按下——仅启动拖拽移动的准备（记录抓取偏移 / 房间 id），不改动选中态；
  *  选中（含多选）统一在 @click（onSelect→onSelectRoom）里完成，保证多选可累积。 */
 function onRoomDown(room: RoomLike, ev: MouseEvent): void {
   if (!editMode.value) return; // 非编辑模式不拦截，走原 onSelect/弹窗
@@ -2046,9 +2096,10 @@ function onRoomDown(room: RoomLike, ev: MouseEvent): void {
   dragRoomId.value = room.id;
   dragStartSpan = { ...(gridPos[room.id] ?? idxToSpan(0)) };
   const p = fromScreen(ev.clientX, ev.clientY);
-  dragStartFloor.x = p[0];
-  dragStartFloor.y = p[1];
-  dragStartCell = floorToCell(p[0], p[1]);
+  // 记录抓取点在房间矩形内的偏移：拖拽中房间左上角 = 光标 − 偏移，保证抓哪里、房间就跟到哪里
+  const rect = spanToRect(dragStartSpan);
+  dragGrab.dx = p[0] - rect[0];
+  dragGrab.dy = p[1] - rect[1];
   isDragging.value = true;
   dragMoved.value = false;
   dragStart = { x: ev.clientX, y: ev.clientY, panX: panX.value, panY: panY.value };
@@ -2361,10 +2412,11 @@ function enterEdit(): void {
               pointer-events="none"
             />
             <!-- ③ 房间平铺色块（6×2 网格）：浏览 / 编辑 共用同一套渲染，保证「编辑前后画面完全一致」。
-                 编辑模式下可点击选中 / 拖拽移动（@mousedown），选中单间显示四角缩放手柄。 -->
+                 编辑模式下可点击选中 / 拖拽移动（@mousedown），选中单间显示四角缩放手柄；
+                 用 dragTopBlocks 让拖拽中的房间最后绘制（置顶），避免压到邻房下面看不清。 -->
             <template
               v-if="renderStage >= 3"
-              v-for="rb in roomBlocks"
+              v-for="rb in dragTopBlocks"
               :key="rb.id"
             >
               <g

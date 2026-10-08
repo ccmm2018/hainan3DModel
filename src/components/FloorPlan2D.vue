@@ -904,6 +904,19 @@ function initGridPos(): void {
   rooms.forEach((r, i) => {
     if (!gridPos[r.id]) gridPos[r.id] = idxToSpan(i);
   });
+  syncDemoGridPos();
+}
+
+/** 演示房间（楼层无入库房间时的示意预览）也纳入网格定位：保证编辑模式下拖动演示房间同样生效；
+ *  一旦出现真实入库房间，则清掉演示房间的网格定位，避免幽灵格子占用网格影响新增 / 合并判断。 */
+function syncDemoGridPos(): void {
+  if (displayedRooms.value.length) {
+    for (const k of Object.keys(gridPos)) if (k.startsWith('demo_')) delete gridPos[k];
+    return;
+  }
+  genDemoRooms().forEach(({ room }, i) => {
+    if (!gridPos[room.id]) gridPos[room.id] = idxToSpan(i);
+  });
 }
 watch(displayedRooms, () => initGridPos(), { immediate: true });
 
@@ -929,7 +942,10 @@ const roomBlocks = computed<RoomBlock[]>(() => {
     : demos.map((d) => effectiveRoom(d.room)).filter((r) => r.selected !== false);
 
   source.forEach((room, idx) => {
-    const span = hasReal ? gridPos[room.id] ?? idxToSpan(idx) : idxToSpan(idx);
+    // 浏览 / 编辑 / 演示统一以 gridPos 为准（2026-10-08 修复）：此前演示房间（无入库房间时的
+    // 示意预览）忽略 gridPos、永远按 idxToSpan(idx) 渲染，导致编辑模式下提示「拖动房间可换位置」
+    // 而实际拖动毫无效果（applySpan 改了 gridPos，画面却纹丝不动）。
+    const span = gridPos[room.id] ?? idxToSpan(idx);
     const [wx0, wy0, wx1, wy1] = spanToRect(span);
     const t0 = P(wx0, wy0, zTop);
     const t1 = P(wx1, wy0, zTop);
@@ -1962,8 +1978,9 @@ function clampSpanKeepSize(s: { bi0: number; bi1: number; c0: number; c1: number
 function overlaps(a: { bi0: number; bi1: number; c0: number; c1: number }, b: { bi0: number; bi1: number; c0: number; c1: number }): boolean {
   return a.bi0 <= b.bi1 && a.bi1 >= b.bi0 && a.c0 <= b.c1 && a.c1 >= b.c0;
 }
-/** 提交：把房间当前网格 span 转成世界坐标矩形并写回 store（持久化） */
+/** 提交：把房间当前网格 span 转成世界坐标矩形并写回 store（持久化）。演示房间不入库，直接跳过 */
 function commitSpan(id: string): void {
+  if (id.startsWith('demo_')) return; // 演示房间是合成数据，store 中不存在，无需（也无法）持久化
   const f = currentFloor.value;
   const s = gridPos[id];
   if (!f || !s) return;
@@ -2199,6 +2216,7 @@ function rebuildGrid(): void {
   displayedRooms.value.forEach((r, i) => {
     gridPos[r.id] = idxToSpan(i);
   });
+  syncDemoGridPos();
 }
 
 /** 弹窗（el-dialog）关闭时：若仍在编辑态且未点「完成」，则回滚本次编辑 */
@@ -2493,7 +2511,11 @@ function enterEdit(): void {
                   <el-button size="small" type="success" @click="exitEdit(true)">完成</el-button>
                   <el-button size="small" @click="exitEdit(false)">取消</el-button>
                 </div>
-                <span class="fpv-tools__hint">拖动房间可换位置；房间号 / 名称 / 部门等资料请在退出编辑后点房间 →「修改信息」填写</span>
+                <span class="fpv-tools__hint">
+                  {{ hasRealRooms
+                    ? '拖动房间可换位置；房间号 / 名称 / 部门等资料请在退出编辑后点房间 →「修改信息」填写'
+                    : '示意预览：拖动房间可调整布局（仅本次浏览生效，导入图纸后编辑真实房间才会保存）' }}
+                </span>
               </template>
             </div>
           </section>

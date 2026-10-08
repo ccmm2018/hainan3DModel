@@ -1,0 +1,22 @@
+- generic [ref=e3]:
+  - generic [ref=e4]:
+    - iframe [ref=e5]
+    - generic [ref=e8]: © 2026 AutoNavi
+  - strong [ref=e11]: 正在加载校园 GLB 模型…
+  - generic: 海南警察学院 · 3D 可视化场景
+  - generic [ref=e12]:
+    - generic [ref=e13]:
+      - generic [ref=e14]: 视图
+      - button "2D" [ref=e15] [cursor=pointer]
+      - button "2.5D" [ref=e16] [cursor=pointer]
+      - button "三维" [ref=e17] [cursor=pointer]
+      - button "室内" [ref=e18] [cursor=pointer]
+    - generic [ref=e19]:
+      - generic [ref=e20]: 量算
+      - button "测距" [ref=e21] [cursor=pointer]
+      - button "测面" [ref=e22] [cursor=pointer]
+      - button "清除" [ref=e23] [cursor=pointer]
+    - button "打印 / 导出" [ref=e24] [cursor=pointer]
+    - button "校准" [ref=e25] [cursor=pointer]
+  - textbox "搜索建筑名称，回车定位…" [ref=e27]
+  - generic: 点击模型拾取建筑 · 双击进入室内视角 · 悬停显示名称 · 输入搜索定位

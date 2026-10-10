@@ -190,6 +190,8 @@ export class MapScene {
   private buildingBoxes: { obj: THREE.Object3D; box: THREE.Box3 }[] = [];
   /** 校准拖拽时阴影重算的防抖定时器（避免每次 setCalibration 都重算阴影图） */
   private shadowUpdateTimer: number | null = null;
+  /** 重绘排程标志：将分散在各处的 map.render() 合并为「每动画帧至多一次」，消除重绘风暴（悬停扫楼/拖拽/量算时 CPU 尖峰的主因） */
+  private renderScheduled = false;
 
   /** 楼盘表：房间格子可视化 */
   private roomGroup: THREE.Group | null = null;
@@ -2494,16 +2496,10 @@ export class MapScene {
     this.requestRender();
   }
 
-  /** 强制地图（含 GLCustomLayer）重绘一帧，确保量算图形即时可见 */
+  /** 强制地图（含 GLCustomLayer）重绘一帧，确保量算图形即时可见。走 scheduleRender 合并，避免重绘风暴 */
   private requestRender(): void {
     this.frameCacheDirty = true; // 低配帧缓存：内容可能已变化，强制重绘一次场景
-    if (!this.map) return;
-    try {
-      if (typeof this.map.render === 'function') this.map.render();
-      else if (typeof this.map.resize === 'function') this.map.resize();
-    } catch {
-      /* ignore */
-    }
+    this.scheduleRender();
   }
 
   private reportMeasure(): void {
@@ -2715,10 +2711,34 @@ export class MapScene {
   // 渲染循环
   // -------------------------------------------------------------------------
   /** 场景内容发生变化（加载模型 / 切换楼层 / 高亮 / 业务状态），唤醒地图重绘以反映变化 */
+  /**
+   * 合并整帧重绘：把分散在各处的 map.render()（悬停高亮、校准拖拽、量算、房间切换等）
+   * 收敛为「每个动画帧至多一次」。高德 GLCustomLayer 的 render() 每次都会重渲整张底图，
+   * 若一帧内被多次调用等于把底图重画 N 遍，是鼠标扫楼 / 拖拽时 CPU 飙升与卡顿的主因。
+   * 用 rAF 排程后，同一帧内的多次触发只落地一次 map.render()，且落在浏览器绘制前的正确时机，
+   * 既不丢高亮、也不会与高德自身的动画渲染循环发生重入式叠加。
+   */
+  private scheduleRender(): void {
+    if (!this.map || typeof this.map.render !== 'function') return;
+    if (this.renderScheduled) return; // 本帧已排程，合并后续触发
+    this.renderScheduled = true;
+    requestAnimationFrame(() => {
+      this.renderScheduled = false;
+      if (this.disposed || !this.map) return;
+      try {
+        this.map.render();
+      } catch {
+        /* ignore */
+      }
+    });
+  }
+
   private markDirty(): void {
     // 直接渲染模式下，内容变化无需特殊标记：下一帧 render() 自然会直绘出最新状态。
     // 仅需在地图空闲（AMap 停止持续回调 render()）时主动唤醒一次，让变更立即上屏。
-    if (typeof this.map?.render === 'function') this.map.render();
+    // 唤醒走 scheduleRender() 合并：同一动画帧内多次 markDirty 只触发一次整帧重绘，
+    // 避免悬停扫楼 / 校准拖拽时高频调用 map.render() 造成的「重绘风暴」与 CPU 尖峰。
+    this.scheduleRender();
   }
 
   private render(): void {

@@ -29,7 +29,7 @@
  */
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
-import { CircleCloseFilled, WarningFilled } from '@element-plus/icons-vue';
+import { CircleCloseFilled, WarningFilled, Plus, Delete, Connection, Refresh, Upload } from '@element-plus/icons-vue';
 import { useBuildingStore } from '../stores/building';
 import { isRoomFieldComplete } from '../utils/roomFields';
 import { cleanName } from '../utils/roomName';
@@ -304,6 +304,7 @@ function onStageMouseLeave(): void {
 onMounted(() => {
   window.addEventListener('mousemove', onStageMouseMove);
   window.addEventListener('mouseup', onStageMouseUp);
+  if (visible.value && !props.embedded) maybeShowGuide();
 });
 onBeforeUnmount(() => {
   window.removeEventListener('mousemove', onStageMouseMove);
@@ -1016,6 +1017,23 @@ const roomBlocks = computed<RoomBlock[]>(() => {
     const dept = room.dept || '—';
     const area = `${room.useArea > 0 ? room.useArea.toFixed(2) : '—'}㎡ / ${room.buildArea > 0 ? room.buildArea.toFixed(2) : '—'}㎡`;
 
+    // 状态色条：沿顶面「朝观察者前缘」(t3→t2) 画一条细带，颜色恒为业务使用状态色，与图例一致。
+    // 取前缘中点相对房间中心的内法线方向，向内推 thk 像素，得到一条贴边的细色带（画在顶面之下，仅露出贴边部分）。
+    const emX = (t3[0] + t2[0]) / 2;
+    const emY = (t3[1] + t2[1]) / 2;
+    let inx = cx - emX;
+    let iny = cy - emY;
+    const inl = Math.hypot(inx, iny) || 1;
+    inx /= inl;
+    iny /= inl;
+    const thk = Math.max(2, Math.min(4, roomHpx * 0.18));
+    const statusColor = room.useStatus ? USE_COLORS[room.useStatus] : UNASSIGNED_FILL;
+    const statusBar =
+      `${t3[0].toFixed(1)},${t3[1].toFixed(1)} ` +
+      `${t2[0].toFixed(1)},${t2[1].toFixed(1)} ` +
+      `${(t2[0] + inx * thk).toFixed(1)},${(t2[1] + iny * thk).toFixed(1)} ` +
+      `${(t3[0] + inx * thk).toFixed(1)},${(t3[1] + iny * thk).toFixed(1)}`;
+
     blocks.push({
       id: room.id,
       room,
@@ -1040,6 +1058,8 @@ const roomBlocks = computed<RoomBlock[]>(() => {
       yArea: top + gap * 3,
       sizeNumber,
       sizeOther,
+      statusColor,
+      statusBar,
     });
   });
   return blocks;
@@ -1224,6 +1244,11 @@ interface RoomBlock {
   yArea: number;
   sizeNumber: number;
   sizeOther: number;
+  /** 状态色条：沿房间顶面「朝观察者前缘」的一条细色带，颜色恒为业务使用状态色（与图例一致），
+   *  与当前「着色」模式无关——即便按部门/用途分色，也能一眼扫出每间房的使用状态，无需在画布与图例间来回对照。
+   *  多边形四点：前缘两角 → 向内推 thk 像素，画在顶面之下，仅露出贴边的一条细带。 */
+  statusColor: string;
+  statusBar: string;
 }
 
 /** 房间之间的「隔墙」（抬升 0.5m 的矮墙，表达凹凸感）：一个墙体盒子 = 4 个侧面 + 1 个顶面。 */
@@ -1614,7 +1639,14 @@ const outlinePath = computed<string>(() => {
   );
 });
 
-const legend = computed(() => {
+interface LegendItem {
+  label: string;
+  color: string;
+  /** 仅「业务状态」着色模式下有值：该图例项对应的可赋值状态；其余模式为 undefined（只读） */
+  value?: UseStatus;
+}
+
+const legend = computed<LegendItem[]>(() => {
   if (effectiveColorMode.value === 'inspect') {
     return (Object.keys(INSPECT_COLORS) as InspectStatus[]).map((k) => ({
       label: INSPECT_LABELS[k],
@@ -1622,11 +1654,12 @@ const legend = computed(() => {
     }));
   }
   if (effectiveColorMode.value === 'use') {
+    // 业务状态着色：每项都带可赋值状态 value，编辑态下图例即「状态选择器」
     return (Object.keys(USE_COLORS) as Exclude<UseStatus, ''>[])
-      .map((k) => ({ label: USE_LABELS[k], color: USE_COLORS[k] }))
-      .concat([{ label: USE_LABELS[''], color: UNASSIGNED_FILL }]);
+      .map((k) => ({ label: USE_LABELS[k], color: USE_COLORS[k], value: k as UseStatus }))
+      .concat([{ label: USE_LABELS[''], color: UNASSIGNED_FILL, value: '' as UseStatus }]);
   }
-  // dept / purpose：取实际出现的类别
+  // dept / purpose：取实际出现的类别（仅作颜色对照，无单一可赋状态，只读）
   const map = new Map<string, string>();
   for (const r of displayedRooms.value) {
     const key = effectiveColorMode.value === 'dept' ? r.dept : r.usePurpose;
@@ -1635,6 +1668,26 @@ const legend = computed(() => {
   if (!map.size) map.set('（无）', '#cbd5e1');
   return [...map.entries()].map(([label, color]) => ({ label, color }));
 });
+
+// ---- 统计信息（浏览态大数字 + 色点，按当前楼层各业务使用状态计数）----
+const STATUS_ORDER: UseStatus[] = ['occupied', 'vacant', 'noaccess', ''];
+const floorStats = computed(() => {
+  const counts: Record<string, number> = { occupied: 0, vacant: 0, noaccess: 0, '': 0 };
+  for (const r of displayedRooms.value) {
+    const s = (r.useStatus || '') as string;
+    counts[s] = (counts[s] ?? 0) + 1;
+  }
+  return { total: displayedRooms.value.length, counts };
+});
+/** 统计明细项：仅列有数量的业务状态，便于一眼扫读（使用中/空置/无权限/未分配） */
+const statusStatItems = computed(() =>
+  STATUS_ORDER.map((k) => ({
+    key: k,
+    label: USE_LABELS[k],
+    color: k ? USE_COLORS[k as Exclude<UseStatus, ''>] : UNASSIGNED_FILL,
+    count: floorStats.value.counts[k] ?? 0,
+  })).filter((s) => s.count > 0),
+);
 
 // ---- 交互：仅点击选中弹出小卡片（已移除 hover tooltip，避免遮挡与误触）----
 const selectedId = ref<string | null>(null);
@@ -1811,6 +1864,12 @@ function onSelect(room: RoomLike, ev?: MouseEvent): void {
       suppressClickSelect = false;
       return;
     }
+    // 编辑态 + 已选业务状态（图例即状态选择器）：点房间即把该状态赋给它，便于逐个房间快速标注
+    if (armedStatus.value !== null) {
+      applyUseStatusToRoom(room, armedStatus.value);
+      selectedId.value = room.id; // 高亮反馈刚标注的房间
+      return;
+    }
     onSelectRoom(room, ev);
     return;
   }
@@ -1849,16 +1908,29 @@ function isRealRoom(r: RoomLike | null): boolean {
   return !!r && displayedRooms.value.some((x) => x.id === r.id);
 }
 
+/** 把业务状态赋给指定房间（真实房间写 store / 合成预览房间写本地覆盖），供弹窗「修改信息」与「图例状态选择器」共用 */
+function applyUseStatusToRoom(room: RoomLike, status: UseStatus): void {
+  if (isRealRoom(room)) {
+    const f = currentFloor.value;
+    if (f) store.setRoomUseStatus(f.id, room.id, status);
+  } else {
+    // 合成预览房间：写入本地覆盖，弹窗即时反映
+    synthOverrides[room.id] = { ...(synthOverrides[room.id] ?? {}), useStatus: status } as Partial<RoomLike>;
+  }
+}
 function setUseStatus(status: UseStatus): void {
   const r = liveRoom.value;
   if (!r) return;
-  if (isRealRoom(r)) {
-    const f = currentFloor.value;
-    if (f) store.setRoomUseStatus(f.id, r.id, status);
-  } else {
-    // 合成预览房间：写入本地覆盖，弹窗即时反映
-    synthOverrides[r.id] = { ...(synthOverrides[r.id] ?? {}), useStatus: status } as Partial<RoomLike>;
-  }
+  applyUseStatusToRoom(r, status);
+}
+/** 业务状态 → 中文文案（图例提示用） */
+function statusLabelOf(s: UseStatus | null): string {
+  return s == null ? '' : USE_LABELS[s] ?? String(s);
+}
+/** 图例项点击：编辑态下作为状态选择器 —— 选中/取消待赋值状态 */
+function onLegendClick(item: LegendItem): void {
+  if (!legendClickable.value || item.value === undefined) return;
+  armedStatus.value = armedStatus.value === item.value ? null : item.value;
 }
 function hideRoom(): void {
   const r = selectedRoom.value;
@@ -1995,6 +2067,13 @@ function showAllRooms(): void {
 // ---- 楼层编辑模式：房间 增 / 删 / 改 / 查（合并 / 移动 / 缩放 / 新增） ----
 // 仅在 store 模式（非嵌入预览）可用；编辑的是真实入库房间（roomFills），合成网格在编辑模式下隐藏。
 const editMode = ref(false);
+/**
+ * 编辑态「图例即状态选择器」：当前已选中的待赋值业务状态。
+ * 选中后点房间即把该状态赋给它（逐个房间快速标注）；再点同一状态可取消。null = 未选（普通编辑）。
+ */
+const armedStatus = ref<UseStatus | null>(null);
+/** 图例是否可点击（= 编辑态 + 业务状态着色）；此时图例从只读色卡变为状态选择器 */
+const legendClickable = computed(() => editMode.value && colorMode.value === 'use' && !props.embedded);
 const activeTool = ref<'select' | 'add'>('select');
 const dragKind = ref<null | 'pan' | 'move' | 'resize' | 'draw' | 'rotate'>(null);
 const dragRoomId = ref<string | null>(null);
@@ -2235,6 +2314,7 @@ function exitEdit(commit: boolean): void {
     editSnapshot = null;
     editFid = null;
     editMode.value = false;
+    armedStatus.value = null; // 退出编辑态清空状态选择器
     activeTool.value = 'select';
     selectedIds.value = [];
     draftRect.value = null;
@@ -2253,6 +2333,7 @@ function cancelEdit(): void {
   editFid = null;
   rebuildGrid();
   editMode.value = false;
+  armedStatus.value = null; // 取消编辑清空状态选择器
   activeTool.value = 'select';
   selectedIds.value = [];
   draftRect.value = null;
@@ -2272,8 +2353,94 @@ function rebuildGrid(): void {
 
 /** 弹窗（el-dialog）关闭时：若仍在编辑态且未点「完成」，则回滚本次编辑 */
 function onDialogClose(): void {
+  // 正常关闭路径（返回室外 / before-close）已在关闭前处理编辑态；
+  // 此处仅作为兜底：若仍以编辑态被强制关闭，则回滚，避免意外持久化半成品。
   if (editMode.value) cancelEdit();
 }
+
+/**
+ * 关闭（返回室外 / 关闭按钮 / 点遮罩 / ESC）的拦截逻辑（建议 2）。
+ * 编辑态且有未保存修改时弹二次确认，避免用户修改被无声丢弃。
+ * close() 为真正关闭回调：按钮路径用 performClose（置 visible=false），before-close 路径用 el-dialog 的 done。
+ */
+function isEditDirty(): boolean {
+  if (!editFid || !editSnapshot) return false;
+  const cur = store.roomsOfFloor(editFid);
+  return JSON.stringify(cur) !== JSON.stringify(editSnapshot);
+}
+function performClose(): void {
+  visible.value = false;
+}
+function confirmCloseIfNeeded(close: () => void): void {
+  if (!editMode.value) {
+    close();
+    return;
+  }
+  if (!isEditDirty()) {
+    // 无实际改动：等价于完成，直接收尾并关闭
+    exitEdit(true);
+    close();
+    return;
+  }
+  ElMessageBox.confirm('有未保存的修改，是否保存？', '离开编辑', {
+    confirmButtonText: '保存并退出',
+    cancelButtonText: '不保存退出',
+    type: 'warning',
+    distinguishCancelAndClose: true,
+    closeOnClickModal: false,
+    showClose: false,
+  })
+    .then(() => {
+      // 保存并退出：编辑已即时写入 store，仅清理临时态
+      exitEdit(true);
+      close();
+    })
+    .catch((action: string) => {
+      if (action === 'cancel') {
+        // 不保存：回滚至进入前快照
+        exitEdit(false);
+        close();
+      }
+      // action === 'close'（点 X / ESC / 点遮罩）：留在编辑态，不关闭
+    });
+}
+/** 顶部「返回室外」按钮 */
+function requestClose(): void {
+  confirmCloseIfNeeded(performClose);
+}
+/** el-dialog 的 before-close（关闭按钮 / 点遮罩 / ESC） */
+function onBeforeClose(done: () => void): void {
+  confirmCloseIfNeeded(done);
+}
+
+// ---- 首次进入引导（仅弹一次，点「知道了」后不再出现）----
+function maybeShowGuide(): void {
+  try {
+    if (localStorage.getItem('fpv_guide_v1')) return;
+  } catch {
+    /* localStorage 不可用时直接跳过引导 */
+  }
+  ElMessageBox.alert(
+    '颜色代表房间使用状态：<b>绿=使用中</b>、<b>蓝=空置</b>、<b>灰虚线=未分配</b>、<b>灰斜纹=无权限</b>。' +
+      '浏览时点房间看详情；点右上角「编辑」可改状态——编辑态下先点图例里的状态、再点房间即可逐个快速赋值。',
+    '快速上手',
+    {
+      confirmButtonText: '知道了',
+      showClose: false,
+      dangerouslyUseHTMLString: true,
+      callback: () => {
+        try {
+          localStorage.setItem('fpv_guide_v1', '1');
+        } catch {
+          /* ignore */
+        }
+      },
+    },
+  );
+}
+watch(visible, (v) => {
+  if (v && !props.embedded) maybeShowGuide();
+});
 
 /** 框选新增时的草稿矩形（project 输出空间） */
 /** 是否存在真实入库房间（决定编辑模式下是否隐藏合成演示网格） */
@@ -2313,6 +2480,7 @@ function enterEdit(): void {
   editSnapshot = JSON.parse(JSON.stringify(store.roomsOfFloor(f.id)));
   rebuildGrid();
   editMode.value = true;
+  armedStatus.value = null; // 进入编辑态清空状态选择器
   activeTool.value = 'select';
   selectedIds.value = [];
   selectedRoom.value = null;
@@ -2332,12 +2500,13 @@ function enterEdit(): void {
       :fullscreen="fullscreen"
       :show-close="true"
       class="fpv-dialog"
+      :before-close="onBeforeClose"
       @close="onDialogClose"
     >
     <template #header>
       <div class="fpv__head">
         <strong class="fpv__title">{{ buildingName }} · 楼宇分层图（2.5D）</strong>
-        <el-button link type="primary" @click="visible = false">← 返回室外</el-button>
+        <el-button link type="primary" @click="requestClose">← 返回室外</el-button>
       </div>
     </template>
     <el-empty v-if="!floors.length" description="该楼尚未导入楼层平面图（DXF），下方为示意预览，可先浏览；导入后可编辑真实房间">
@@ -2427,6 +2596,7 @@ function enterEdit(): void {
                 @mousedown="editMode ? onRoomDown(rb.room, $event) : undefined"
               >
                 <polygon :points="rb.topPoints" :fill="rb.topFill" :stroke="rb.stroke" :stroke-dasharray="rb.dash" stroke-width="1" />
+                <polygon :points="rb.statusBar" :fill="rb.statusColor" pointer-events="none" />
               </g>
               <!-- 选中单间：以描边加粗 + 角标小三角提示「可拖拽移动」，不再用含义不清的空心圆圈手柄 -->
             </template>
@@ -2532,49 +2702,39 @@ function enterEdit(): void {
         </div>
 
         <aside class="fpv-side fpv-side--ws">
-          <div class="fpv-legend">
-            <span v-for="l in legend" :key="l.label" class="fpv-legend__item">
-              <i :style="{ background: l.color }"></i>{{ l.label }}
-            </span>
+          <!-- 顶部常驻细条：视图控制（着色 / 源对齐 / 导入 / 缩放复位）。图标 + tooltip，不出现文字段落 -->
+          <div class="fpv-topbar">
+            <el-tooltip content="着色模式" placement="top">
+              <el-radio-group v-model="colorMode" size="small">
+                <el-radio-button value="use">业务</el-radio-button>
+                <el-radio-button value="inspect">审图</el-radio-button>
+                <el-radio-button value="dept">部门</el-radio-button>
+                <el-radio-button value="purpose">用途</el-radio-button>
+              </el-radio-group>
+            </el-tooltip>
+            <el-tooltip content="源对齐（转正为水平矩形）" placement="top">
+              <el-checkbox v-model="alignToAxisEnabled" size="small">源对齐</el-checkbox>
+            </el-tooltip>
+            <el-tooltip content="导入图纸" placement="top">
+              <el-button size="small" circle @click="requestImport"><el-icon><Upload /></el-icon></el-button>
+            </el-tooltip>
+            <span class="fpv-topbar__spacer"></span>
+            <el-tooltip content="放大" placement="top"><el-button size="small" circle @click="zoomBy(1.2)">＋</el-button></el-tooltip>
+            <el-tooltip content="缩小" placement="top"><el-button size="small" circle @click="zoomBy(1 / 1.2)">－</el-button></el-tooltip>
+            <el-tooltip content="复位视图" placement="top"><el-button size="small" circle @click="resetView"><el-icon><Refresh /></el-icon></el-button></el-tooltip>
           </div>
 
-          <!-- 楼层编辑：入口 + 编辑态操作（新增/合并/删除/完成/取消）统一放在这里，
-               与下方「楼层（切换楼层）」「工具（导入图纸/复位）」同列，操作入口只此一处 -->
-          <section class="fpv-sec">
-            <h4 class="fpv-sec__title">楼层编辑</h4>
-            <div class="fpv-tools">
-              <template v-if="!editMode">
-                <el-button size="small" type="primary" @click="enterEdit">编辑楼层（房间）</el-button>
-                <span class="fpv-tools__hint">进入后可新增 / 删除 / 拖动 / 合并房间</span>
-              </template>
-              <template v-else>
-                <div class="fpv-tools__row">
-                  <span class="fpv-editbar__hint">编辑中</span>
-                  <span class="fpv-editbar__sel">已选 {{ selectedIds.length }} 间</span>
-                </div>
-                <el-button size="small" :disabled="!canAddRoom" @click="doAddRoom">＋ 新增房间</el-button>
-                <span v-if="!canAddRoom" class="fpv-tools__hint fpv-tools__hint--warn">
-                  楼层网格（6×2＝12 格）已放满：删除或合并房间空出格子后才能新增
-                </span>
-                <el-button size="small" :disabled="selectedIds.length < 2" @click="doMerge">合并所选（{{ selectedIds.length }}）</el-button>
-                <el-button size="small" type="danger" plain :disabled="!selectedIds.length" @click="doDelete">删除所选（{{ selectedIds.length }}）</el-button>
-                <span v-if="selectedIds.length < 2" class="fpv-tools__hint">点房间＝选中（蓝框）；再点另一间＝多选，合并需同时选 ≥2 间</span>
-                <div class="fpv-tools__row">
-                  <el-button size="small" type="success" @click="exitEdit(true)">完成</el-button>
-                  <el-button size="small" @click="exitEdit(false)">取消</el-button>
-                </div>
-                <span class="fpv-tools__hint">
-                  {{ hasRealRooms
-                    ? '拖动房间可换位置；房间号 / 名称 / 部门等资料请在退出编辑后点房间 →「修改信息」填写'
-                    : '示意预览：拖动房间可调整布局（仅本次浏览生效，导入图纸后编辑真实房间才会保存）' }}
-                </span>
-              </template>
-            </div>
+          <!-- 编辑态：状态条（置顶） -->
+          <section v-if="editMode" class="fpv-editbar">
+            <span class="fpv-editbar__hint">编辑中</span>
+            <span class="fpv-editbar__sel">已选 {{ selectedIds.length }} 间</span>
+            <span class="fpv-topbar__spacer"></span>
+            <el-button size="small" type="success" @click="exitEdit(true)">完成</el-button>
+            <el-button size="small" @click="exitEdit(false)">取消</el-button>
           </section>
 
-          <!-- 楼层格子：按已上传 DXF 动态生成，每格显示楼层信息 -->
+          <!-- 楼层切换（浏览 / 编辑 共用） -->
           <section class="fpv-sec">
-            <h4 class="fpv-sec__title">楼层（{{ floorSummary.length }}）</h4>
             <div class="fpv-floorgrid">
               <button
                 v-for="c in floorSummary"
@@ -2590,38 +2750,52 @@ function enterEdit(): void {
             </div>
           </section>
 
-          <!-- 工具操作按钮 -->
-          <section class="fpv-sec">
-            <h4 class="fpv-sec__title">工具</h4>
-            <div class="fpv-tools">
-              <el-button size="small" type="primary" plain @click="requestImport">+ 导入图纸</el-button>
-              <div class="fpv-tools__row">
-                <span class="fpv-tools__label">着色</span>
-                <el-radio-group v-model="colorMode" size="small">
-                  <el-radio-button value="use">业务</el-radio-button>
-                  <el-radio-button value="inspect">审图</el-radio-button>
-                  <el-radio-button value="dept">部门</el-radio-button>
-                  <el-radio-button value="purpose">用途</el-radio-button>
-                </el-radio-group>
-              </div>
-              <div class="fpv-tools__row">
-                <el-checkbox v-model="alignToAxisEnabled" size="small">源对齐(转正为水平矩形)</el-checkbox>
-              </div>
-              <div class="fpv-tools__row">
-                <span class="fpv-tools__hint">整栋楼「盒子」(亮顶面+连续暗色前墙) + 横向走廊带 + 房间(平铺色块) + 房间之间抬升隔墙(灰，表达凹凸感) + 每间正中心四行文字(号码/名称/部门/两面积)。左键拖拽平移；滚轮缩放；右键拖拽(或 Shift+拖拽)调整俯仰角(纵向旋转)。</span>
-              </div>
-              <div class="fpv-tools__row">
-                <el-button-group>
-                  <el-button size="small" @click="zoomBy(1.2)">＋</el-button>
-                  <el-button size="small" @click="zoomBy(1 / 1.2)">－</el-button>
-                  <el-button size="small" @click="resetView">复位</el-button>
-                </el-button-group>
-              </div>
-            </div>
+          <!-- 浏览态：统计信息（大数字 + 色点，一眼扫读） -->
+          <section v-if="!editMode" class="fpv-sec fpv-stats">
+            <div class="fpv-stats__total">{{ floorStats.total }}<span> 间</span></div>
+            <ul class="fpv-stats__list">
+              <li v-for="s in statusStatItems" :key="s.key">
+                <i :style="{ background: s.color }"></i>
+                <span class="fpv-stats__label">{{ s.label }}</span>
+                <b>{{ s.count }}</b>
+              </li>
+            </ul>
           </section>
 
-          <!-- 已隐藏房间：隐藏后可在此恢复显示 -->
-          <section class="fpv-sec" v-if="hiddenRooms.length">
+          <!-- 图例：一套控件两种用途。浏览态常驻只读；编辑态（业务着色）变为可点击的「状态选择器」 -->
+          <div class="fpv-legend" :class="{ 'fpv-legend--clickable': legendClickable }">
+            <span
+              v-for="l in legend"
+              :key="l.label"
+              class="fpv-legend__item"
+              :class="{
+                'fpv-legend__item--clickable': legendClickable && l.value !== undefined,
+                'fpv-legend__item--armed': legendClickable && l.value !== undefined && armedStatus === l.value,
+              }"
+              @click="legendClickable && l.value !== undefined ? onLegendClick(l) : undefined"
+            >
+              <i :style="{ background: l.color }"></i>{{ l.label }}
+            </span>
+          </div>
+
+          <!-- 编辑态：工具（图标 + tooltip，仅编辑态出现） -->
+          <section v-if="editMode" class="fpv-sec fpv-tools-edit">
+            <el-tooltip content="新增房间" placement="top">
+              <span><el-button size="small" :disabled="!canAddRoom" @click="doAddRoom"><el-icon><Plus /></el-icon></el-button></span>
+            </el-tooltip>
+            <el-tooltip content="合并所选（需 ≥2 间）" placement="top">
+              <span><el-button size="small" :disabled="selectedIds.length < 2" @click="doMerge"><el-icon><Connection /></el-icon></el-button></span>
+            </el-tooltip>
+            <el-tooltip content="删除所选" placement="top">
+              <span><el-button size="small" type="danger" plain :disabled="!selectedIds.length" @click="doDelete"><el-icon><Delete /></el-icon></el-button></span>
+            </el-tooltip>
+          </section>
+
+          <!-- 浏览态：主按钮 -->
+          <el-button v-if="!editMode" class="fpv-edit-main" type="primary" @click="enterEdit">编辑</el-button>
+
+          <!-- 已隐藏房间：可在此恢复显示 -->
+          <section v-if="hiddenRooms.length" class="fpv-sec">
             <h4 class="fpv-sec__title">已隐藏房间（{{ hiddenRooms.length }}）</h4>
             <div class="fpv-hide-list">
               <div v-for="h in hiddenRooms" :key="h.id" class="fpv-hide-item">
@@ -2631,7 +2805,6 @@ function enterEdit(): void {
               <el-button size="small" type="primary" plain class="fpv-hide-all" @click="showAllRooms">显示全部</el-button>
             </div>
           </section>
-
         </aside>
         </div>
       </template>
@@ -2641,8 +2814,17 @@ function enterEdit(): void {
   <!-- 预览嵌入模式：仅渲染 SVG stage（供导入向导「预览确认」步骤使用） -->
   <div v-else class="fpv fpv--embed">
     <div class="fpv__top fpv__top--embed">
-      <div class="fpv-legend fpv-legend--embed">
-        <span v-for="l in legend" :key="l.label" class="fpv-legend__item">
+      <div class="fpv-legend fpv-legend--embed" :class="{ 'fpv-legend--clickable': legendClickable }">
+        <span
+          v-for="l in legend"
+          :key="l.label"
+          class="fpv-legend__item"
+          :class="{
+            'fpv-legend__item--clickable': legendClickable && l.value !== undefined,
+            'fpv-legend__item--armed': legendClickable && l.value !== undefined && armedStatus === l.value,
+          }"
+          @click="legendClickable && l.value !== undefined ? onLegendClick(l) : undefined"
+        >
           <i :style="{ background: l.color }"></i>{{ l.label }}
         </span>
       </div>
@@ -2713,6 +2895,7 @@ function enterEdit(): void {
             style="cursor: pointer"
           >
             <polygon :points="rb.topPoints" :fill="rb.topFill" :stroke="rb.stroke" :stroke-dasharray="rb.dash" stroke-width="1" />
+            <polygon :points="rb.statusBar" :fill="rb.statusColor" pointer-events="none" />
           </g>
         </template>
         <!-- ③b 房间之间的隔墙（第 5 步）：平铺房间之间抬升 0.5m 的矮墙，房间平、墙凸 → 凹凸感 -->
@@ -2924,6 +3107,40 @@ function enterEdit(): void {
 .fpv-legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 13px; color: #4b5563; }
 .fpv-legend__item { display: inline-flex; align-items: center; gap: 5px; }
 .fpv-legend i { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+/* 编辑态：图例项变为可点击的「状态选择器」 */
+.fpv-legend--clickable { gap: 8px; }
+.fpv-legend__item--clickable { cursor: pointer; padding: 3px 8px 3px 6px; border-radius: 999px; border: 1px solid transparent; transition: background .15s, border-color .15s, box-shadow .15s; }
+.fpv-legend__item--clickable:hover { background: #eef2ff; border-color: #c7d2fe; }
+.fpv-legend__item--armed { background: #e0e7ff; border-color: #6366f1; font-weight: 600; color: #3730a3; box-shadow: 0 0 0 2px rgba(99, 102, 241, .22); }
+.fpv-legend__item--armed i { box-shadow: 0 0 0 2px #fff inset; }
+/* 图例提示文字 */
+.fpv-legend__hint { margin: 8px 0 0; font-size: 12px; color: #6b7280; line-height: 1.5; }
+.fpv-legend__hint--armed { color: #4338ca; font-weight: 600; }
+
+/* 顶部常驻细条：视图控制（图标 + tooltip，无文字段落） */
+.fpv-topbar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding-bottom: 8px; border-bottom: 1px solid #eef0f3; }
+.fpv-topbar .el-radio-group { flex-wrap: nowrap; }
+.fpv-topbar__spacer { flex: 1 1 auto; }
+.fpv-topbar .el-button.is-circle { padding: 6px 8px; }
+
+/* 浏览态统计信息：大数字 + 色点 */
+.fpv-stats { background: #f8fafc; border: 1px solid #eef0f3; border-radius: 10px; padding: 10px 12px; }
+.fpv-stats__total { font-size: 30px; font-weight: 800; color: #111827; line-height: 1.1; font-variant-numeric: tabular-nums; }
+.fpv-stats__total span { font-size: 13px; font-weight: 600; color: #6b7280; margin-left: 2px; }
+.fpv-stats__list { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.fpv-stats__list li { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #374151; }
+.fpv-stats__list i { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+.fpv-stats__label { flex: 1; }
+.fpv-stats__list b { font-size: 15px; font-weight: 700; color: #111827; font-variant-numeric: tabular-nums; }
+
+/* 编辑态状态条 */
+.fpv-editbar { display: flex; align-items: center; gap: 8px; padding: 8px 10px; background: #eef2ff; border: 1px solid #c7d2fe; border-radius: 10px; }
+
+/* 编辑态工具（图标 + tooltip） */
+.fpv-tools-edit { display: flex; gap: 8px; }
+
+/* 浏览态主按钮 */
+.fpv-edit-main { width: 100%; margin-top: 2px; }
 .fpv-info { border: 1px solid #e5e7eb; border-radius: 10px; padding: 12px 14px; background: #fff; }
 .fpv-info__title { font-size: 15px; font-weight: 700; color: #111827; margin-bottom: 6px; }
 .fpv-info dl { margin: 0; }

@@ -301,6 +301,8 @@ export class MapScene {
   init(AMap: any): void {
     this.AMap = AMap;
     this.mapCreateTs = performance.now();
+    // 低配判定需在建图前完成：低配要据此减少底图要素（去 3D 楼块/标注），削减高德每帧开销。
+    this.resolveLowEnd();
     this.map = new AMap.Map(this.container, {
       center: this.gcjCenter,
       zoom: this.config.zoom,
@@ -317,6 +319,23 @@ export class MapScene {
       this.map.setFeatures(this.config.mapFeatures);
     } catch {
       /* 个别版本不支持 setFeatures，可忽略 */
+    }
+
+    // 低配优化：进一步去掉 3D 楼块与标注，只留背景+道路。
+    // 平移/缩放时高德每帧都要重绘这些矢量要素与 DOM 标注，是弱机 CPU 的主要消耗之一；
+    // 去掉后底图更轻，而我们的 3D 校园模型（GLCustomLayer）完全不受影响、照常显示。
+    if (this.lowEnd) {
+      try {
+        const reduced = (this.config.mapFeatures && this.config.mapFeatures.length
+          ? this.config.mapFeatures
+          : ['bg', 'road', 'building', 'label', 'point'])
+          .filter((f: string) => f !== 'building' && f !== 'label');
+        this.map.setFeatures(reduced);
+        // eslint-disable-next-line no-console
+        console.info(`[MapScene] 低配：底图要素已精简为 [${reduced.join(', ')}]，降低每帧渲染开销`);
+      } catch {
+        /* 个别版本不支持 setFeatures，可忽略 */
+      }
     }
 
     // 商用授权下隐藏左下角 logo / 版权（免费版请勿开启，会违反高德服务条款）
@@ -354,6 +373,23 @@ export class MapScene {
     this.map.on('camerachange', this.clampPitch);
   }
 
+  /**
+   * 统一判定低配设备：CPU 核心数少 / 设备内存小视为低配。
+   * 可用 URL 参数 ?lowend=1 / ?lowend=0 强制覆盖（排查性能问题时用）。
+   * 必须在 init() 建图前调用，因为低配要据此精简底图要素。
+   */
+  private resolveLowEnd(): void {
+    let lowEnd =
+      (navigator.hardwareConcurrency || 4) <= 4 ||
+      (((navigator as unknown as { deviceMemory?: number }).deviceMemory ?? 8) <= 4);
+    try {
+      const forced = new URLSearchParams(location.search).get('lowend');
+      if (forced === '1') lowEnd = true;
+      else if (forced === '0') lowEnd = false;
+    } catch { /* ignore */ }
+    this.lowEnd = lowEnd;
+  }
+
   private initThree(gl: WebGLRenderingContext): void {
     const width = this.container.clientWidth || 1;
     const height = this.container.clientHeight || 1;
@@ -366,15 +402,8 @@ export class MapScene {
     // 低配设备探测：CPU 核心数少 / 设备内存小 → 关闭抗锯齿、像素比封顶为 1，
     // 否则弱机平移/缩放地图时每帧渲染开销过大，CPU 瞬间 100%。
     // 可用 URL 参数 ?lowend=1 / ?lowend=0 强制覆盖（用于测试/排查性能问题）。
-    let lowEnd =
-      (navigator.hardwareConcurrency || 4) <= 4 ||
-      (((navigator as unknown as { deviceMemory?: number }).deviceMemory ?? 8) <= 4);
-    try {
-      const forced = new URLSearchParams(location.search).get('lowend');
-      if (forced === '1') lowEnd = true;
-      else if (forced === '0') lowEnd = false;
-    } catch { /* ignore */ }
-    this.lowEnd = lowEnd;
+    // 注意：判定逻辑已抽到 resolveLowEnd() 并在 init() 建图前执行，这里直接复用，避免重复实现。
+    const lowEnd = this.lowEnd;
     try {
       this.renderer = new THREE.WebGLRenderer({
         context: gl,
@@ -392,6 +421,9 @@ export class MapScene {
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, lowEnd ? 1 : 1.5));
     this.renderer.setSize(width, height, false);
     this.renderer.autoClear = false;
+    // 场景内全部材质均为不透明（已在加载时把半透明/透射玻璃降级为 opaque），
+    // 关闭逐对象排序可省掉每帧一次的 draw call 排序开销（弱机每帧一笔纯 CPU 浪费）。
+    this.renderer.sortObjects = false;
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
 
     // 阴影策略（低配 CPU 100% 的首要根因）：

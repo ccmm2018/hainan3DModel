@@ -2663,18 +2663,78 @@ export class MapScene {
   }
 
   /** 飞行到指定 WGS84 经纬度 */
-  flyTo(lng: number, lat: number, zoom?: number): void {
-    if (!this.map) return;
+  flyTo(lng: number, lat: number, zoom?: number, onDone?: () => void): void {
+    if (!this.map) {
+      onDone?.();
+      return;
+    }
     const [glng, glat] = wgs84ToGcj02(lng, lat);
+    // 飞行结束（相机真正落位）后回调一次：用于让上层在正确相机下重算浮层锚点。
+    // 用 moveend 精确触发；若目标与当前视角一致导致 moveend 不触发，则用 duration 兜底。
+    let called = false;
+    const done = () => {
+      if (called) return;
+      called = true;
+      try {
+        this.map?.off('moveend', done);
+      } catch {
+        /* ignore */
+      }
+      // 落位后强制按当前地图视角刷新 three 相机，确保 onDone 里投影浮层锚点时
+      // 用的是「飞行结束后」的真实相机，而非 moveend 早于 GLCustomLayer 渲染回调时仍停留的旧相机。
+      this.syncCameraNow();
+      onDone?.();
+    };
+    try {
+      this.map.once('moveend', done);
+    } catch {
+      /* ignore */
+    }
     this.map.setZoomAndCenter(zoom ?? this.map.getZoom(), [glng, glat], false, 600);
+    window.setTimeout(done, 750);
   }
 
   /** 飞行到某个模型对象 */
-  flyToObject(obj: THREE.Object3D): void {
+  flyToObject(obj: THREE.Object3D, onDone?: () => void): void {
     const wp = new THREE.Vector3();
     obj.getWorldPosition(wp);
     const [lng, lat] = this.worldToWgs84(wp);
-    this.flyTo(lng, lat, this.config.focusZoom);
+    this.flyTo(lng, lat, this.config.focusZoom, onDone);
+  }
+
+  /**
+   * 强制按当前地图视角立即刷新 three 相机（绕过视角签名节流），
+   * 供飞行落位后的回调里精确投影浮层锚点使用，避免用到过期相机导致锚点错位。
+   */
+  syncCameraNow(): void {
+    if (!this.map || !this.camera || !this.customCoords) return;
+    const { near, far, fov, up, lookAt, position } = this.customCoords.getCameraParams();
+    const width = this.container.clientWidth || 1;
+    const height = this.container.clientHeight || 1;
+    this.camera.aspect = width / height;
+    this.camera.near = near;
+    this.camera.far = far;
+    this.camera.fov = fov;
+    this.camera.position.set(position[0], position[1], position[2]);
+    this.camera.up.set(up[0], up[1], up[2]);
+    this.camera.lookAt(lookAt[0], lookAt[1], lookAt[2]);
+    this.camera.updateProjectionMatrix();
+  }
+
+  /**
+   * 飞行到模型对象的「可见中心」（世界包围盒中心，约在建筑半高处），
+   * 让楼栋主体而非其地面原点居中，浮层锚点也据此钉在楼栋可见范围内。
+   */
+  flyToObjectCenter(obj: THREE.Object3D, onDone?: () => void): void {
+    const box = new THREE.Box3().setFromObject(obj);
+    if (box.isEmpty()) {
+      this.flyToObject(obj, onDone);
+      return;
+    }
+    const center = new THREE.Vector3();
+    box.getCenter(center);
+    const [lng, lat] = this.worldToWgs84(center);
+    this.flyTo(lng, lat, this.config.focusZoom, onDone);
   }
 
   /** 列出模型中的命名对象（供搜索框使用） */

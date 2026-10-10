@@ -131,6 +131,7 @@
       <input
         v-model="searchQuery"
         type="text"
+        autocomplete="off"
         placeholder="搜索建筑名称，回车定位…"
         @input="onSearchInput"
         @keydown.enter="onSearchEnter"
@@ -873,7 +874,21 @@ function unobserveContainer() {
 const filteredObjects = computed(() => {
   const q = searchQuery.value.trim().toLowerCase();
   if (!q) return [];
-  return objectList.value.filter((o) => o.name.toLowerCase().includes(q)).slice(0, 10);
+  const list = objectList.value.filter((o) => o.name.toLowerCase().includes(q));
+  // 精确匹配 / 前缀匹配优先排在前面，避免输入「0」时回车误选「10」「20」等楼栋
+  list.sort((a, b) => {
+    const rank = (s: string): number => {
+      const n = s.toLowerCase();
+      if (n === q) return 0;
+      if (n.startsWith(q)) return 1;
+      return 2;
+    };
+    const ra = rank(a.name);
+    const rb = rank(b.name);
+    if (ra !== rb) return ra - rb;
+    return a.name.localeCompare(b.name, undefined, { numeric: true });
+  });
+  return list.slice(0, 10);
 });
 
 const selectedProps = computed<BuildingProps>(() => {
@@ -932,7 +947,7 @@ function closePanel() {
 }
 
 function flyToSelected() {
-  if (selected.value) scene?.flyToObject(selected.value.target);
+  if (selected.value) scene?.flyToObjectCenter(selected.value.target);
 }
 
 function openBuildingDetail() {
@@ -1289,14 +1304,17 @@ function selectByName(name: string) {
   if (!found) return;
   searchQuery.value = name;
   searchFocused.value = false;
-  scene?.flyToObject(found.object);
   const wp = new THREE.Vector3();
   found.object.getWorldPosition(wp);
+  // 用「包围盒中心」作为锚点（约在建筑半高处），避免直接拿对象原点（地面/角落）
+  // 导致浮层钉在楼栋基底而非可见楼体上；飞行同样飞到该中心，二者一致。
+  const bbox = new THREE.Box3().setFromObject(found.object);
+  const anchorPoint = bbox.isEmpty() ? wp : bbox.getCenter(new THREE.Vector3());
   const result: PickResult = {
     object: found.object,
     target: found.object,
     name: found.name,
-    point: wp,
+    point: anchorPoint,
     lngLat: found.lngLat,
     screenX: 0,
     screenY: 0,
@@ -1307,14 +1325,17 @@ function selectByName(name: string) {
   selected.value = result;
   detailOpen.value = false;
   imageError.value = false;
-  panelAnchor.value =
-    scene?.projectToScreen(wp) ?? {
-      x: containerSize.value.w / 2,
-      y: containerSize.value.h / 2,
-    };
-  panel.measure();
+  // 先清空锚点（用兜底位），待相机飞行真正落位（moveend）后再用最新相机重算，
+  // 避免用「飞行前旧相机」算出的过期坐标把浮层钉在错误位置。
+  panelAnchor.value = null;
   debugAnchor(`搜索定位「${found.name}」`);
   scene?.highlight(found.object, config.highlightColor);
+  scene?.flyToObjectCenter(found.object, () => {
+    // 飞行结束：用落位后的相机重新投影楼栋世界坐标，浮层精准钉在该楼栋旁
+    updateAnchors();
+    panel.measure();
+    debugAnchor(`搜索定位完成「${found.name}」`);
+  });
 }
 
 function onSearchInput() {
@@ -1322,7 +1343,15 @@ function onSearchInput() {
 }
 
 function onSearchEnter() {
-  if (filteredObjects.value.length) selectByName(filteredObjects.value[0].name);
+  const q = searchQuery.value.trim();
+  if (!filteredObjects.value.length) {
+    if (q) ElMessage.warning(`未找到楼栋「${q}」，请检查编号是否正确`);
+    return;
+  }
+  // 优先精确匹配输入；否则取下拉列表首项（已按精确 / 前缀排序）
+  const lower = q.toLowerCase();
+  const exact = filteredObjects.value.find((o) => o.name.toLowerCase() === lower);
+  selectByName((exact ?? filteredObjects.value[0]).name);
 }
 
 // ---------------------------------------------------------------------------

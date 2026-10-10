@@ -2509,7 +2509,7 @@ function enterEdit(): void {
         <el-button link type="primary" @click="requestClose">← 返回室外</el-button>
       </div>
     </template>
-    <el-empty v-if="!floors.length" description="该楼尚未导入楼层平面图（DXF），下方为示意预览，可先浏览；导入后可编辑真实房间">
+    <el-empty v-if="!floors.length">
       <el-button type="primary" @click="requestImport">导入图纸</el-button>
     </el-empty>
 
@@ -3097,7 +3097,6 @@ function enterEdit(): void {
 .fpv-room--sel polygon { stroke: #1257e0; stroke-width: 3.2; filter: drop-shadow(0 0 2.4px rgba(18, 87, 224, 0.9)); }
 /* 楼层编辑区（右侧面板）：按钮整行铺满，纵向排列更易扫读 */
 .fpv-tools > .el-button { width: 100%; margin-left: 0; }
-.fpv-tools__hint--warn { color: #b45309; background: #fffbeb; border: 1px solid #fde68a; border-radius: 6px; padding: 4px 8px; }
 .fpv-editbar__hint { font-size: 13px; font-weight: 600; color: #374151; }
 .fpv-editbar__sel { font-size: 13px; font-weight: 700; color: #fff; background: #1f6feb; border-radius: 999px; padding: 2px 10px; }
 .fpv-tip { line-height: 1.6; }
@@ -3113,9 +3112,6 @@ function enterEdit(): void {
 .fpv-legend__item--clickable:hover { background: #eef2ff; border-color: #c7d2fe; }
 .fpv-legend__item--armed { background: #e0e7ff; border-color: #6366f1; font-weight: 600; color: #3730a3; box-shadow: 0 0 0 2px rgba(99, 102, 241, .22); }
 .fpv-legend__item--armed i { box-shadow: 0 0 0 2px #fff inset; }
-/* 图例提示文字 */
-.fpv-legend__hint { margin: 8px 0 0; font-size: 12px; color: #6b7280; line-height: 1.5; }
-.fpv-legend__hint--armed { color: #4338ca; font-weight: 600; }
 
 /* 顶部常驻细条：视图控制（图标 + tooltip，无文字段落） */
 .fpv-topbar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding-bottom: 8px; border-bottom: 1px solid #eef0f3; }

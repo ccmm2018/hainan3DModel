@@ -34,6 +34,7 @@ import { useBuildingStore } from '../stores/building';
 import { isRoomFieldComplete } from '../utils/roomFields';
 import { cleanName } from '../utils/roomName';
 import type { Floor, InspectStatus, ParsedRoom, Room, UseStatus } from '../types/cad';
+import FpvTip from './FpvTip.vue';
 
 const props = withDefaults(
   defineProps<{
@@ -2711,30 +2712,26 @@ function enterEdit(): void {
           <!-- 视图控制细条（着色 / 源对齐 / 导入 / 缩放复位）。仅编辑态出现：浏览态不显示任何编辑类控件（问题 3）。
                图标 + tooltip，不出现文字段落。浏览态下画布仍可用鼠标拖拽平移 / 滚轮缩放导航。 -->
           <div v-if="editMode" class="fpv-topbar">
-            <el-tooltip content="着色模式" placement="top">
-              <el-radio-group v-model="colorMode" size="small">
-                <el-radio-button value="use">业务</el-radio-button>
-                <el-radio-button value="inspect">审图</el-radio-button>
-                <el-radio-button value="dept">部门</el-radio-button>
-                <el-radio-button value="purpose">用途</el-radio-button>
-              </el-radio-group>
-            </el-tooltip>
-            <el-tooltip content="源对齐（转正为水平矩形）" placement="top">
-              <el-checkbox v-model="alignToAxisEnabled" size="small">源对齐</el-checkbox>
-            </el-tooltip>
-            <el-tooltip content="导入图纸" placement="top">
-              <el-button size="small" circle @click="requestImport"><el-icon><Upload /></el-icon></el-button>
-            </el-tooltip>
+            <el-radio-group v-model="colorMode" size="small">
+              <el-radio-button value="use">业务</el-radio-button>
+              <el-radio-button value="inspect">审图</el-radio-button>
+              <el-radio-button value="dept">部门</el-radio-button>
+              <el-radio-button value="purpose">用途</el-radio-button>
+            </el-radio-group>
+            <el-checkbox v-model="alignToAxisEnabled" size="small">源对齐</el-checkbox>
+            <FpvTip text="导入图纸"><el-button size="small" circle @click="requestImport"><el-icon><Upload /></el-icon></el-button></FpvTip>
             <span class="fpv-topbar__spacer"></span>
-            <el-tooltip content="放大" placement="top"><el-button size="small" circle @click="zoomBy(1.2)">＋</el-button></el-tooltip>
-            <el-tooltip content="缩小" placement="top"><el-button size="small" circle @click="zoomBy(1 / 1.2)">－</el-button></el-tooltip>
-            <el-tooltip content="复位视图" placement="top"><el-button size="small" circle @click="resetView"><el-icon><Refresh /></el-icon></el-button></el-tooltip>
+            <FpvTip text="放大"><el-button size="small" circle @click="zoomBy(1.2)">＋</el-button></FpvTip>
+            <FpvTip text="缩小"><el-button size="small" circle @click="zoomBy(1 / 1.2)">－</el-button></FpvTip>
+            <FpvTip text="复位视图"><el-button size="small" circle @click="resetView"><el-icon><Refresh /></el-icon></el-button></FpvTip>
           </div>
 
-          <!-- 编辑态：状态条（置顶） -->
+          <!-- 编辑态：状态条（置顶）。可优雅换行：徽标行 / 标注中标记 / 完成·取消 -->
           <section v-if="editMode" class="fpv-editbar">
-            <span class="fpv-editbar__hint">编辑中</span>
-            <span class="fpv-editbar__sel">已选 {{ selectedIds.length }} 间</span>
+            <div class="fpv-editbar__row">
+              <span class="fpv-badge fpv-badge--edit">编辑中</span>
+              <span class="fpv-badge fpv-badge--sel">已选 {{ selectedIds.length }} 间</span>
+            </div>
             <span
               v-if="armedStatus !== null"
               class="fpv-armed"
@@ -2743,9 +2740,10 @@ function enterEdit(): void {
             >
               <i :style="{ background: armedColor }"></i>标注中：{{ statusLabelOf(armedStatus) }}<b>×</b>
             </span>
-            <span class="fpv-topbar__spacer"></span>
-            <el-button size="small" type="success" @click="exitEdit(true)">完成</el-button>
-            <el-button size="small" @click="exitEdit(false)">取消</el-button>
+            <div class="fpv-editbar__actions">
+              <el-button size="small" type="success" @click="exitEdit(true)">完成</el-button>
+              <el-button size="small" @click="exitEdit(false)">取消</el-button>
+            </div>
           </section>
 
           <!-- 楼层切换（浏览 / 编辑 共用） -->
@@ -2795,15 +2793,9 @@ function enterEdit(): void {
 
           <!-- 编辑态：工具（图标 + tooltip，仅编辑态出现） -->
           <section v-if="editMode" class="fpv-sec fpv-tools-edit">
-            <el-tooltip content="新增房间" placement="top">
-              <span><el-button size="small" :disabled="!canAddRoom" @click="doAddRoom"><el-icon><Plus /></el-icon></el-button></span>
-            </el-tooltip>
-            <el-tooltip content="合并所选（需 ≥2 间）" placement="top">
-              <span><el-button size="small" :disabled="selectedIds.length < 2" @click="doMerge"><el-icon><Connection /></el-icon></el-button></span>
-            </el-tooltip>
-            <el-tooltip content="删除所选" placement="top">
-              <span><el-button size="small" type="danger" plain :disabled="!selectedIds.length" @click="doDelete"><el-icon><Delete /></el-icon></el-button></span>
-            </el-tooltip>
+            <FpvTip text="新增房间"><el-button size="small" :disabled="!canAddRoom" @click="doAddRoom"><el-icon><Plus /></el-icon></el-button></FpvTip>
+            <FpvTip text="合并所选（需 ≥2 间）"><el-button size="small" :disabled="selectedIds.length < 2" @click="doMerge"><el-icon><Connection /></el-icon></el-button></FpvTip>
+            <FpvTip text="删除所选"><el-button size="small" type="danger" plain :disabled="!selectedIds.length" @click="doDelete"><el-icon><Delete /></el-icon></el-button></FpvTip>
           </section>
 
           <!-- 浏览态：主按钮 -->
@@ -3114,6 +3106,13 @@ function enterEdit(): void {
 .fpv-tools > .el-button { width: 100%; margin-left: 0; }
 .fpv-editbar__hint { font-size: 13px; font-weight: 600; color: #374151; }
 .fpv-editbar__sel { font-size: 13px; font-weight: 700; color: #fff; background: #1f6feb; border-radius: 999px; padding: 2px 10px; }
+/* 编辑态状态条：可优雅换行（空间不够时徽标 / 标注中 / 操作按钮各自成行，不挤成一团） */
+.fpv-editbar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 10px; background: #eef2ff; border: 1px solid #c7d2fe; border-radius: 10px; }
+.fpv-editbar__row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.fpv-editbar__actions { display: flex; align-items: center; gap: 6px; margin-left: auto; }
+.fpv-badge { font-size: 12px; font-weight: 600; padding: 2px 9px; border-radius: 999px; line-height: 1.5; }
+.fpv-badge--edit { color: #4338ca; background: #e0e7ff; }
+.fpv-badge--sel { color: #fff; background: #1f6feb; }
 /* 编辑态「标注中」标记：明确提示当前处于状态标注模式，点击即退出（恢复为纯选中） */
 .fpv-armed { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 600; color: #7c3aed; background: #f5f3ff; border: 1px solid #ddd6fe; border-radius: 999px; padding: 2px 10px; cursor: pointer; }
 .fpv-armed i { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
@@ -3151,8 +3150,8 @@ function enterEdit(): void {
 /* 编辑态状态条 */
 .fpv-editbar { display: flex; align-items: center; gap: 8px; padding: 8px 10px; background: #eef2ff; border: 1px solid #c7d2fe; border-radius: 10px; }
 
-/* 编辑态工具（图标 + tooltip） */
-.fpv-tools-edit { display: flex; gap: 8px; }
+/* 编辑态工具（图标 + tooltip）：横向排列 */
+.fpv-tools-edit { display: flex; flex-direction: row; align-items: center; gap: 6px; }
 
 /* 浏览态主按钮 */
 .fpv-edit-main { width: 100%; margin-top: 2px; }

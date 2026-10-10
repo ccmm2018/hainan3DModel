@@ -247,8 +247,15 @@ function onStageMouseUp(e?: MouseEvent): void {
     // 点击房间由 onSelect 处理，点击/操作弹窗内部由 @mouseup.stop 拦截，都不会走到这里。
     const t = e && (e.target as Element | null);
     const onPop = !!(t && t.closest && t.closest('.fpv-pop'));
-    if (!dragMoved.value && !downOnRoom && !onPop && selectedRoom.value && !editMode.value) {
-      closePop();
+    if (!dragMoved.value && !downOnRoom && !onPop) {
+      if (!editMode.value && selectedRoom.value) {
+        // 浏览态：点空白处关闭已打开的房间弹窗
+        closePop();
+      } else if (editMode.value && selectedIds.value.length) {
+        // 编辑态：点空白处清空选中（mousedown 已是「确保选中」语义，单击自身不再取消，故用空白处取消）
+        selectedIds.value = [];
+        selectedId.value = null;
+      }
     }
     downOnRoom = false;
     dragKind.value = null;
@@ -1857,22 +1864,9 @@ function onSelect(room: RoomLike, ev?: MouseEvent): void {
     emit('room-click', room as ParsedRoom);
     return;
   }
-  // 编辑模式下：单击=选中（点选切换，支持多选），不在此弹窗；弹窗仅在「修改信息」按钮时弹出。
-  // 拖动房间（move）结束后浏览器仍会触发一次 click，用 suppressClickSelect 抑制，避免误改选中态。
-  if (editMode.value) {
-    if (suppressClickSelect) {
-      suppressClickSelect = false;
-      return;
-    }
-    // 编辑态 + 已选业务状态（图例即状态选择器）：点房间即把该状态赋给它，便于逐个房间快速标注
-    if (armedStatus.value !== null) {
-      applyUseStatusToRoom(room, armedStatus.value);
-      selectedId.value = room.id; // 高亮反馈刚标注的房间
-      return;
-    }
-    onSelectRoom(room, ev);
-    return;
-  }
+  // 编辑模式下：选中已在 onRoomDown（mousedown）中完成（见其内注释），此处不再重复处理，
+  // 否则 click 在拖拽重排场景下若仍被派发，会与 mousedown 的选中叠加成「选→取消」抵消。
+  if (editMode.value) return;
   // 拖拽平移（移动超过阈值）结束后松手会触发一次 click，需忽略；
   // 用「按下点→松开点」的直线距离判断，容忍点击瞬间的微小手抖（≤8px 仍算点击），
   // 避免「必须点中房间正中才能弹出」的误吞现象。
@@ -2072,6 +2066,12 @@ const editMode = ref(false);
  * 选中后点房间即把该状态赋给它（逐个房间快速标注）；再点同一状态可取消。null = 未选（普通编辑）。
  */
 const armedStatus = ref<UseStatus | null>(null);
+/** 当前已选状态选择器的色（供编辑栏「标注中」标记显示）。null 时不被使用。 */
+const armedColor = computed(() => {
+  const s = armedStatus.value;
+  if (s === null) return '#000';
+  return s === '' ? UNASSIGNED_FILL : USE_COLORS[s];
+});
 /** 图例是否可点击（= 编辑态 + 业务状态着色）；此时图例从只读色卡变为状态选择器 */
 const legendClickable = computed(() => editMode.value && colorMode.value === 'use' && !props.embedded);
 const activeTool = ref<'select' | 'add'>('select');
@@ -2128,18 +2128,12 @@ const dragTopBlocks = computed<RoomBlock[]>(() => {
   }
   return arr;
 });
-function toggleSelect(id: string): void {
-  const i = selectedIds.value.indexOf(id);
-  if (i >= 0) selectedIds.value = selectedIds.value.filter((x) => x !== id);
-  else selectedIds.value = [...selectedIds.value, id];
-}
-
 /** 屏幕坐标 → 楼层 UTM 坐标（z 为抬升高度，画在 z=0 地面或 z=wallHeight 顶面）。
  *  借助 <g> 的 getScreenCTM().inverse()，一次性抵消 viewBox 缩放、图层平移(pan)与缩放(zoom)，
  *  得到 project() 的输出空间；再逆推 fit 变换 + 反向对齐旋转，即得楼层坐标。 */
 function fromScreen(clientX: number, clientY: number, z = 0): [number, number] {
   const g = stageG.value;
-  if (!g) return [0, 0];
+  if (!g || typeof g.getScreenCTM !== 'function') return [0, 0];
   const ctm = g.getScreenCTM();
   if (!ctm) return [0, 0];
   const pt = new DOMPoint(clientX, clientY).matrixTransform(ctm.inverse());
@@ -2158,10 +2152,13 @@ function fromScreen(clientX: number, clientY: number, z = 0): [number, number] {
 
 /** 编辑模式：单击房间——仅选中高亮（蓝框），不弹窗；Shift/Ctrl 多选供合并。
  *  弹窗仅在用户点「修改信息」按钮时打开，避免编辑时误弹卡片挡住画布。 */
-/** 编辑模式：单击房间——多选切换（点一下选中 / 再点取消；点多个即同时选中，无需按住 Shift）。
+/** 编辑模式：mousedown 选中房间——「确保选中」语义：未选则加入（支持多选累积），
+ *  已选则保留（避免去抓一个已选中房间拖动时，mousedown 先把它取消、拖完就丢选中）。
  *  弹窗仅在用户点「修改信息」按钮时打开，避免编辑时误弹卡片挡住画布。 */
 function onSelectRoom(room: RoomLike, _ev?: MouseEvent): void {
-  toggleSelect(room.id);
+  if (!selectedIds.value.includes(room.id)) {
+    selectedIds.value = [...selectedIds.value, room.id];
+  }
   selectedId.value = room.id;
 }
 
@@ -2170,6 +2167,14 @@ function onSelectRoom(room: RoomLike, _ev?: MouseEvent): void {
 function onRoomDown(room: RoomLike, ev: MouseEvent): void {
   if (!editMode.value) return; // 非编辑模式不拦截，走原 onSelect/弹窗
   ev.stopPropagation();
+  // 按下房间即清零上一次拖拽遗留的「抑制点击」标志，避免误吞本次选中
+  suppressClickSelect = false;
+  // 选中（含多选切换）在 mousedown 即完成：编辑态点房间依赖「随后派发的 click」并不可靠——
+  // 本函数已设置 dragRoomId 触发 dragTopBlocks 重排、会把房间 <g> 在 DOM 中挪位，
+  // 浏览器在此场景下常吞掉 click，导致「点了没反应、不选中」。改在 mousedown 选中最稳。
+  // 若已选业务状态（图例即状态选择器），则同时把该状态赋给房间，实现「逐个点房间快速标注」。
+  if (armedStatus.value !== null) applyUseStatusToRoom(room, armedStatus.value);
+  onSelectRoom(room, ev);
   if (activeTool.value !== 'select') return;
   dragKind.value = 'move';
   dragRoomId.value = room.id;
@@ -2472,12 +2477,13 @@ function fillFor(room: RoomLike): string {
   return colorFor(room);
 }
 
-/** 进入编辑模式：先对当前楼层房间拍快照，供「未点完成直接关闭」时回滚 */
+/** 进入编辑模式：先对当前楼层房间拍快照，供「未点完成直接关闭」时回滚。
+ *  注意：demo / 合成预览模式（未导入真实 DXF，`currentFloor` 为 undefined）同样允许进入编辑——
+ *  否则这类楼栋的房间将完全无法选中 / 标注状态 / 改颜色。无真实楼层时跳过快照回滚（本地覆盖不入库）。 */
 function enterEdit(): void {
   const f = currentFloor.value;
-  if (!f) return;
-  editFid = f.id;
-  editSnapshot = JSON.parse(JSON.stringify(store.roomsOfFloor(f.id)));
+  editFid = f?.id ?? null;
+  editSnapshot = f ? JSON.parse(JSON.stringify(store.roomsOfFloor(f.id))) : null;
   rebuildGrid();
   editMode.value = true;
   armedStatus.value = null; // 进入编辑态清空状态选择器
@@ -2729,6 +2735,14 @@ function enterEdit(): void {
           <section v-if="editMode" class="fpv-editbar">
             <span class="fpv-editbar__hint">编辑中</span>
             <span class="fpv-editbar__sel">已选 {{ selectedIds.length }} 间</span>
+            <span
+              v-if="armedStatus !== null"
+              class="fpv-armed"
+              title="点击退出标注模式（此后点房间仅选中，不再自动赋值）"
+              @click="armedStatus = null"
+            >
+              <i :style="{ background: armedColor }"></i>标注中：{{ statusLabelOf(armedStatus) }}<b>×</b>
+            </span>
             <span class="fpv-topbar__spacer"></span>
             <el-button size="small" type="success" @click="exitEdit(true)">完成</el-button>
             <el-button size="small" @click="exitEdit(false)">取消</el-button>
@@ -3100,6 +3114,10 @@ function enterEdit(): void {
 .fpv-tools > .el-button { width: 100%; margin-left: 0; }
 .fpv-editbar__hint { font-size: 13px; font-weight: 600; color: #374151; }
 .fpv-editbar__sel { font-size: 13px; font-weight: 700; color: #fff; background: #1f6feb; border-radius: 999px; padding: 2px 10px; }
+/* 编辑态「标注中」标记：明确提示当前处于状态标注模式，点击即退出（恢复为纯选中） */
+.fpv-armed { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 600; color: #7c3aed; background: #f5f3ff; border: 1px solid #ddd6fe; border-radius: 999px; padding: 2px 10px; cursor: pointer; }
+.fpv-armed i { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+.fpv-armed b { margin-left: 2px; font-size: 13px; line-height: 1; }
 .fpv-tip { line-height: 1.6; }
 .fpv-tip__no { font-weight: 700; margin-bottom: 2px; }
 .fpv-tip__row { font-size: 12px; white-space: nowrap; }

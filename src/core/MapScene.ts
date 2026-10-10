@@ -18,6 +18,9 @@ import type { SceneConfig } from '../config/mapConfig';
 import { ROOM_STATUS_CONFIG, type Room } from '../data/roomData';
 import area from '@turf/area';
 
+/** 首屏性能量算基准：模块脚本执行时刻（≈页面交互起点），用于把各阶段耗时统一到「距页面加载」 */
+const SCENE_T0 = performance.now();
+
 /** 拾取结果 */
 export interface PickResult {
   /** 被射线命中的 Mesh */
@@ -119,12 +122,22 @@ export class MapScene {
 
   private renderer: THREE.WebGLRenderer | null = null;
   private lowEnd = false; // 低配设备标记：用于降低渲染负载（关阴影 / 跳过 PMREM / 像素比封顶）
-  private loadStartTs = 0; // 首次加载起始时间戳（loadModel 入口，用于量真实首屏总耗时：含下载 + 108 张解码 + 后处理）
-  private onLoadEntryTs = 0; // onLoad 入口（下载+解析完成后），用于把耗时拆分为「下载/解析」与「后处理」两段，定位 5 秒卡顿归属
+  private loadStartTs = 0; // 模型下载+解析发起时刻（prefetchModel 或 startModelLoad 入口），用于量「下载+解析」耗时
+  private onLoadEntryTs = 0; // 模型解析完成的入口时刻（下载+解析完成后），用于把耗时拆分为「下载/解析」与「后处理」两段
+  private modelPrefetchGltf: any = null;   // 已解析完成的 GLTF（来源：预取缓冲或即时 load）
+  private modelPrefetchStarted = false;    // 预取是否已发起（防止重复下载同一模型）
+  private modelOnLoadRan = false;          // runModelOnLoad 是否已执行（防止重复后处理/挂载）
+  private ready = false;                   // initThree 完成（renderer/scene/customCoords 均就绪）标记
+  private prefetchStartTs = 0;             // 模型预取发起时刻，用于日志
+  private prefetchedBuffer: ArrayBuffer | null = null; // 提前并行下载的 GLB 二进制（await loadAMap 期间），就绪后直接 parse
+  private prefetchedUrl = '';              // 与 prefetchedBuffer 对应的模型地址
   private scene: THREE.Scene | null = null;
   private camera: THREE.PerspectiveCamera | null = null;
   private modelRoot: THREE.Object3D | null = null;
   private raycaster = new THREE.Raycaster();
+  /** 已应用的渲染视口（CSS 像素，three 会再乘 pixelRatio）。尺寸变化时重设，保证模型铺满整块高德画布 */
+  private appliedVpW = -1;
+  private appliedVpH = -1;
   /** 上一帧的地图视角签名，用于检测视角变化 */
   private lastViewSig = '';
   /** 上一帧用于同步相机的视角签名；与 lastViewSig 一致时说明视角未变，可复用相机、跳过 getCameraParams 重算 */
@@ -197,11 +210,12 @@ export class MapScene {
    * 渲染策略：AMap 的 GL 自定义图层每帧都会清掉本层帧缓冲后回调 render()，
    * 因此每帧都必须重新叠加绘制模型（不可整帧跳过，否则模型会闪烁/隐藏）。
    *
-   * 低配机器的优化：整场景渲染结果缓存在离屏纹理（WebGLRenderTarget）里，
-   * 视角与场景内容都没变的帧只做「一次全屏贴图」（1 个 draw call）替代
-   * 「几百个 draw call 的整场景重绘」——这是低配机器空闲时 CPU 仍 90%+ 的主因。
-   * 视角变化（拖拽/缩放/旋转/飞行）或 markDirty()（高亮/房间/校准等内容变化）时
-   * 才重新渲染一次场景并刷新缓存。
+   * 直接渲染（每帧只画一次场景，无离屏 RT / 全屏贴图）：
+   *  - 模型仅 3644 三角面，逐帧直绘开销可忽略；
+   *  - 视图静止时，相机同步已节流（见 render() 内 lastViewSig 判断）只跳过「相机重算」，仍每帧直绘；
+   *  - 不用离屏 RT 缓存，从根本上杜绝 RT 缓存与直绘两路视觉不一致导致的整模型闪烁
+   *    （悬停高亮切换、拖拽起止等场景尤其明显）。
+   * 真正的降载来自：相机同步节流、锚点投影防抖、GLB 并行预取，而非帧缓存。
    */
   private disposed = false;
 
@@ -212,8 +226,18 @@ export class MapScene {
   /** 全屏贴图用的最小场景（正交相机 + 一个 quad） */
   private blitScene: THREE.Scene | null = null;
   private blitCam: THREE.OrthographicCamera | null = null;
-  /** 缓存是否失效（视角变化 / markDirty / 尺寸变化时置真，重绘一次场景） */
+  /** 缓存是否失效（视角变化置真，重绘一次场景；内容变化走 contentDirty 分支） */
   private frameCacheDirty = true;
+  /** 场景内容变化（高亮 / 楼盘表 / 房间 / 校准等）：置真时走「RT 渲染 + 全屏贴图」分支，
+   *  与空闲帧完全一致，避免「直绘↔贴图」路径切换导致整模型闪烁。内容变化是稀有事件（每次悬停切换），
+   *  2 趟开销可忽略；视角变化（拖拽/缩放）则走 frameCacheDirty 直绘分支以保持跟手。 */
+  private contentDirty = true;
+  /** 离屏缓存是否已过期：活动帧直接渲染到屏幕、跳过了 RT 写入时置真；松手后的首个静止帧再补刷新 */
+  private rtStale = false;
+  /** 离屏缓存彻底不可用标记：极少数环境下 RT 创建失败，置真后退化直绘，保证模型始终可见 */
+  private frameCacheBroken = false;
+  /** 地图创建时间戳，用于量算「AMap 初始化 → GL 上下文就绪」耗时，定位首屏 35s 卡顿归属 */
+  private mapCreateTs = 0;
   /** 高亮材质缓存（key: `颜色|原材质uuid`），跨悬停复用克隆材质，避免扫过楼群时反复克隆 */
   private highlightMatCache = new Map<string, THREE.Material>();
 
@@ -276,6 +300,7 @@ export class MapScene {
   // -------------------------------------------------------------------------
   init(AMap: any): void {
     this.AMap = AMap;
+    this.mapCreateTs = performance.now();
     this.map = new AMap.Map(this.container, {
       center: this.gcjCenter,
       zoom: this.config.zoom,
@@ -332,6 +357,11 @@ export class MapScene {
   private initThree(gl: WebGLRenderingContext): void {
     const width = this.container.clientWidth || 1;
     const height = this.container.clientHeight || 1;
+    // eslint-disable-next-line no-console
+    console.info(
+      `[MapScene] GL 上下文就绪：距地图创建 ${Math.round(performance.now() - this.mapCreateTs)}ms，` +
+        `距页面加载 ${Math.round(performance.now() - SCENE_T0)}ms`,
+    );
 
     // 低配设备探测：CPU 核心数少 / 设备内存小 → 关闭抗锯齿、像素比封顶为 1，
     // 否则弱机平移/缩放地图时每帧渲染开销过大，CPU 瞬间 100%。
@@ -357,8 +387,9 @@ export class MapScene {
       this.callbacks.onMapError?.(err);
       return;
     }
-    // 像素比封顶：retina 屏 dpr=2/3 时片元量按平方放大，低配机器是卡顿主因；封顶到 2（低配 1）
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, lowEnd ? 1 : 2));
+    // 像素比封顶：retina 屏 dpr=2/3 时片元量按平方放大，是弱 GPU 拖动掉帧的主因之一。
+    // 非低配封顶到 1.5（较 2 大幅削减片元量、换取更跟手；肉眼清晰度几乎无感差异），低配封顶 1。
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, lowEnd ? 1 : 1.5));
     this.renderer.setSize(width, height, false);
     this.renderer.autoClear = false;
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -406,7 +437,104 @@ export class MapScene {
     this.scene.add(this.measureGroup);
 
     this.setupLights();
-    this.loadModel(this.config.modelUrl);
+    this.ready = true;
+    this.startModelLoad(this.config.modelUrl);
+  }
+
+  /**
+   * 启动模型加载（由 initThree 在 GL 上下文就绪后调用）：
+   * - 若组件层已并行预取好 GLB 缓冲（setPrefetchedBuffer），则直接 parse，跳过网络等待；
+   * - 否则退回普通下载（仅一次，与预取互斥，避免重复拉取）。
+   * 与「等高德 GL 就绪」解耦：模型下载+解析可与地图初始化期间重叠，首屏不再被串行卡住。
+   */
+  private startModelLoad(url: string): void {
+    if (this.modelOnLoadRan) return;
+    if (this.modelPrefetchGltf) {
+      this.runModelOnLoad(this.modelPrefetchGltf);
+      return;
+    }
+    if (this.prefetchedBuffer) {
+      this.parsePrefetched(url);
+      return;
+    }
+    if (this.modelPrefetchStarted) return; // 预取已在进行，runModelOnLoad 会在其完成时触发
+    this.modelPrefetchStarted = true;
+    this.prefetchStartTs = this.loadStartTs || performance.now();
+    if (!this.loadStartTs) this.loadStartTs = this.prefetchStartTs;
+    const loader = new GLTFLoader();
+    loader.load(
+      url,
+      (gltf) => {
+        this.modelPrefetchGltf = gltf;
+        this.onLoadEntryTs = performance.now();
+        if (this.ready) this.runModelOnLoad(gltf);
+      },
+      (event: ProgressEvent) => {
+        if (event.lengthComputable) {
+          this.callbacks.onModelProgress?.(Math.round((event.loaded / event.total) * 100));
+        }
+      },
+      (err) => {
+        this.callbacks.onModelError?.(err);
+      },
+    );
+  }
+
+  /**
+   * 接收组件层在 await loadAMap 期间提前下载好的 GLB 二进制（与高德脚本加载并行）。
+   * 高德 GL 上下文就绪后，initThree 会走 parsePrefetched 直接解析这份缓冲，
+   * 从而把「等高德」与「下模型」两段串行等待重叠，缩短首屏。
+   */
+  setPrefetchedBuffer(buf: ArrayBuffer, url: string): void {
+    if (this.modelPrefetchStarted || this.modelOnLoadRan) return;
+    this.modelPrefetchStarted = true;
+    this.prefetchedBuffer = buf;
+    this.prefetchedUrl = url;
+    this.prefetchStartTs = performance.now();
+    if (!this.loadStartTs) this.loadStartTs = this.prefetchStartTs;
+    // eslint-disable-next-line no-console
+    console.info(
+      `[MapScene] 收到并行预取缓冲：距页面加载 ${Math.round(performance.now() - SCENE_T0)}ms，` +
+        `距地图创建 ${Math.round(performance.now() - this.mapCreateTs)}ms，大小 ${Math.round(buf.byteLength / 1024)}KB`,
+    );
+    if (this.ready && !this.modelOnLoadRan) this.parsePrefetched(url);
+  }
+
+  /** 用提前下载的缓冲直接解析 GLB（不再经网络），触发后处理与挂载 */
+  private parsePrefetched(url: string): void {
+    if (this.modelOnLoadRan || !this.prefetchedBuffer) {
+      // 缓冲未就绪：退回普通下载
+      this.startModelLoad(url);
+      return;
+    }
+    if (this.modelPrefetchGltf) {
+      this.runModelOnLoad(this.modelPrefetchGltf);
+      return;
+    }
+    const buf = this.prefetchedBuffer;
+    this.prefetchedBuffer = null; // 释放，避免长期持有大块内存
+    const loader = new GLTFLoader();
+    const path = url.substring(0, url.lastIndexOf('/') + 1);
+    this.onLoadEntryTs = performance.now();
+    // eslint-disable-next-line no-console
+    console.info(`[MapScene] 预取缓冲开始解析：距页面加载 ${Math.round(performance.now() - SCENE_T0)}ms`);
+    loader.parse(
+      buf,
+      path,
+      (gltf) => {
+        this.modelPrefetchGltf = gltf;
+        this.onLoadEntryTs = performance.now();
+        // eslint-disable-next-line no-console
+        console.info(
+          `[MapScene] 模型下载+解析完成：${Math.round(this.onLoadEntryTs - this.loadStartTs)}ms，` +
+            `距页面加载 ${Math.round(this.onLoadEntryTs - SCENE_T0)}ms`,
+        );
+        if (this.ready) this.runModelOnLoad(gltf);
+      },
+      (err) => {
+        this.callbacks.onModelError?.(err);
+      },
+    );
   }
 
   private setupLights(): void {
@@ -436,16 +564,14 @@ export class MapScene {
   // -------------------------------------------------------------------------
   // 模型加载与地理对齐放置
   // -------------------------------------------------------------------------
-  private loadModel(url: string): void {
-    if (!this.scene) return;
-    this.loadStartTs = performance.now();
-    const loader = new GLTFLoader();
-    loader.load(
-      url,
-      async (gltf) => {
-        if (this.disposed) return;
-        this.modelRoot = gltf.scene;
-        this.onLoadEntryTs = performance.now();
+  /**
+   * 模型下载+解析完成后的统一后处理与挂载（原 loadModel 的 onLoad 主体）。
+   * 不论模型来自「组件层并行预取缓冲（setPrefetchedBuffer）」还是「initThree 内 startModelLoad 自行下载」，
+   * 都走这里。入口前的 onLoadEntryTs 已由发起下载处记录（= 解析完成时刻）。
+   */
+  private async runModelOnLoad(gltf: any): Promise<void> {
+    if (this.disposed) return;
+    this.modelRoot = gltf.scene as THREE.Object3D;
 
         // 按配置过滤节点：隐藏 Blender 一并导出的辅助几何（屋顶棚/女儿墙/大门/廊架/骨架/空物体等），
         // 只保留楼本体，避免地图上出现无关网格。需在居中/命名解析前执行。
@@ -470,11 +596,13 @@ export class MapScene {
               if (pm && (pm as any).isMeshPhysicalMaterial && (pm.transmission ?? 0) > 0) {
                 pm.transmission = 0;
                 pm.thickness = 0;
-                pm.transparent = true;
-                pm.opacity = 0.45;
+                // opaque: the transmission-glass fallback was semi-transparent and got double-blended against the
+                // offscreen RT's transparent black background, causing shimmer between direct-draw and blit paths.
+                pm.transparent = false;
+                pm.opacity = 1;
                 pm.roughness = Math.max(pm.roughness ?? 0.1, 0.12);
                 pm.metalness = pm.metalness ?? 0;
-                pm.depthWrite = false;
+                pm.depthWrite = true;
                 pm.needsUpdate = true;
               }
             }
@@ -570,21 +698,15 @@ export class MapScene {
             const parseMs = Math.round(this.onLoadEntryTs - this.loadStartTs);
             const postMs = Math.round(performance.now() - this.onLoadEntryTs);
             // eslint-disable-next-line no-console
-            console.info(`[MapScene] 取景完成（低配跳过微调）：下载+解析=${parseMs}ms，后处理=${postMs}ms，合计=${parseMs + postMs}ms`);
+            console.info(
+              `[MapScene] 取景完成：下载+解析=${parseMs}ms，后处理=${postMs}ms，` +
+                `距页面加载合计=${Math.round(performance.now() - SCENE_T0)}ms，` +
+                `距地图创建合计=${Math.round(performance.now() - this.mapCreateTs)}ms`,
+            );
           }
           this.callbacks.onFitComplete?.();
         }
         this.callbacks.onModelReady?.();
-      },
-      (event: ProgressEvent) => {
-        if (event.lengthComputable) {
-          this.callbacks.onModelProgress?.(Math.round((event.loaded / event.total) * 100));
-        }
-      },
-      (err) => {
-        this.callbacks.onModelError?.(err);
-      },
-    );
   }
 
   /**
@@ -1636,6 +1758,16 @@ export class MapScene {
   }
 
   private pixelOf(e: any): { x: number; y: number } {
+    // 优先用原生事件相对「渲染画布」的像素：与 renderCachedFrame 中实际渲染视口严格同源，
+    // 可避免 AMap e.pixel 与画布参考系存在偏差时导致的拾取错位（悬停命中位置偏移）。
+    const native = e?.originEvent as MouseEvent | undefined;
+    const canvas = this.renderer?.domElement as HTMLCanvasElement | undefined;
+    if (native && canvas && typeof native.clientX === 'number') {
+      const r = canvas.getBoundingClientRect();
+      const x = native.clientX - r.left;
+      const y = native.clientY - r.top;
+      if (isFinite(x) && isFinite(y)) return { x, y };
+    }
     const p = e?.pixel;
     const x = p?.x ?? p?.getX?.() ?? 0;
     const y = p?.y ?? p?.getY?.() ?? 0;
@@ -1846,8 +1978,8 @@ export class MapScene {
           metalness: 0.1,
           emissive: 0x000000,
           emissiveIntensity: 0,
-          transparent: true,
-          opacity: 0.92,
+          transparent: false,  // opaque: avoid shimmer on room tiles
+          opacity: 1,
         });
         const geo = new THREE.BoxGeometry(
           cellW * this.config.roomCellGap,
@@ -2292,7 +2424,7 @@ export class MapScene {
       ? [...worldPts, worldPts[0]]
       : worldPts;
     const lineGeo = new THREE.BufferGeometry().setFromPoints(linePts);
-    const lineMat = new THREE.LineBasicMaterial({ color, depthTest: false, transparent: true, opacity: 0.95 });
+    const lineMat = new THREE.LineBasicMaterial({ color, depthTest: false, transparent: false, opacity: 1 });
     lineMat.toneMapped = false;
     const line = new THREE.Line(lineGeo, lineMat);
     line.renderOrder = 999;
@@ -2306,7 +2438,7 @@ export class MapScene {
       shape.closePath();
       const fillGeo = new THREE.ShapeGeometry(shape);
       const fillMat = new THREE.MeshBasicMaterial({
-        color, depthTest: false, transparent: true, opacity: 0.22, side: THREE.DoubleSide,
+        color, depthTest: false, transparent: false, opacity: 1, side: THREE.DoubleSide,  // opaque: avoid shimmer
       });
       fillMat.toneMapped = false;
       const fill = new THREE.Mesh(fillGeo, fillMat);
@@ -2384,9 +2516,9 @@ export class MapScene {
           const mats = Array.isArray(orig) ? orig : [orig];
           mesh.userData.__translucentMats = mats.map((m) => {
             const c = m.clone();
-            c.transparent = true;
-            c.opacity = 0.22;
-            c.depthWrite = false;
+            c.transparent = false;  // opaque: was indoor see-through, but shimmered with offscreen blit; loses see-inside
+            c.opacity = 1;
+            c.depthWrite = true;
             return c;
           });
         }
@@ -2552,10 +2684,8 @@ export class MapScene {
   // -------------------------------------------------------------------------
   /** 场景内容发生变化（加载模型 / 切换楼层 / 高亮 / 业务状态），唤醒地图重绘以反映变化 */
   private markDirty(): void {
-    // 场景内容变了：离屏缓存帧过期，下一帧需重新渲染场景（低配帧缓存路径）
-    this.frameCacheDirty = true;
-    // AMap 自定义图层每帧都会清底图帧缓冲后回调 render()，render() 内总是重新叠加绘制模型。
-    // 若地图当前处于空闲（不再持续回调），需主动唤醒一次重绘，否则变更要等用户下次交互才显示。
+    // 直接渲染模式下，内容变化无需特殊标记：下一帧 render() 自然会直绘出最新状态。
+    // 仅需在地图空闲（AMap 停止持续回调 render()）时主动唤醒一次，让变更立即上屏。
     if (typeof this.map?.render === 'function') this.map.render();
   }
 
@@ -2565,7 +2695,7 @@ export class MapScene {
     // ⚠️ 不能整帧跳过渲染：AMap 的 GL 自定义图层每帧都会先清掉底图帧缓冲、再回调本函数，
     // 模型必须在本帧重新叠加绘制到该帧缓冲上。若「视角未变」就 return 跳过 renderer.render()，
     // 被跳过的那一帧模型就不会被画出（底图已清），缩放/平移时表现为模型时而显示时而隐藏（闪烁）。
-    // 低配机器的性能压力已由「低功耗渲染设置（关抗锯齿、像素比封顶为 1）」承担，无需靠跳帧降负载。
+    // 因此每帧都直绘（见 renderCachedFrame）；降载靠相机同步节流 + 锚点防抖，而非跳帧或帧缓存。
     this.renderer.resetState();
 
     // 视角变化检测（拖拽 / 缩放 / 旋转 / 飞行）→ 更新 lastViewSig 并在变化时通知上层刷新浮层
@@ -2574,8 +2704,8 @@ export class MapScene {
     // 相机同步节流：getCameraParams() 是高德原生调用（弱机上每帧调用有开销）。
     // 仅当视角签名变化（拖拽 / 缩放 / 旋转 / 飞行）时才重新从地图拉取相机参数并重建投影矩阵；
     // 视角静止的帧（含空闲帧）直接复用上一帧已设置好的相机，跳过本次重算。
-    // 注意：无论是否重算相机，下方 renderer.render 仍每帧执行——AMap 每帧都会清掉底图帧缓冲，
-    // 必须重绘本层，否则模型会闪烁。节流只省「相机同步」开销，不影响模型跟手与显示。
+    // 下方 renderCachedFrame 不管是否重算相机都会逐帧把缓存贴到画布（AMap 每帧都会清底图，必须重贴），
+    // 节流只省「相机同步」开销，不影响模型跟手与显示。
     if (this.lastViewSig !== this.lastCamSyncSig) {
       this.lastCamSyncSig = this.lastViewSig;
       const { near, far, fov, up, lookAt, position } = this.customCoords.getCameraParams();
@@ -2603,14 +2733,8 @@ export class MapScene {
       }
     }
 
-    if (this.lowEnd) {
-      // 低配：整场景绘制进离屏缓存，再全屏贴到本层画布。
-      // 视角/内容未变的帧只有「贴图」这一步（1 个 draw call），
-      // 替代整场景几百个 draw call 的重绘——空闲帧 CPU 从 90%+ 降到个位数。
-      this.renderWithFrameCache();
-    } else {
-      this.renderer.render(this.scene, this.camera);
-    }
+    // 逐帧直绘模型到 AMap 已清好的画布（见 renderCachedFrame）。降载靠相机同步节流 + 锚点防抖，而非帧缓存。
+    this.renderCachedFrame();
 
     // 截图捕获：在渲染后、buffer 失效前读取
     if (this.captureResolve) this.readSnapshot();
@@ -2619,66 +2743,95 @@ export class MapScene {
   }
 
   /**
-   * 低配帧缓存渲染：把整场景画进离屏纹理，再以一次全屏贴图合成到本层画布。
-   * - 视角变化 / markDirty（高亮、房间、校准、测量等内容变化）→ 重绘一次场景并刷新缓存；
-   * - 其余帧（空闲时占绝大多数）只做一次全屏贴图（1 个 draw call），
-   *   替代整场景几百个 draw call 的重绘——低配机器空闲 CPU 90%+ 的主因即在此。
-   * AMap 每帧都会清空本层画布，所以「贴图」这一步每帧都不能省（省了模型会消失）。
+   * 直接渲染：每帧把场景画到 AMap 已清好的画布上。
+   * 与回退到正常版时一致的稳健路径——不引入离屏 RT / 全屏贴图，
+   * 从根本上杜绝 RT 缓存与直绘两路视觉不一致导致的整模型闪烁（悬停高亮切换、拖拽起止等尤甚）。
+   * 模型仅 3644 三角面，逐帧直绘开销可忽略；相机同步节流与锚点防抖已承担主要降载（见 render()）。
    */
-  private renderWithFrameCache(): void {
+  private renderCachedFrame(): void {
     if (!this.renderer || !this.scene || !this.camera) return;
-    const size = new THREE.Vector2();
-    this.renderer.getDrawingBufferSize(size);
-    const key = `${size.x}x${size.y}`;
-    if (!this.frameRt || this.frameRtKey !== key) {
-      // 首次创建或画布尺寸变化（含窗口 resize / dpr 变化）→ 重建缓存
-      this.frameRt?.dispose();
-      this.frameRt = new THREE.WebGLRenderTarget(Math.max(1, size.x), Math.max(1, size.y), {
-        minFilter: THREE.LinearFilter,
-        magFilter: THREE.LinearFilter,
-        generateMipmaps: false,
-        depthBuffer: true,
-        stencilBuffer: false,
-      });
-      this.frameRtKey = key;
-      this.blitScene = null; // 重建贴图场景（材质引用了旧 RT 纹理）
-      this.frameCacheDirty = true;
+    // AMap 每帧会清掉本层颜色+深度缓冲后再回调本函数。
+    // 重置到屏幕缓冲并仅清深度（不清颜色，避免擦掉底图）：让模型从干净的深度状态自算遮挡关系，
+    // 始终压在底图之上，避免地形/建筑深度误遮挡导致的闪烁类伪影。
+    this.renderer.setRenderTarget(null);
+
+    // ⚠️ 关键修复（悬停偏移 + 模型被底图遮挡）：
+    // three 的渲染视口在 initThree 时按「当时容器尺寸 × pixelRatio」定死，但高德画布的真实
+    // drawingBuffer 尺寸（尤其 dpr 与 three 的 pixelRatio 不一致、或窗口/布局变化后）可能不同步。
+    // 一旦视口 < 整块画布，模型就只被画到画布的一部分 —— 既表现为「模型某部分被底图遮挡」，
+    // 又导致射线拾取 NDC（按全容器计算）与渲染视口错位，于是「鼠标悬在模型上无反应、悬在周围/上方却命中」。
+    // 故每帧按真实 drawingBuffer 重设视口/裁剪区，确保模型铺满整块画布、拾取与渲染严格对齐。
+    const gl = this.renderer.getContext();
+    const bufW = gl.drawingBufferWidth || 1;
+    const bufH = gl.drawingBufferHeight || 1;
+    const pr = this.renderer.getPixelRatio();
+    const vw = bufW / pr; // CSS 像素视口宽（three 会再乘 pr 还原成整块 buffer）
+    const vh = bufH / pr;
+    if (this.appliedVpW !== vw || this.appliedVpH !== vh) {
+      this.appliedVpW = vw;
+      this.appliedVpH = vh;
+      this.renderer.setViewport(0, 0, vw, vh);
+      this.renderer.setScissor(0, 0, vw, vh);
+      this.renderer.setScissorTest(false);
+      const asp = bufW / bufH;
+      if (Math.abs(this.camera.aspect - asp) > 1e-4) {
+        this.camera.aspect = asp;
+        this.camera.updateProjectionMatrix();
+      }
     }
-    if (!this.blitScene || !this.blitCam) {
-      // 全屏 quad：采样缓存纹理直接输出。
-      // - texture colorSpace 保持默认（线性）：场景渲染进 RT 时不做 sRGB 编码，
-      //   贴图时由 MeshBasicMaterial 的 colorspace_fragment 完成编码，与直绘路径一致；
-      // - toneMapped=false：色调映射已在场景渲染进 RT 时应用，贴图时不能再来一次；
-      // - transparent=true：用标准 alpha 混合叠加到 AMap 清空后的画布上，底图从下层透出。
-      const mat = new THREE.MeshBasicMaterial({
-        map: this.frameRt!.texture,
-        transparent: true,
-        depthTest: false,
-        depthWrite: false,
-        toneMapped: false,
-      });
-      const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), mat);
-      quad.frustumCulled = false;
-      this.blitScene = new THREE.Scene();
-      this.blitScene.add(quad);
-      this.blitCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
-      this.frameCacheDirty = true;
+
+    this.renderer.clearDepth();
+    this.renderer.render(this.scene, this.camera);
+  }
+
+  /** 按当前画布尺寸重建离屏渲染目标；WebGL2 启用多重采样以保留抗锯齿 */
+  private rebuildFrameRt(w: number, h: number): void {
+    this.frameRt?.dispose();
+    const isWebGL2 = !!this.renderer?.capabilities?.isWebGL2;
+    const opts: THREE.RenderTargetOptions = {
+      minFilter: THREE.LinearFilter,
+      magFilter: THREE.LinearFilter,
+      generateMipmaps: false,
+      depthBuffer: true,
+      stencilBuffer: false,
+      // WebGL2 多重采样保留抗锯齿；WebGL1 忽略该字段
+      samples: isWebGL2 ? 4 : 0,
+    };
+    try {
+      this.frameRt = new THREE.WebGLRenderTarget(Math.max(1, w), Math.max(1, h), opts);
+      this.frameCacheBroken = false;
+    } catch {
+      // 多重采样 RT 创建失败（极少见）→ 退化为无采样，仍走缓存路径
+      try {
+        this.frameRt = new THREE.WebGLRenderTarget(Math.max(1, w), Math.max(1, h), { ...opts, samples: 0 });
+        this.frameCacheBroken = false;
+      } catch {
+        this.frameRt = null;
+        this.frameCacheBroken = true;
+      }
     }
-    if (this.frameCacheDirty) {
-      const prevRt = this.renderer.getRenderTarget();
-      this.renderer.setRenderTarget(this.frameRt);
-      // autoClear 全局为 false（保留底图约定），离屏 RT 需手动清成透明
-      this.renderer.setClearColor(0x000000, 0);
-      this.renderer.clear(true, true, false);
-      this.renderer.render(this.scene, this.camera);
-      this.renderer.setRenderTarget(prevRt);
-      this.frameCacheDirty = false;
-    }
-    // 全屏贴图合成（不清屏：AMap 已清空本层画布，底图在下层 canvas 由 DOM 合成透出）
-    const prevAutoClear = this.renderer.autoClear;
-    this.renderer.autoClear = false;
-    this.renderer.render(this.blitScene, this.blitCam);
-    this.renderer.autoClear = prevAutoClear;
+    this.frameRtKey = `${w}x${h}`;
+  }
+
+  /** 构建全屏贴图场景（正交相机 + 一个 quad 采样离屏纹理） */
+  private buildBlitScene(): void {
+    // - texture colorSpace 保持默认（线性）：场景渲染进 RT 时不做 sRGB 编码，
+    //   贴图时由 MeshBasicMaterial 的 colorspace_fragment 完成编码，与直绘路径一致；
+    // - toneMapped=false：色调映射已在场景渲染进 RT 时应用，贴图时不能再来一次；
+    // - transparent=true：用标准 alpha 混合叠加到 AMap 清空后的画布上，底图从下层透出。
+    const mat = new THREE.MeshBasicMaterial({
+      map: this.frameRt!.texture,
+      transparent: true,
+      depthTest: false,
+      depthWrite: false,
+      toneMapped: false,
+    });
+    const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), mat);
+    quad.frustumCulled = false;
+    this.blitScene = new THREE.Scene();
+    this.blitScene.add(quad);
+    this.blitCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+    this.frameCacheDirty = true;
   }
 
   /**

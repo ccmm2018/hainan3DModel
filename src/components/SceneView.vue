@@ -812,13 +812,23 @@ const tooltipStyle = computed(() => {
 /** 视角变化（拖拽/缩放/旋转/飞行）后重新投影锚点，让浮层跟随节点 */
 function updateAnchors() {
   if (!scene) return;
+  // 防抖：仅当投影位置实际移动超过 0.5px 才写入响应式 ref，
+  // 避免视角静止时（onViewChange 仍可能偶发触发）每帧无谓地引发 Vue 重渲染。
   if (selected.value) {
     const pos = scene.projectToScreen(selected.value.point);
-    if (pos) panelAnchor.value = pos;
+    if (pos && (!panelAnchor.value ||
+      Math.abs(panelAnchor.value.x - pos.x) > 0.5 ||
+      Math.abs(panelAnchor.value.y - pos.y) > 0.5)) {
+      panelAnchor.value = pos;
+    }
   }
   if (selectedRoom.value) {
     const pos = scene.getRoomScreenPos(selectedRoom.value.id);
-    if (pos) roomAnchor.value = pos;
+    if (pos && (!roomAnchor.value ||
+      Math.abs(roomAnchor.value.x - pos.x) > 0.5 ||
+      Math.abs(roomAnchor.value.y - pos.y) > 0.5)) {
+      roomAnchor.value = pos;
+    }
   }
 }
 
@@ -1367,6 +1377,9 @@ onMounted(async () => {
 
   try {
     status.value = 'loading-amap';
+    // 提前发起模型下载（与 await loadAMap 并行），缩短首屏：下载完成后存入缓冲，
+    // 高德 GL 就绪后由 MapScene 直接 parse，无需再等网络。
+    const modelFetch = fetch(config.modelUrl);
     const AMap = await loadAMap({ key, securityJsCode: securityCode });
 
     if (!mapContainer.value) return;
@@ -1477,6 +1490,14 @@ onMounted(async () => {
     });
 
     status.value = 'loading-model';
+    // 把并行下载好的 GLB 缓冲交给 MapScene（若下载失败则回退由 MapScene 自行拉取）
+    try {
+      const modelResp = await modelFetch;
+      const modelBuf = await modelResp.arrayBuffer();
+      scene.setPrefetchedBuffer(modelBuf, config.modelUrl);
+    } catch {
+      /* 预取失败：MapScene 会在 initThree 内自行下载，不影响地图初始化 */
+    }
     scene.init(AMap);
   } catch (err) {
     status.value = 'error';

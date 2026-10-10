@@ -2702,8 +2702,9 @@ function enterEdit(): void {
         </div>
 
         <aside class="fpv-side fpv-side--ws">
-          <!-- 顶部常驻细条：视图控制（着色 / 源对齐 / 导入 / 缩放复位）。图标 + tooltip，不出现文字段落 -->
-          <div class="fpv-topbar">
+          <!-- 视图控制细条（着色 / 源对齐 / 导入 / 缩放复位）。仅编辑态出现：浏览态不显示任何编辑类控件（问题 3）。
+               图标 + tooltip，不出现文字段落。浏览态下画布仍可用鼠标拖拽平移 / 滚轮缩放导航。 -->
+          <div v-if="editMode" class="fpv-topbar">
             <el-tooltip content="着色模式" placement="top">
               <el-radio-group v-model="colorMode" size="small">
                 <el-radio-button value="use">业务</el-radio-button>

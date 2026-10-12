@@ -6,6 +6,26 @@
     <meta name="theme-color" content="#0e1420" />
     <meta name="description" content="海南警察学院 3D 可视化场景" />
     <title>海南警察学院 3D 可视化场景</title>
+
+    <!--
+      首屏加速：提前预热高德 CDN 连接 + 与 Vue 应用包并行拉取 JSAPI 脚本。
+      - preconnect / dns-prefetch 省掉 AMap 脚本与瓦片的 DNS+TLS 握手耗时；
+      - 标题后同步注入安全密钥，并把 JSAPI <script async> 提前到 <head>，
+        使其与 /src/main.ts 并行下载（原先要等 Vue 挂载、读取 key 后才发起，晚了约一个包体下载+解析的时间）。
+        loadAMap() 检测到该脚本已存在会复用、不再重复追加（见 src/utils/loadAMap.ts）。
+      ⚠️ 占位符 %VITE_AMAP_KEY% / %VITE_AMAP_SECURITY_CODE% 由 Vite 在 dev/build 时按 .env 注入；
+         若 .env 缺该变量会保留原样（仅该次预拉取失效，运行时加载器仍按原逻辑兜底）。
+    -->
+    <link rel="preconnect" href="https://webapi.amap.com" />
+    <link rel="dns-prefetch" href="https://webapi.amap.com" />
+    <link rel="dns-prefetch" href="https://restapi.amap.com" />
+    <link rel="dns-prefetch" href="https://vdata.amap.com" />
+    <link rel="dns-prefetch" href="https://webrst.is.autonavi.com" />
+    <script>
+      window._AMapSecurityConfig = { securityJsCode: '%VITE_AMAP_SECURITY_CODE%' };
+    </script>
+    <script async src="https://webapi.amap.com/maps?v=2.0&key=%VITE_AMAP_KEY%"></script>
+
     <!--
       高德地图 logo / 版权隐藏样式（默认不生效）。
       仅当 MapScene 检测到 config.hideAMapAttribution === true 时，

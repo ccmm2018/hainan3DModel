@@ -20,6 +20,38 @@ export function loadAMap(options: AMapLoadOptions): Promise<any> {
   if (window.AMap) return Promise.resolve(window.AMap);
   if (amapPromise) return amapPromise;
 
+  // index.html 已把 JSAPI 的 <script async> 提前到 <head> 与 Vue 应用包并行拉取，
+  // 这里检测到该脚本已存在就复用、不再追加第二个（避免重复拉取同一份脚本），
+  // 仅等待其加载完成即可。安全密钥也已在 <head> 内联脚本中先于该脚本设置好。
+  const existing = document.querySelector<HTMLScriptElement>(
+    'script[src*="webapi.amap.com/maps"]',
+  );
+  if (existing) {
+    amapPromise = new Promise<any>((resolve, reject) => {
+      if (window.AMap) {
+        resolve(window.AMap);
+        return;
+      }
+      const onLoad = () => {
+        if (window.AMap) resolve(window.AMap);
+        else {
+          amapPromise = null;
+          reject(new Error('高德地图 JS API 加载完成但 AMap 未定义'));
+        }
+      };
+      existing.addEventListener('load', onLoad, { once: true });
+      existing.addEventListener(
+        'error',
+        () => {
+          amapPromise = null;
+          reject(new Error('高德地图 JS API 加载失败，请检查网络或 key 是否正确'));
+        },
+        { once: true },
+      );
+    });
+    return amapPromise;
+  }
+
   amapPromise = new Promise<any>((resolve, reject) => {
     const { key, securityJsCode } = options;
 

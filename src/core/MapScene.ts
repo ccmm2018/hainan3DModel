@@ -238,6 +238,14 @@ export class MapScene {
   private rtStale = false;
   /** 离屏缓存彻底不可用标记：极少数环境下 RT 创建失败，置真后退化直绘，保证模型始终可见 */
   private frameCacheBroken = false;
+  /** WebGL 软件渲染标记（SwiftShader/llvmpipe 等）：虚拟机会命中，必须走离屏 RT 合成才能压住空闲 CPU */
+  private softwareRender = false;
+  /** 全屏贴图材质引用（RT 重建后需指向新纹理） */
+  private blitMat: THREE.MeshBasicMaterial | null = null;
+  /** 页面不可见时暂停渲染，彻底 0 占用 */
+  private paused = false;
+  /** visibilitychange 处理器引用，用于 destroy 时移除，避免监听器泄漏 */
+  private visibilityHandler: (() => void) | null = null;
   /** 地图创建时间戳，用于量算「AMap 初始化 → GL 上下文就绪」耗时，定位首屏 35s 卡顿归属 */
   private mapCreateTs = 0;
   /** 高亮材质缓存（key: `颜色|原材质uuid`），跨悬停复用克隆材质，避免扫过楼群时反复克隆 */
@@ -373,6 +381,19 @@ export class MapScene {
     this.map.on('dblclick', (e: any) => this.handleDoubleClick(e));
     // 俯仰角锁定：拖动旋转地图时不允许把地图「翻过来」
     this.map.on('camerachange', this.clampPitch);
+
+    // 页面不可见时暂停渲染，彻底 0 占用；回到前台立即补一帧，避免切回时模型缺帧
+    if (typeof document !== 'undefined') {
+      this.visibilityHandler = () => {
+        if (document.hidden) {
+          this.paused = true;
+        } else {
+          this.paused = false;
+          this.markDirty();
+        }
+      };
+      document.addEventListener('visibilitychange', this.visibilityHandler);
+    }
   }
 
   /**
@@ -384,12 +405,40 @@ export class MapScene {
     let lowEnd =
       (navigator.hardwareConcurrency || 4) <= 4 ||
       (((navigator as unknown as { deviceMemory?: number }).deviceMemory ?? 8) <= 4);
+
+    // 软件渲染探测：虚拟机/远程桌面常报「够用」的硬件参数，实则走 SwiftShader/llvmpipe 软件光栅，
+    // 任何 WebGL 调用都是纯 CPU 开销，降质无效、必须靠「按需渲染」来救。
+    // 用一次性临时上下文读取 UNMASKED_RENDERER，命中即强制低配（?lowend=0 可强制关闭）。
+    try {
+      const tmp = document.createElement('canvas');
+      const tgl = (tmp.getContext('webgl2') || tmp.getContext('webgl')) as WebGLRenderingContext | null;
+      if (tgl) {
+        // 优先用调试扩展拿到真实渲染器名（部分浏览器会屏蔽，返回空 → 退而取标准 RENDERER）
+        const dbg = tgl.getExtension('WEBGL_debug_renderer_info');
+        let r = dbg ? String(tgl.getParameter(dbg.UNMASKED_RENDERER_WEBGL)) : '';
+        if (!r && (tgl as WebGL2RenderingContext).RENDERER) {
+          r = String(tgl.getParameter((tgl as WebGL2RenderingContext).RENDERER));
+        }
+        // eslint-disable-next-line no-console
+        console.info('[MapScene] WebGL 渲染器 =', r);
+        const rs = r.toLowerCase();
+        this.softwareRender = /swiftshader|llvmpipe|software|microsoft basic render|mesa|apple paravirtual|virtualbox|angle \(software/.test(rs);
+        if (this.softwareRender) lowEnd = true;
+        // 释放临时上下文，避免占用浏览器有限的 WebGL 上下文配额
+        tgl.getExtension('WEBGL_lose_context')?.loseContext();
+      }
+    } catch { /* ignore */ }
+
     try {
       const forced = new URLSearchParams(location.search).get('lowend');
       if (forced === '1') lowEnd = true;
       else if (forced === '0') lowEnd = false;
     } catch { /* ignore */ }
     this.lowEnd = lowEnd;
+    if (this.lowEnd) {
+      // eslint-disable-next-line no-console
+      console.info(`[MapScene] 低配模式生效（software=${this.softwareRender}）：启用离屏 RT 合成，空闲帧仅全屏贴图，压低 CPU`);
+    }
   }
 
   private initThree(gl: WebGLRenderingContext): void {
@@ -2794,7 +2843,10 @@ export class MapScene {
   }
 
   private markDirty(): void {
-    // 直接渲染模式下，内容变化无需特殊标记：下一帧 render() 自然会直绘出最新状态。
+    // 低配 RT 合成路径：内容变化（高亮/选型/房间/校准等）走「RT→blit」同源路径
+    // （与空闲帧同一贴图路径），从根上避免「直绘↔贴图」路径切换导致的悬停闪烁；
+    // 故置 contentDirty 而非 frameCacheDirty。下一帧 renderCachedFrame 会重渲 RT 再贴图。
+    this.contentDirty = true;
     // 仅需在地图空闲（AMap 停止持续回调 render()）时主动唤醒一次，让变更立即上屏。
     // 唤醒走 scheduleRender() 合并：同一动画帧内多次 markDirty 只触发一次整帧重绘，
     // 避免悬停扫楼 / 校准拖拽时高频调用 map.render() 造成的「重绘风暴」与 CPU 尖峰。
@@ -2803,6 +2855,8 @@ export class MapScene {
 
   private render(): void {
     if (!this.renderer || !this.scene || !this.camera || !this.customCoords) return;
+    // 页面不可见时彻底停渲染（切走标签页/最小化），回到前台再补一帧，空闲 0 占用
+    if (this.paused) return;
 
     // ⚠️ 不能整帧跳过渲染：AMap 的 GL 自定义图层每帧都会先清掉底图帧缓冲、再回调本函数，
     // 模型必须在本帧重新叠加绘制到该帧缓冲上。若「视角未变」就 return 跳过 renderer.render()，
@@ -2855,17 +2909,24 @@ export class MapScene {
   }
 
   /**
-   * 直接渲染：每帧把场景画到 AMap 已清好的画布上。
-   * 与回退到正常版时一致的稳健路径——不引入离屏 RT / 全屏贴图，
-   * 从根本上杜绝 RT 缓存与直绘两路视觉不一致导致的整模型闪烁（悬停高亮切换、拖拽起止等尤甚）。
-   * 模型仅 3644 三角面，逐帧直绘开销可忽略；相机同步节流与锚点防抖已承担主要降载（见 render()）。
+   * 每帧渲染入口（低配/软件渲染专用「离屏 RT 合成」分支，彻底压空闲 CPU）：
+   * - contentDirty（高亮/选型/房间/校准等内容变化）→ 渲染进离屏 RT 后贴图，与空闲帧同一 blit 路径，
+   *   从根上消除「直绘↔贴图」路径切换导致的悬停整模型闪烁。
+   * - frameCacheDirty（拖拽/缩放/旋转/飞行等视角变化）→ 直接渲染到屏幕，1 趟保跟手，负载与原版一致；
+   *   并标记 rtStale，待静止首帧再悄悄把当前画面刷进 RT。
+   * - rtStale（静止首帧）→ 先直接渲染（与活动帧像素一致 → 零跳变），再静默刷新 RT 供后续贴图。
+   * - 完全静止帧 → 只把离屏 RT 贴到画布（2 个三角形），CPU 开销塌缩到极低，
+   *   从根本上解决弱机「空闲也每帧重绘整场景 → CPU 长期 90%」的问题。
+   * 非低配：直绘场景（原稳健路径，保留高质量与跟手性）。
    */
   private renderCachedFrame(): void {
     if (!this.renderer || !this.scene || !this.camera) return;
-    // AMap 每帧会清掉本层颜色+深度缓冲后再回调本函数。
-    // 重置到屏幕缓冲并仅清深度（不清颜色，避免擦掉底图）：让模型从干净的深度状态自算遮挡关系，
-    // 始终压在底图之上，避免地形/建筑深度误遮挡导致的闪烁类伪影。
-    this.renderer.setRenderTarget(null);
+    const gl = this.renderer.getContext();
+    const bufW = gl.drawingBufferWidth || 1;
+    const bufH = gl.drawingBufferHeight || 1;
+    const pr = this.renderer.getPixelRatio();
+    const vw = bufW / pr; // CSS 像素视口宽（three 会再乘 pr 还原成整块 buffer）
+    const vh = bufH / pr;
 
     // ⚠️ 关键修复（悬停偏移 + 模型被底图遮挡）：
     // three 的渲染视口在 initThree 时按「当时容器尺寸 × pixelRatio」定死，但高德画布的真实
@@ -2873,12 +2934,6 @@ export class MapScene {
     // 一旦视口 < 整块画布，模型就只被画到画布的一部分 —— 既表现为「模型某部分被底图遮挡」，
     // 又导致射线拾取 NDC（按全容器计算）与渲染视口错位，于是「鼠标悬在模型上无反应、悬在周围/上方却命中」。
     // 故每帧按真实 drawingBuffer 重设视口/裁剪区，确保模型铺满整块画布、拾取与渲染严格对齐。
-    const gl = this.renderer.getContext();
-    const bufW = gl.drawingBufferWidth || 1;
-    const bufH = gl.drawingBufferHeight || 1;
-    const pr = this.renderer.getPixelRatio();
-    const vw = bufW / pr; // CSS 像素视口宽（three 会再乘 pr 还原成整块 buffer）
-    const vh = bufH / pr;
     if (this.appliedVpW !== vw || this.appliedVpH !== vh) {
       this.appliedVpW = vw;
       this.appliedVpH = vh;
@@ -2891,23 +2946,97 @@ export class MapScene {
         this.camera.updateProjectionMatrix();
       }
     }
+    this.renderer.resetState();
 
+    // ── 低配/软件渲染：离屏 RT 合成（空闲帧只贴图压 CPU；拖拽直绘保跟手；内容变化走同源 blit 防闪烁）──
+    if (this.lowEnd && !this.frameCacheBroken) {
+      if (!this.ensureFrameCache(bufW, bufH)) {
+        // 缓存不可用 → 退化直绘，保证模型始终可见
+        this.renderer.setRenderTarget(null);
+        this.renderer.clearDepth();
+        this.renderer.render(this.scene, this.camera);
+        return;
+      }
+      if (this.contentDirty) {
+        // 内容变化（高亮/选型/房间/校准等）：渲染进离屏 RT 后贴图，与空闲帧同一 blit 路径，
+        // 从根上避免「直绘↔贴图」两路切换导致的悬停整模型闪一下。
+        this.renderer.setRenderTarget(this.frameRt);
+        this.renderer.setViewport(0, 0, bufW, bufH);
+        this.renderer.setScissor(0, 0, bufW, bufH);
+        this.renderer.setScissorTest(false);
+        this.renderer.setClearColor(0x000000, 0);
+        this.renderer.clear(true, true, false);
+        this.renderer.render(this.scene, this.camera);
+        this.renderer.setRenderTarget(null);
+        this.contentDirty = false;
+        this.rtStale = false; // RT 已含最新内容，后续空闲帧可直接贴图
+        // 落到下方 blit 把新 RT 贴到屏幕
+      } else if (this.frameCacheDirty) {
+        // 视角变化（拖拽/缩放/旋转/飞行）：直接渲染到屏幕，1 趟保跟手，负载与原版一致；
+        // 标记 RT 落后，待静止首帧再悄悄刷新，避免重复重渲染场景。
+        this.renderer.setRenderTarget(null);
+        this.renderer.clearDepth();
+        this.renderer.render(this.scene, this.camera);
+        this.frameCacheDirty = false;
+        this.rtStale = true;
+        return;
+      } else if (this.rtStale) {
+        // 静止首帧：先直接渲染（与活动帧像素一致 → 零跳变），再悄悄把当前画面刷进离屏 RT 供后续贴图
+        this.renderer.setRenderTarget(null);
+        this.renderer.clearDepth();
+        this.renderer.render(this.scene, this.camera);
+        this.renderer.setRenderTarget(this.frameRt);
+        this.renderer.setViewport(0, 0, bufW, bufH);
+        this.renderer.setScissor(0, 0, bufW, bufH);
+        this.renderer.setScissorTest(false);
+        this.renderer.setClearColor(0x000000, 0);
+        this.renderer.clear(true, true, false);
+        this.renderer.render(this.scene, this.camera);
+        this.renderer.setRenderTarget(null);
+        this.rtStale = false;
+        return;
+      }
+      // 完全静止帧（或内容变化刚刷过 RT）：只把离屏 RT 贴到画布（2 个三角形），
+      // 空闲 CPU 塌缩到极低，彻底解决弱机「空闲也每帧重绘整场景 → CPU 长期 90%」的问题。
+      this.renderer.setViewport(0, 0, vw, vh);
+      this.renderer.setScissor(0, 0, vw, vh);
+      this.renderer.setScissorTest(false);
+      this.renderer.clearDepth();
+      this.renderer.render(this.blitScene!, this.blitCam!);
+      return;
+    }
+
+    // ── 非低配：直绘场景（原稳健路径）──
+    // AMap 每帧会清掉本层颜色+深度缓冲后再回调本函数。
+    // 重置到屏幕缓冲并仅清深度（不清颜色，避免擦掉底图）：让模型从干净的深度状态自算遮挡关系，
+    // 始终压在底图之上，避免地形/建筑深度误遮挡导致的闪烁类伪影。
+    this.renderer.setRenderTarget(null);
     this.renderer.clearDepth();
     this.renderer.render(this.scene, this.camera);
   }
 
-  /** 按当前画布尺寸重建离屏渲染目标；WebGL2 启用多重采样以保留抗锯齿 */
+  /** 懒初始化离屏缓存：首次或尺寸变化时构建 RT 与全屏贴图场景；返回是否可用 */
+  private ensureFrameCache(bufW: number, bufH: number): boolean {
+    if (!this.frameRt || this.frameRtKey !== `${bufW}x${bufH}`) {
+      this.rebuildFrameRt(bufW, bufH);
+    }
+    if (!this.blitScene) this.buildBlitScene();
+    return !!this.frameRt && !!this.blitScene && !this.frameCacheBroken;
+  }
+
+  /** 按当前画布尺寸重建离屏渲染目标；低配/软件渲染下关闭多重采样以削减移动帧开销 */
   private rebuildFrameRt(w: number, h: number): void {
     this.frameRt?.dispose();
     const isWebGL2 = !!this.renderer?.capabilities?.isWebGL2;
+    // 低配/软件渲染下关 MSAA：RT 仅在视角/内容变化时重渲染，多重采样的多次采样在弱机上反而拖慢移动帧
+    const samples = this.lowEnd || this.softwareRender ? 0 : (isWebGL2 ? 4 : 0);
     const opts: THREE.RenderTargetOptions = {
       minFilter: THREE.LinearFilter,
       magFilter: THREE.LinearFilter,
       generateMipmaps: false,
       depthBuffer: true,
       stencilBuffer: false,
-      // WebGL2 多重采样保留抗锯齿；WebGL1 忽略该字段
-      samples: isWebGL2 ? 4 : 0,
+      samples,
     };
     try {
       this.frameRt = new THREE.WebGLRenderTarget(Math.max(1, w), Math.max(1, h), opts);
@@ -2921,6 +3050,14 @@ export class MapScene {
         this.frameRt = null;
         this.frameCacheBroken = true;
       }
+    }
+    // RT 尺寸/纹理变化 → 旧缓存失效，下一帧需直绘一帧待静止后再悄悄刷新
+    this.frameCacheDirty = true;
+    this.rtStale = true;
+    // RT 重建后纹理对象已换，贴图材质需指向新纹理（blit 场景已构建时）
+    if (this.blitMat && this.frameRt) {
+      this.blitMat.map = this.frameRt.texture;
+      this.blitMat.needsUpdate = true;
     }
     this.frameRtKey = `${w}x${h}`;
   }
@@ -2938,6 +3075,7 @@ export class MapScene {
       depthWrite: false,
       toneMapped: false,
     });
+    this.blitMat = mat;
     const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), mat);
     quad.frustumCulled = false;
     this.blitScene = new THREE.Scene();
@@ -2999,6 +3137,12 @@ export class MapScene {
       /* ignore */
     }
     this.glLayer = null;
+
+    // 移除页面可见性监听，避免监听器跨实例泄漏
+    if (this.visibilityHandler && typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', this.visibilityHandler);
+      this.visibilityHandler = null;
+    }
 
     if (this.modelRoot) {
       this.modelRoot.traverse((obj) => {

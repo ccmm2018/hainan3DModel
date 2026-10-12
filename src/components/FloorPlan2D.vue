@@ -2757,8 +2757,10 @@ function enterEdit(): void {
                 @click="selectFloor(c.floorNo)"
               >
                 <div class="fpv-floorcard__no">{{ c.floorNo }}F</div>
-                <div class="fpv-floorcard__meta">{{ c.roomCount }} 间 · {{ c.area.toFixed(0) }} ㎡</div>
-                <span class="fpv-floorcard__status" :data-s="c.status">{{ floorStatusLabel(c.status) }}</span>
+                <div class="fpv-floorcard__meta">{{ c.roomCount }} 间</div>
+                <div class="fpv-floorcard__meta">{{ c.area.toFixed(0) }} ㎡</div>
+                <!-- 仅「非正常」楼层显示状态标签：正常(parsed) 不挂多余徽标，避免噪音；异常才提示 -->
+                <span v-if="c.status !== 'parsed'" class="fpv-floorcard__status" :data-s="c.status">{{ floorStatusLabel(c.status) }}</span>
               </button>
             </div>
           </section>
@@ -3055,7 +3057,7 @@ function enterEdit(): void {
 .fpv-hide-all { align-self: flex-start; }
 
 /* 楼层格子 */
-.fpv-floorgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(92px, 1fr)); gap: 8px; }
+.fpv-floorgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 8px; }
 .fpv-floorcard {
   display: flex; flex-direction: column; gap: 2px; align-items: flex-start;
   border: 1px solid #d0d5dd; background: #fff; border-radius: 9px; padding: 8px 10px;
@@ -3063,9 +3065,9 @@ function enterEdit(): void {
 }
 .fpv-floorcard:hover { border-color: #93c5fd; }
 .fpv-floorcard.active { background: #eff6ff; border-color: #2563eb; box-shadow: 0 0 0 2px rgba(37,99,235,.15); }
-.fpv-floorcard__no { font-size: 15px; font-weight: 700; color: #111827; }
-.fpv-floorcard__meta { font-size: 11px; color: #6b7280; }
-.fpv-floorcard__status { font-size: 11px; padding: 1px 7px; border-radius: 999px; background: #f1f5f9; color: #64748b; }
+.fpv-floorcard__no { font-size: 22px; font-weight: 700; color: #111827; line-height: 1.15; }
+.fpv-floorcard__meta { font-size: 15px; color: #6b7280; }
+.fpv-floorcard__status { font-size: 15px; padding: 3px 10px; border-radius: 999px; background: #f1f5f9; color: #64748b; }
 .fpv-floorcard__status[data-s="parsed"] { background: #dcfce7; color: #15803d; }
 .fpv-floorcard__status[data-s="partial"] { background: #fef9c3; color: #a16207; }
 .fpv-floorcard__status[data-s="failed"] { background: #fee2e2; color: #b91c1c; }

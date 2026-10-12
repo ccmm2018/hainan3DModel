@@ -214,26 +214,36 @@ function onStageMouseMove(e: MouseEvent): void {
       const g = gridGeom.value;
       if (g) {
         const cur = fromScreen(e.clientX, e.clientY);
-        // 移动算法（2026-10-08 重写）：「抓取点跟随 + 房间左上角吸附到最近网格」。
-        // 旧实现用「光标所在格 − 按下时光标所在格」推位移，但起始格是按 Math.round 把光标
-        // 位置映射的——抓取点只要偏离房间左上角（如抓房间正中，round(0.5)=1 会落到邻格），
-        // 起始格就错了：表现为有时要把鼠标拖过第二个房间才换位、有时一碰就跳格，且
-        // 向左 / 向右阈值不对称，位置不准确。新算法让房间左上角 = 光标位置 − 按下时的
-        // 抓取偏移，再吸附到最近格，抓哪里都一致，左右方向对称。
+        // 移动算法（2026-10-08 重写，2026-10-12 改落点判定）：「抓取点跟随 + 房间吸附到最近网格单元」。
+        // 房间当前左上角（楼层坐标）= 光标位置 − 按下时的抓取偏移；取其「中心」与 gridCells 中各单元中心比较，
+        // 落到离谁最近就吸附到那个单元。这样落点判定与 spanToRect 的实际绘制完全一致：
+        // 不会因「按房间左上角硬阈值分行（cur[1]-dragGrab.dy < midY）」在近排边界 / 2.5D 斜压下
+        // 把落点误判到相邻排，导致「拖 101↔102 却换成了下面的房间」之类错位。抓哪里、拖到哪格都一致。
         const cellW = g.width / ROOM_COLS;
-        const tC0 = Math.round((cur[0] - dragGrab.dx - g.minX) / cellW);
-        const tBi0 = cur[1] - dragGrab.dy < g.midY ? 0 : 1;
-        const next = clampSpanKeepSize({
-          bi0: tBi0,
-          bi1: tBi0 + (dragStartSpan.bi1 - dragStartSpan.bi0),
-          c0: tC0,
-          c1: tC0 + (dragStartSpan.c1 - dragStartSpan.c0),
-        });
-        if (next.c0 !== gridPos[rid]!.c0 || next.bi0 !== gridPos[rid]!.bi0) {
-          // 拖拽途中只移动被拖房间本身（允许视觉上暂时压到别的房间），不与沿途房间交换——
-          // 交换统一留到松手时按落点格做一次。此前「沿途逐格互换」会把其它房间来回搬运：
-          // 两间外观相同的房间互换后像「没反应」，继续拖又像「其它房间被拖到对应位置」。
-          gridPos[rid] = next;
+        const bands = [
+          { y0: g.minY, y1: g.midY - g.half },
+          { y0: g.midY + g.half, y1: g.maxY },
+        ];
+        const w = dragStartSpan.c1 - dragStartSpan.c0;
+        const h = dragStartSpan.bi1 - dragStartSpan.bi0;
+        const tlX = cur[0] - dragGrab.dx;
+        const tlY = cur[1] - dragGrab.dy;
+        const cx = tlX + ((w + 1) * cellW) / 2;
+        const cy = tlY + ((h + 1) * (bands[0]!.y1 - bands[0]!.y0)) / 2;
+        const near = nearestCell(cx, cy);
+        if (near) {
+          const next = clampSpanKeepSize({
+            bi0: near.bi,
+            bi1: near.bi + h,
+            c0: near.c,
+            c1: near.c + w,
+          });
+          if (next.c0 !== gridPos[rid]!.c0 || next.bi0 !== gridPos[rid]!.bi0) {
+            // 拖拽途中只移动被拖房间本身（允许视觉上暂时压到别的房间），不与沿途房间交换——
+            // 交换统一留到松手时按落点格做一次。此前「沿途逐格互换」会把其它房间来回搬运：
+            // 两间外观相同的房间互换后像「没反应」，继续拖又像「其它房间被拖到对应位置」。
+            gridPos[rid] = next;
+          }
         }
       }
     }
@@ -930,6 +940,41 @@ const gridGeom = computed(() => {
   const half = depth / 12;
   return { minX, maxX, minY, maxY, midY, half, width, depth };
 });
+
+/** 6×2 网格每个单元的中心（楼层坐标），用于拖拽落点吸附。
+ *  与 spanToRect 使用同一套 gridGeom / bands，保证「离哪个绘制单元中心最近就吸附到哪个」与画面完全一致，
+ *  杜绝「按房间左上角硬阈值分行」在近排边界处把落点误判到相邻排 → 表现为换错行/换错房间。 */
+const gridCells = computed(() => {
+  const g = gridGeom.value;
+  if (!g) return [];
+  const cellW = g.width / ROOM_COLS;
+  const bands = [
+    { y0: g.minY, y1: g.midY - g.half },
+    { y0: g.midY + g.half, y1: g.maxY },
+  ];
+  const cells: { bi: number; c: number; cx: number; cy: number }[] = [];
+  for (let bi = 0; bi < GRID_ROWS; bi++) {
+    for (let c = 0; c < ROOM_COLS; c++) {
+      cells.push({ bi, c, cx: g.minX + (c + 0.5) * cellW, cy: (bands[bi]!.y0 + bands[bi]!.y1) / 2 });
+    }
+  }
+  return cells;
+});
+/** 返回离 (fx, fy) 最近的网格单元（楼层坐标）行列号；无几何时返回 null。 */
+function nearestCell(fx: number, fy: number): { bi: number; c: number } | null {
+  const cells = gridCells.value;
+  if (!cells.length) return null;
+  let best = cells[0]!;
+  let bestD = Infinity;
+  for (const cell of cells) {
+    const d = (cell.cx - fx) ** 2 + (cell.cy - fy) ** 2;
+    if (d < bestD) {
+      bestD = d;
+      best = cell;
+    }
+  }
+  return { bi: best.bi, c: best.c };
+}
 
 /** 网格单元 → 楼层世界坐标矩形 [x0,y0,x1,y1]（与上/下排 bands 对齐） */
 function spanToRect(s: { bi0: number; bi1: number; c0: number; c1: number }): [number, number, number, number] {
@@ -2143,12 +2188,14 @@ function fromScreen(clientX: number, clientY: number, z = 0): [number, number] {
   const iy = (pt.y - f.padY) / f.scale;
   const ax = ix; // SX=0：深度错切为 0，ax 即对齐后 x
   const ay = (iy + z * Z_EXAG) / K.value; // iy = ay*K - z*Z_EXAG 反解
-  const { cx, cy, angle } = sourceAlign.value; // alignSource 绕质心旋转 -angle，此处反向旋转 +angle
-  const dx = ax - cx;
-  const dy = ay - cy;
-  const c = Math.cos(angle);
-  const s = Math.sin(angle);
-  return [dx * c - dy * s + cx, dx * s + dy * c + cy];
+  // ⚠️ 关键修复（2026-10-12）：此处返回「对齐坐标」(alignSource 之后、旋转转正坐标系)，
+  // 与 gridGeom / spanToRect / gridCells / dragGrab 完全一致。
+  // 旧实现在末尾又做了一次「反向旋转」把坐标还原成「楼层原始坐标」再返回，
+  // 导致拖拽落点判定（基于对齐坐标的网格几何）与光标反算（楼层坐标）处于两个不同空间——
+  // 当楼栋轮廓有旋转(angle≠0)时两者不一致，横向拖拽在楼层坐标里产生纵向分量，
+  // 从而被误判到相邻排（「拖 101 向右却掉到下一行」）。绘制、网格、吸附判定全部统一在对齐空间，
+  // 故这里必须返回对齐坐标，不得再逆旋转。
+  return [ax, ay];
 }
 
 /** 编辑模式：单击房间——仅选中高亮（蓝框），不弹窗；Shift/Ctrl 多选供合并。

@@ -240,6 +240,16 @@ export class MapScene {
   private frameCacheBroken = false;
   /** WebGL 软件渲染标记（SwiftShader/llvmpipe 等）：虚拟机会命中，必须走离屏 RT 合成才能压住空闲 CPU */
   private softwareRender = false;
+  /** 拖拽/缩放/旋转/飞行「交互中」标记：交互期间用低分辨率 RT 渲染压 CPU，静止后恢复高清 */
+  private interacting = false;
+  /** 交互静止判定定时器（视角变化后 120ms 无新变化视为静止，退出交互态） */
+  private interactTimer: ReturnType<typeof setTimeout> | null = null;
+  /** 交互期降分辨率离屏 RT（拖拽/缩放时降填充率压 CPU，静止贴图时拉伸到全屏） */
+  private frameRtLow: THREE.WebGLRenderTarget | null = null;
+  private lowRtW = 0;
+  private lowRtH = 0;
+  /** 交互期渲染分辨率倍率（0.6 = 填充率降至 36%）：拖动本就在动，略糊可接受，静止恢复全清 */
+  private static readonly INTERACT_SCALE = 0.6;
   /** 全屏贴图材质引用（RT 重建后需指向新纹理） */
   private blitMat: THREE.MeshBasicMaterial | null = null;
   /** 页面不可见时暂停渲染，彻底 0 占用 */
@@ -3020,6 +3030,8 @@ export class MapScene {
     if (!this.frameRt || this.frameRtKey !== `${bufW}x${bufH}`) {
       this.rebuildFrameRt(bufW, bufH);
     }
+    // 交互期低分辨率 RT 随全分辨率 RT 同步构建/重建
+    this.buildLowRt(bufW, bufH);
     if (!this.blitScene) this.buildBlitScene();
     return !!this.frameRt && !!this.blitScene && !this.frameCacheBroken;
   }
@@ -3084,6 +3096,41 @@ export class MapScene {
     this.frameCacheDirty = true;
   }
 
+  /** 把场景渲染进指定离屏 RT（按给定尺寸设视口/裁剪，透明清空） */
+  private renderToRt(rt: THREE.WebGLRenderTarget, w: number, h: number): void {
+    if (!this.renderer || !this.scene || !this.camera) return;
+    this.renderer.setRenderTarget(rt);
+    this.renderer.setViewport(0, 0, w, h);
+    this.renderer.setScissor(0, 0, w, h);
+    this.renderer.setScissorTest(false);
+    this.renderer.setClearColor(0x000000, 0);
+    this.renderer.clear(true, true, false);
+    this.renderer.render(this.scene, this.camera);
+    this.renderer.setRenderTarget(null);
+  }
+
+  /** 构建交互期降分辨率 RT（拖拽/缩放时降填充率压 CPU）；尺寸随全分辨率 RT 同步 */
+  private buildLowRt(w: number, h: number): void {
+    if (!this.renderer) return;
+    this.frameRtLow?.dispose();
+    const lw = Math.max(1, Math.round(w * MapScene.INTERACT_SCALE));
+    const lh = Math.max(1, Math.round(h * MapScene.INTERACT_SCALE));
+    const isWebGL2 = !!this.renderer?.capabilities?.isWebGL2;
+    const samples = this.lowEnd || this.softwareRender ? 0 : (isWebGL2 ? 4 : 0);
+    const opts: THREE.RenderTargetOptions = {
+      minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter,
+      generateMipmaps: false, depthBuffer: true, stencilBuffer: false, samples,
+    };
+    try {
+      this.frameRtLow = new THREE.WebGLRenderTarget(lw, lh, opts);
+    } catch {
+      try { this.frameRtLow = new THREE.WebGLRenderTarget(lw, lh, { ...opts, samples: 0 }); }
+      catch { this.frameRtLow = null; }
+    }
+    this.lowRtW = lw;
+    this.lowRtH = lh;
+  }
+
   /**
    * 检测地图视角是否变化（中心点 / 缩放 / 旋转 / 俯仰），
    * 变化时通知上层重算锚定浮层的屏幕位置。
@@ -3119,7 +3166,13 @@ export class MapScene {
     // 低配帧缓存 / 贴图场景 / 高亮材质缓存：随渲染器一起释放
     this.frameRt?.dispose();
     this.frameRt = null;
+    this.frameRtLow?.dispose();
+    this.frameRtLow = null;
+    this.lowRtW = 0;
+    this.lowRtH = 0;
     this.frameRtKey = '';
+    if (this.interactTimer) { clearTimeout(this.interactTimer); this.interactTimer = null; }
+    this.interacting = false;
     this.blitScene?.traverse((o) => {
       const m = o as THREE.Mesh;
       if (m.isMesh) {

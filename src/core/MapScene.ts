@@ -209,16 +209,15 @@ export class MapScene {
   private captureResolve: ((dataUrl: string) => void) | null = null;
 
   /**
-   * 渲染策略：AMap 的 GL 自定义图层在静止时仍持续回调 render()（GL 地图持续渲染循环），
+   * 渲染策略：AMap 的 GL 自定义图层每帧都会清掉本层帧缓冲后回调 render()，
    * 因此每帧都必须重新叠加绘制模型（不可整帧跳过，否则模型会闪烁/隐藏）。
    *
-   * 离屏 RT 合成 + 空闲只贴缓存帧（RT 可用时对所有机器启用，不再限 lowEnd）：
-   *  - 视角/内容变化（拖拽/缩放/悬停等）→ 按需重渲染场景一次（直绘跟手 或 弱机降分辨率 RT）；
-   *  - 完全静止帧 → 只把离屏 RT 全屏贴图（2 个三角形），CPU 开销塌缩到极低；
-   *    这是压住「弱机/GPU 加速关闭的浏览器静止后 CPU 仍 80%+」的关键——之前仅 lowEnd 走此路径，
-   *    导致有 GPU 但较弱的机器每帧全分辨率重绘整场景。
-   *  - 中/高端 GPU：交互期保持全分辨率直绘保跟手，静止后同样走空闲贴图，质量/跟手两不误。
-   * 真正的降载来自：相机同步节流、锚点投影防抖、GLB 并行预取，以及「静止帧只贴图」。
+   * 直接渲染（每帧只画一次场景，无离屏 RT / 全屏贴图）：
+   *  - 模型仅 3644 三角面，逐帧直绘开销可忽略；
+   *  - 视图静止时，相机同步已节流（见 render() 内 lastViewSig 判断）只跳过「相机重算」，仍每帧直绘；
+   *  - 不用离屏 RT 缓存，从根本上杜绝 RT 缓存与直绘两路视觉不一致导致的整模型闪烁
+   *    （悬停高亮切换、拖拽起止等场景尤其明显）。
+   * 真正的降载来自：相机同步节流、锚点投影防抖、GLB 并行预取，而非帧缓存。
    */
   private disposed = false;
 
@@ -249,10 +248,8 @@ export class MapScene {
   private frameRtLow: THREE.WebGLRenderTarget | null = null;
   private lowRtW = 0;
   private lowRtH = 0;
-  /** 低清 RT 的尺寸 key，仅在画布尺寸变化时重建（避免每帧 dispose+new 造成卡顿/GC 抖动） */
-  private lowRtKey = '';
-  /** 交互期渲染分辨率倍率（0.5 = 填充率降至 25%）：拖动本就在动，略糊可接受，静止恢复全清 */
-  private static readonly INTERACT_SCALE = 0.5;
+  /** 交互期渲染分辨率倍率（0.6 = 填充率降至 36%）：拖动本就在动，略糊可接受，静止恢复全清 */
+  private static readonly INTERACT_SCALE = 0.6;
   /** 全屏贴图材质引用（RT 重建后需指向新纹理） */
   private blitMat: THREE.MeshBasicMaterial | null = null;
   /** 页面不可见时暂停渲染，彻底 0 占用 */
@@ -2961,19 +2958,8 @@ export class MapScene {
     }
     this.renderer.resetState();
 
-    // ── 低配/软件渲染：离屏 RT 合成 ──
-    // 交互中（拖拽/缩放/旋转/飞行）：场景渲进「降分辨率 RT」再拉伸贴全屏（填充率降至 INTERACT_SCALE²），
-    //   相机每帧仍从地图同步 → 与底图地理对齐不漂移，仅拖动中略糊；这是压操作期 CPU 的关键。
-    //   此前该分支误走全分辨率直绘/全分辨率 RT，等于没优化 → 操作卡、连续操作 CPU 高。
-    // 静止后：首帧用全分辨率 RT 刷新一次，之后空闲帧只贴图（2 三角面），CPU 塌缩到极低。
-    // ⚠️ 关键修复（静止 CPU 长期 80%+）：此「离屏 RT 合成 + 空闲只贴缓存帧」架构
-    //   此前仅限 lowEnd 启用，导致「有 GPU 但较弱 / GPU 加速被浏览器关闭」的机器
-    //   (lowEnd=false) 走下方非低配直绘分支——而 AMap 2.0 GL 图层静止时仍持续回调 render()，
-    //   于是每帧把整场景全分辨率重绘一次 → CPU 长期 80%+。
-    //   现改为：只要 RT 可用（非 frameCacheBroken）就对全部分辨率档位启用。
-    //   - 弱 GPU(lowEnd)：交互期降分辨率 RT 压填充率，静止后空闲只贴图（2 三角面）。
-    //   - 中/高端 GPU：交互期保持全分辨率直绘保跟手；静止后空闲只贴图，CPU 塌缩到极低。
-    if (!this.frameCacheBroken) {
+    // ── 低配/软件渲染：离屏 RT 合成（空闲帧只贴图压 CPU；拖拽直绘保跟手；内容变化走同源 blit 防闪烁）──
+    if (this.lowEnd && !this.frameCacheBroken) {
       if (!this.ensureFrameCache(bufW, bufH)) {
         // 缓存不可用 → 退化直绘，保证模型始终可见
         this.renderer.setRenderTarget(null);
@@ -2981,43 +2967,56 @@ export class MapScene {
         this.renderer.render(this.scene, this.camera);
         return;
       }
-      if (this.interacting && this.lowEnd) {
-        // 仅弱 GPU 在交互期降分辨率（中/高端 GPU 走下方统一「RT→贴图」路径，同样全分辨率且逐帧一致）。
-        // 始终渲进低清 RT（每帧，保持与底图同步）→ 拉伸贴全屏。geo 对齐不丢，仅分辨率降。
-        const low = this.frameRtLow ?? this.frameRt;
-        const lw = this.frameRtLow ? this.lowRtW : bufW;
-        const lh = this.frameRtLow ? this.lowRtH : bufH;
-        if (low) {
-          this.renderToRt(low, lw, lh);
-          this.blitToScreen(low, vw, vh);
-        } else {
-          // 极端：低清与全清 RT 都不可用时退化直绘，保证可见
-          this.renderer.setRenderTarget(null);
-          this.renderer.clearDepth();
-          this.renderer.render(this.scene, this.camera);
-        }
-        // 交互中的内容/视角脏标记统一在「交互结束」时一次性清算（见 endInteract），避免逐帧全分辨率重绘
+      if (this.contentDirty) {
+        // 内容变化（高亮/选型/房间/校准等）：渲染进离屏 RT 后贴图，与空闲帧同一 blit 路径，
+        // 从根上避免「直绘↔贴图」两路切换导致的悬停整模型闪一下。
+        this.renderer.setRenderTarget(this.frameRt);
+        this.renderer.setViewport(0, 0, bufW, bufH);
+        this.renderer.setScissor(0, 0, bufW, bufH);
+        this.renderer.setScissorTest(false);
+        this.renderer.setClearColor(0x000000, 0);
+        this.renderer.clear(true, true, false);
+        this.renderer.render(this.scene, this.camera);
+        this.renderer.setRenderTarget(null);
         this.contentDirty = false;
+        this.rtStale = false; // RT 已含最新内容，后续空闲帧可直接贴图
+        // 落到下方 blit 把新 RT 贴到屏幕
+      } else if (this.frameCacheDirty) {
+        // 视角变化（拖拽/缩放/旋转/飞行）：直接渲染到屏幕，1 趟保跟手，负载与原版一致；
+        // 标记 RT 落后，待静止首帧再悄悄刷新，避免重复重渲染场景。
+        this.renderer.setRenderTarget(null);
+        this.renderer.clearDepth();
+        this.renderer.render(this.scene, this.camera);
         this.frameCacheDirty = false;
+        this.rtStale = true;
+        return;
+      } else if (this.rtStale) {
+        // 静止首帧：先直接渲染（与活动帧像素一致 → 零跳变），再悄悄把当前画面刷进离屏 RT 供后续贴图
+        this.renderer.setRenderTarget(null);
+        this.renderer.clearDepth();
+        this.renderer.render(this.scene, this.camera);
+        this.renderer.setRenderTarget(this.frameRt);
+        this.renderer.setViewport(0, 0, bufW, bufH);
+        this.renderer.setScissor(0, 0, bufW, bufH);
+        this.renderer.setScissorTest(false);
+        this.renderer.setClearColor(0x000000, 0);
+        this.renderer.clear(true, true, false);
+        this.renderer.render(this.scene, this.camera);
+        this.renderer.setRenderTarget(null);
+        this.rtStale = false;
         return;
       }
-      // ── 统一「渲染进全清 RT → 全屏贴图」路径（覆盖内容变化/视角变化/交互(非弱机)/静止）──
-      // ⚠️ 关键修复（缩放/拖拽时模型闪烁）：原先「视角变化直绘 + 静止贴 RT」两路输出，
-      // 因 RT 多重采样(MSAA)与直绘抗锯齿不一致、且直绘帧不刷新 RT 导致贴图帧偶现旧视角，
-      // 在「滚轮逐格缩放」这类「变化帧↔静止帧」交替下表现为模型边缘闪烁 / 位置跳动。
-      // 现统一为「始终渲染进同一张全清 RT 再贴图」：活动帧与静止帧走完全同一条画面对，
-      // 输出像素逐帧一致 → 彻底消除闪烁；空闲帧仍只贴图（2 三角面），CPU 不回升。
-      if (this.contentDirty || this.frameCacheDirty || this.rtStale) {
-        this.renderToRt(this.frameRt!, bufW, bufH);
-        this.contentDirty = false;
-        this.frameCacheDirty = false;
-        this.rtStale = false;
-      }
-      this.blitToScreen(this.frameRt!, vw, vh);
+      // 完全静止帧（或内容变化刚刷过 RT）：只把离屏 RT 贴到画布（2 个三角形），
+      // 空闲 CPU 塌缩到极低，彻底解决弱机「空闲也每帧重绘整场景 → CPU 长期 90%」的问题。
+      this.renderer.setViewport(0, 0, vw, vh);
+      this.renderer.setScissor(0, 0, vw, vh);
+      this.renderer.setScissorTest(false);
+      this.renderer.clearDepth();
+      this.renderer.render(this.blitScene!, this.blitCam!);
       return;
     }
 
-    // ── RT 不可用兜底：直绘场景（仅在 frameCacheBroken 时走到，确保模型始终可见）──
+    // ── 非低配：直绘场景（原稳健路径）──
     // AMap 每帧会清掉本层颜色+深度缓冲后再回调本函数。
     // 重置到屏幕缓冲并仅清深度（不清颜色，避免擦掉底图）：让模型从干净的深度状态自算遮挡关系，
     // 始终压在底图之上，避免地形/建筑深度误遮挡导致的闪烁类伪影。
@@ -3028,16 +3027,11 @@ export class MapScene {
 
   /** 懒初始化离屏缓存：首次或尺寸变化时构建 RT 与全屏贴图场景；返回是否可用 */
   private ensureFrameCache(bufW: number, bufH: number): boolean {
-    const key = `${bufW}x${bufH}`;
-    if (!this.frameRt || this.frameRtKey !== key) {
-      this.rebuildFrameRt(bufW, bufH); // 内部会置 frameRtKey
+    if (!this.frameRt || this.frameRtKey !== `${bufW}x${bufH}`) {
+      this.rebuildFrameRt(bufW, bufH);
     }
-    // 交互期低分辨率 RT 仅在画布尺寸变化时重建（派生自全清 RT 尺寸，故复用同一 key）。
-    // ⚠️ 必须守卫：buildLowRt 内部会 dispose 旧 RT 再 new，若每帧调用将造成 GPU 资源反复
-    // 申请/释放 + GC 抖动，反而比直绘更卡。
-    if (!this.frameRtLow || this.lowRtKey !== key) {
-      this.buildLowRt(bufW, bufH);
-    }
+    // 交互期低分辨率 RT 随全分辨率 RT 同步构建/重建
+    this.buildLowRt(bufW, bufH);
     if (!this.blitScene) this.buildBlitScene();
     return !!this.frameRt && !!this.blitScene && !this.frameCacheBroken;
   }
@@ -3115,23 +3109,6 @@ export class MapScene {
     this.renderer.setRenderTarget(null);
   }
 
-  /** 把指定离屏 RT 拉伸贴到屏幕（全屏 quad，透明混合叠加到底图之上）。RT 与画布同比例 → 不会变形 */
-  private blitToScreen(rt: THREE.WebGLRenderTarget, vw: number, vh: number): void {
-    if (!this.renderer) return;
-    // ⚠️ 仅在贴图对象真正变化时才重绑材质并触发 needsUpdate（否则每帧重编译着色器 → 隐形高开销）。
-    // 静止帧每帧贴的是同一张 RT 纹理，无需重编。
-    if (this.blitMat && this.blitMat.map !== rt.texture) {
-      this.blitMat.map = rt.texture;
-      this.blitMat.needsUpdate = true;
-    }
-    this.renderer.setRenderTarget(null);
-    this.renderer.setViewport(0, 0, vw, vh);
-    this.renderer.setScissor(0, 0, vw, vh);
-    this.renderer.setScissorTest(false);
-    this.renderer.clearDepth();
-    this.renderer.render(this.blitScene!, this.blitCam!);
-  }
-
   /** 构建交互期降分辨率 RT（拖拽/缩放时降填充率压 CPU）；尺寸随全分辨率 RT 同步 */
   private buildLowRt(w: number, h: number): void {
     if (!this.renderer) return;
@@ -3152,7 +3129,6 @@ export class MapScene {
     }
     this.lowRtW = lw;
     this.lowRtH = lh;
-    this.lowRtKey = `${w}x${h}`;
   }
 
   /**
@@ -3166,23 +3142,12 @@ export class MapScene {
     let sig = '';
     try {
       const c = this.map.getCenter?.();
-      // ⚠️ 关键：对浮点做「粗网格量化」再拼签名。高德相机在静止时仍有亚像素浮点抖动，
-      // 旧实现用「固定小数位」取整（zoom 取 4 位），抖动落在小数末位附近时会逐帧翻转签名
-      // （如 17.9999 ↔ 18.0001）→ interacting 永远不结束 + frameCacheDirty 每帧置真 →
-      // 静止后仍每帧整场景重绘（极速浏览器 CPU 长期 85-90% 且「不稳定」）。
-      // 改为「按远大于抖动的步长量化」：lng/lat 1e-5≈1.1m、zoom 1e-3、角度 0.1°，
-      // 静止时量化值恒定 → 签名稳定 → interacting 在 120ms 后可靠结束，静止帧只贴图（CPU 塌缩）。
-      // 量化步长 ≫ 静止抖动，且慢速拖动时模型最多滞后 ≤2px（不可见），换取静止 CPU 归零。
-      const q = (v: number | undefined, step: number): string => {
-        if (v === undefined || v === null || Number.isNaN(v)) return '';
-        return String(Math.round(v / step) * step);
-      };
       sig = [
-        q(c?.lng, 1e-5),
-        q(c?.lat, 1e-5),
-        q(this.map.getZoom?.(), 1e-3),
-        q(this.map.getRotation?.(), 0.1),
-        q(this.map.getPitch?.(), 0.1),
+        c?.lng,
+        c?.lat,
+        this.map.getZoom?.(),
+        this.map.getRotation?.(),
+        this.map.getPitch?.(),
       ].join(',');
     } catch {
       return;
@@ -3190,19 +3155,6 @@ export class MapScene {
     if (sig === this.lastViewSig) return;
     this.lastViewSig = sig;
     this.callbacks.onViewChange?.();
-    // 视角变了 → 进入「交互中」：降分辨率渲染压 CPU。120ms 内无新变化视为静止，退出交互态（见 endInteract）
-    this.interacting = true;
-    if (this.interactTimer) clearTimeout(this.interactTimer);
-    this.interactTimer = setTimeout(() => this.endInteract(), 120);
-  }
-
-  /** 交互静止：退出降分辨率态，强制下一帧用全分辨率渲染恢复高清（随后 rtStale 补刷全清 RT） */
-  private endInteract(): void {
-    this.interactTimer = null;
-    if (!this.interacting) return;
-    this.interacting = false;
-    this.frameCacheDirty = true; // 下一帧直绘全清一帧，rtStale 分支再静默补刷全清 RT
-    this.rtStale = true;
   }
 
   // -------------------------------------------------------------------------
@@ -3218,7 +3170,6 @@ export class MapScene {
     this.frameRtLow = null;
     this.lowRtW = 0;
     this.lowRtH = 0;
-    this.lowRtKey = '';
     this.frameRtKey = '';
     if (this.interactTimer) { clearTimeout(this.interactTimer); this.interactTimer = null; }
     this.interacting = false;

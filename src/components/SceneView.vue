@@ -836,6 +836,7 @@ function updateAnchors() {
 function onWindowResize() {
   readContainerSize();
   updateAnchors();
+  scene?.onResize();
 }
 
 /** 开发态诊断：输出锚点与容器尺寸，便于排查浮层定位问题（生产构建不输出） */

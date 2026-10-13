@@ -2781,6 +2781,30 @@ export class MapScene {
   }
 
   /**
+   * 容器尺寸变化（窗口 resize / 侧栏开合 / 布局变化）后**显式**同步相机宽高比与投影矩阵。
+   *
+   * 此前 resize 仅靠上方 render() 每帧按 drawingBuffer 兜底重算（见 renderCachedFrame 内
+   * appliedVpW/vh 判断）：纯 resize（不伴随地图平移/缩放）时视角签名不变、不会重拉相机参数，
+   * camera.aspect 要等 drawingBuffer 变化后的那一帧才修正，存在「窗口变化时模型短暂拉伸/压扁」的间隙。
+   * 这里主动同步并唤醒一次重绘，保证 resize 当帧即正确。
+   *
+   * ⚠️ 不调用 renderer.setSize：本 renderer 渲染进 AMap 的 GL 画布（尺寸由高德管理），视口已在
+   * renderCachedFrame 每帧按真实 drawingBuffer 重设，故只需修正相机 aspect 即可。
+   */
+  onResize(): void {
+    if (!this.camera || !this.container) return;
+    const width = this.container.clientWidth || 1;
+    const height = this.container.clientHeight || 1;
+    const asp = width / height;
+    if (Math.abs(this.camera.aspect - asp) > 1e-4) {
+      this.camera.aspect = asp;
+      this.camera.updateProjectionMatrix();
+    }
+    this.frameCacheDirty = true; // 标记下一帧重渲（低配 RT 路径会据此重渲进 RT；强机路径本就每帧直绘）
+    this.scheduleRender();        // 唤醒一次重绘，变更立即上屏（即使地图认为无变化）
+  }
+
+  /**
    * 飞行到模型对象的「可见中心」（世界包围盒中心，约在建筑半高处），
    * 让楼栋主体而非其地面原点居中，浮层锚点也据此钉在楼栋可见范围内。
    */

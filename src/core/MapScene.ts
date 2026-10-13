@@ -238,8 +238,11 @@ export class MapScene {
   private rtStale = false;
   /** 离屏缓存彻底不可用标记：极少数环境下 RT 创建失败，置真后退化直绘，保证模型始终可见 */
   private frameCacheBroken = false;
-  /** WebGL 软件渲染标记（SwiftShader/llvmpipe 等）：虚拟机会命中，必须走离屏 RT 合成才能压住空闲 CPU */
+  /** WebGL 软件渲染标记（SwiftShader/llvmpipe 等）：虚拟机会命中；据此关闭离屏 RT 缓存（软件光栅下空闲 blit 仍全屏 CPU 光栅化，比直绘更费），走直绘兜底 */
   private softwareRender = false;
+  /** 离屏 RT 缓存是否启用：仅在「真实弱 GPU（hardwareConcurrency<=4）或用户 ?lowend=1」时启用；
+   *  软件渲染/老内核·32位 UA 强制的低配下关闭，改走逐帧直绘兜底，避免 RT 缓存在该类环境反而推高 CPU */
+  private rtCacheEnabled = true;
   /** 拖拽/缩放/旋转/飞行「交互中」标记：交互期间用低分辨率 RT 渲染压 CPU，静止后恢复高清 */
   private interacting = false;
   /** 交互静止判定定时器（视角变化后 120ms 无新变化视为静止，退出交互态） */
@@ -436,6 +439,20 @@ export class MapScene {
         if (this.softwareRender) lowEnd = true;
         // 释放临时上下文，避免占用浏览器有限的 WebGL 上下文配额
         tgl.getExtension('WEBGL_lose_context')?.loseContext();
+      }
+    } catch { /* ignore */ }
+
+    // 32 位 / 老旧 Chromium 内核（如 360极速浏览器 Chromium 86）识别：
+    // 这类浏览器进程地址空间受限、GPU 能力弱，即便 hardwareConcurrency/deviceMemory 报“够用”，
+    // 持续渲染下 CPU 仍会打满。UA 命中“Chromium 主版本 < 100”或“32 位构建”即强制低配，
+    // 复用下方已有的全部低配降级（关 AA、像素比 1、关阴影、跳过 PMREM、贴图≤512、RT 空闲只贴图）。
+    try {
+      const ua = navigator.userAgent || '';
+      const m = ua.match(/Chrom(?:e|ium)\/(\d+)/);
+      const major = m ? parseInt(m[1], 10) : NaN;
+      const is32Bit = /WOW64|Win32|i686|i386/i.test(ua) && !/x86_64|aarch64/.test(ua);
+      if ((!Number.isNaN(major) && major < 100) || is32Bit) {
+        lowEnd = true;
       }
     } catch { /* ignore */ }
 
@@ -729,7 +746,7 @@ export class MapScene {
         let materialFixed = 0;
         let textureReduced = 0;
         if (this.lowEnd) {
-          // 低配：先缩贴图、再检测黑图。尽早把大位图换成 ≤512 的 canvas，
+          // 低配：先缩贴图、再检测黑图。尽早把大位图换成 ≤256 的 canvas，
           // 降低整段后处理的内存峰值（4GB 机器上 450MB+ 峰值会触发交换，表现为整体卡顿）。
           await this.runChunked(textures, '优化贴图', (tex) => {
             if (this.reduceTextureForLowEnd(tex)) textureReduced++;
@@ -1556,7 +1573,7 @@ export class MapScene {
   private reduceTextureForLowEnd(tex: THREE.Texture): boolean {
     if (!this.lowEnd) return false;
     if (typeof document === 'undefined') return false; // 非浏览器环境（如测试）跳过
-    const MAX = 512; // 低配贴图尺寸上限（最长边）
+    const MAX = 256; // 低端/32 位机型贴图尺寸上限（最长边）：较 512 再减半 GPU 显存与纹理带宽
     // 关闭 mipmap + 线性过滤 + 各向异性=1（低配优先首帧速度，避免 mip 链生成与三线性采样开销）
     tex.generateMipmaps = false;
     tex.minFilter = THREE.LinearFilter;

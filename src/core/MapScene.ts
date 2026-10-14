@@ -21,6 +21,15 @@ import area from '@turf/area';
 /** 首屏性能量算基准：模块脚本执行时刻（≈页面交互起点），用于把各阶段耗时统一到「距页面加载」 */
 const SCENE_T0 = performance.now();
 
+/** 常驻楼栋名称标签的数据结构 */
+interface BuildingLabel {
+  node: string; // GLB 节点名（数字主键，0–25）
+  display: string; // 显示名（真实楼名，来自 buildingNameAliases）
+  obj: THREE.Object3D; // 对应建筑节点（用于按校准后的世界矩阵重算锚点）
+  anchor: THREE.Vector3; // 楼栋世界坐标顶端中心（缓存，校准后重建）
+  el: HTMLDivElement;
+}
+
 /** 拾取结果 */
 export interface PickResult {
   /** 被射线命中的 Mesh */
@@ -285,6 +294,14 @@ export class MapScene {
   /** 视为「建筑（可点击 / 可选中）」的 GLB 节点名白名单（来自 config.buildingNodeNames） */
   private buildingNames = new Set<string>();
 
+  // —— 常驻楼栋名称标签（无需悬停即显示，钉在每栋楼顶端）——
+  private labelLayer: HTMLDivElement | null = null;
+  private buildingLabels: BuildingLabel[] = [];
+  private selectedBuildingName = '';
+  private labelsDirty = true;
+  private lastLabelSig = '';
+  private labelStyleInjected = false;
+
   /** 模型校准（微调对齐）增量参数，叠加在 config 基础定位之上 */
   private calibration: ModelCalibration = { ...DEFAULT_CALIBRATION };
   /**
@@ -529,18 +546,18 @@ export class MapScene {
 
     // 环境贴图（IBL）：PBR 材质需要环境光照才能呈现正确质感（尤其是金属度/粗糙度与边缘反射）。
     // 缺少 scene.environment 时，很多外立面材质会因为没有环境反射而显得「发灰、发暗、像没贴图」，
-    // 这正是「GLB 材质丢失」最常见的原因。这里用 RoomEnvironment 程序化生成一张轻量环境贴图。
-    // 低配机器跳过 PMREM 生成（其 fromScene 需在初始化时渲染多遍立方体贴图，是一次性 GPU 峰值），
-    // 直接由下方的环境光 + 半球光 + 主/补光提供基础照明，避免加载瞬间 CPU/GPU 被打满。
-    if (!this.lowEnd) {
-      try {
-        const pmrem = new THREE.PMREMGenerator(this.renderer);
-        const envTex = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
-        this.scene.environment = envTex;
-        pmrem.dispose();
-      } catch {
-        /* 极少数 WebGL 环境下 PMREM 不可用，退化为基础灯光照明（不影响几何显示） */
-      }
+    // 这正是「GLB 材质丢失」最常见的原因（下方 setupLights 的环境/半球/主补光仅作兜底，无法替代 IBL 反射）。
+    // 故「始终」生成环境贴图——它决定了材质正确观感，不能因 lowEnd 跳过；代价仅是加载时一次性的
+    // PMREM 渲染（位于加载遮罩之后、模型挂载之前，不进入逐帧循环，对运行期 CPU/帧率无影响）。
+    // 历史坑：早先实现在 lowEnd 下跳过 PMREM，导致 360极速等被强制低配的环境里楼栋整体发灰/发暗、观感像材质丢失；
+    //       现改为始终生成，材质恢复正确，且 CPU 优化旋钮（像素比/阴影/RT缓存/抗锯齿）仍由 lowEnd 独立控制。
+    try {
+      const pmrem = new THREE.PMREMGenerator(this.renderer);
+      const envTex = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+      this.scene.environment = envTex;
+      pmrem.dispose();
+    } catch {
+      /* 极少数 WebGL 环境下 PMREM 不可用，退化为基础灯光照明（不影响几何显示） */
     }
 
     // 量算图层：独立于模型，始终绘制在模型之上
@@ -784,40 +801,32 @@ export class MapScene {
         let npotFixed = 0;
         let materialFixed = 0;
         let textureReduced = 0;
-        if (this.lowEnd) {
-          // 低配：先缩贴图、再检测黑图。尽早把大位图换成 ≤256 的 canvas，
-          // 降低整段后处理的内存峰值（4GB 机器上 450MB+ 峰值会触发交换，表现为整体卡顿）。
+        // 两种模式共用「安全的贴图适配」流程，保证材质观感一致，避免低配下楼栋发灰 / 贴图被改 / 非楼栋材质被误伤：
+        //  - 缩放超大贴图：防止 WebGL1 的 MAX_TEXTURE_SIZE 超限导致材质回退为白/灰平面（=「材质丢失」）。
+        //  - NPOT 适配：WebGL1 下「NPOT 尺寸 + mipmap」会被驱动丢弃，导致黑/空白；改为无 mipmap+线性+钳制（WebGL2 跳过）。
+        //  - 检测并替换均匀黑损坏贴图：修复 GLB 导出/烘焙失败的黑墙（此修复经用户确认有效）。
+        // 注：早期实现在低配分支用「缩到 ≤256 + 关 mipmap」处理所有贴图（含非建筑对象），会令材质发灰/变糊、观感像丢失；现已弃用该路径。
+        await this.runChunked(textures, '缩放超大贴图', (tex) => {
+          if (this.clampTextureToMaxSize(tex)) clampedCount++;
+        });
+        if (this.disposed) return;
+        await this.runChunked(textures, '适配 WebGL1 贴图', (tex) => {
+          if (this.makeTextureWebGL1Safe(tex)) npotFixed++;
+        });
+        if (this.disposed) return;
+        // 仅当确为「软件光栅(SwiftShader)且贴图极大」时，再温和降一次尺寸以压低逐帧填充率；
+        // 保留 mipmap 与过滤方式，不伤观感。32 位/老内核 UA 强制的低配（如 360极速）不在此列——
+        // 其瓶颈在 AMap 自身逐帧重绘，降纹理无效且会改观感，故跳过。
+        if (this.lowEnd && this.softwareRender) {
           await this.runChunked(textures, '优化贴图', (tex) => {
             if (this.reduceTextureForLowEnd(tex)) textureReduced++;
           });
           if (this.disposed) return;
-          await this.runChunked(mapPairs, '检测损坏贴图', (pair) => {
-            if (this.fixMatMapIfBlack(pair)) materialFixed++;
-          });
-          if (this.disposed) return;
-        } else {
-          // WebGL1（高德 GLCustomLayer 提供）对单张贴图尺寸有 MAX_TEXTURE_SIZE 上限，
-          // 超过上限的 JPEG 会上传失败、对应材质回退成白色/灰色平面，表现为「材质丢失」。
-          // 这里把所有超尺寸贴图等比缩到上限以内（仅重绘到 canvas，不改原始 GLB 文件）。
-          await this.runChunked(textures, '缩放超大贴图', (tex) => {
-            if (this.clampTextureToMaxSize(tex)) clampedCount++;
-          });
-          if (this.disposed) return;
-          // WebGL1 下「NPOT 尺寸贴图 + mipmap」会被驱动直接丢弃，导致部分建筑材质渲染失败（黑色/空白），
-          // 观感即「材质丢失」。主动降级为「无 mipmap + 线性过滤 + 边缘钳制」使其可正常显示（WebGL2 跳过）。
-          await this.runChunked(textures, '适配 WebGL1 贴图', (tex) => {
-            if (this.makeTextureWebGL1Safe(tex)) npotFixed++;
-          });
-          if (this.disposed) return;
-          // GLB 文件本身存在「渲染后纯黑」的损坏立面贴图（导出/烘焙失败所致），会让对应楼栋渲染成黑墙，
-          // 观感即「材质丢失」。离线逐张解码已实证共 6 张（mean≈0/std≈0），加载后做启发式检测并替换为
-          // 程序化立面纹理。此一类修复经用户确认有效（「墙面发黑问题已修复」），不再做其它运行时材质改写，
-          // 以免误伤楼栋原本正常的材质/屋顶/地面。
-          await this.runChunked(mapPairs, '检测损坏贴图', (pair) => {
-            if (this.fixMatMapIfBlack(pair)) materialFixed++;
-          });
-          if (this.disposed) return;
         }
+        await this.runChunked(mapPairs, '检测损坏贴图', (pair) => {
+          if (this.fixMatMapIfBlack(pair)) materialFixed++;
+        });
+        if (this.disposed) return;
         // 所有贴图处理完成后再挂入场景：避免在「让出帧」期间 AMap 提前渲染、把全分辨率贴图先上传一遍 GPU
         // （那样低配机器仍会先承受一次 450MB 上传峰值）。挂入后 AMap 第一次渲染拿到的就是已降级的贴图。
         this.scene!.add(this.modelRoot);
@@ -834,6 +843,8 @@ export class MapScene {
         this.markDirty();
         // 取景前先构建各建筑世界 AABB，供后续悬停拾取做粗筛（避免全模型 raycast）。
         this.refreshBuildingBoxes();
+        // 构建常驻楼栋名称标签（钉在每栋楼顶端，无需悬停即显示）。
+        this.buildBuildingLabels();
         // 取景：按当前屏幕把缩放精确推到「刚好能看到全部建筑」的最大级别。
         // 取景挂了迭代微调时，onFitComplete 由 endFitRefine() 在收敛后触发；
         // 未挂微调（fitToBuildings 内部提前返回）时在这里同步补一次，
@@ -1603,46 +1614,42 @@ export class MapScene {
   }
 
   /**
-   * 低配设备：激进削减单张贴图的首帧开销（返回是否生效；低配下恒为 true，与旧实现的计数语义一致）。
-   * 低配机器优先保证加载速度与流畅度，代价是远处略带锯齿。
-   *  - 对**所有**贴图关闭 mipmap + 退为线性过滤 + 各向异性=1：省掉 mip 链生成（纯 CPU 浪费）与三线性采样；
-   *  - 对最长边 > 512 的贴图重绘到 ≤512 的 canvas：首帧 GPU 上传量最多降 4~16 倍
-   *    （原 1024² 贴图 4MB/张 × 108 张 ≈ 450MB，缩到 512² 后仅约 110MB，且无需 mip 链）。
+   * 软件光栅环境下的温和贴图降尺寸（返回是否实际发生了降尺寸，仅用于计数）。
+   * 仅当「lowEnd 且确为软件光栅(SwiftShader)」且贴图最长边 > 1024 时才重绘到较小 canvas：
+   *  - 软件光栅下整条 GL 流水线在 CPU 上跑，缩小极大贴图可略降逐帧填充率；
+   *  - 但**保留 mipmap 与过滤方式**（不关、不改），否则楼栋/非楼栋材质会发灰、变糊、闪烁，观感像材质丢失；
+   *  - 32 位/老内核 UA 强制的低配（如 360极速浏览器）走不到这里：其瓶颈在 AMap 自身逐帧重绘，
+   *    降纹理既无效又伤观感，故直接跳过（见 runModelOnLoad 中的调用门控）。
    */
   private reduceTextureForLowEnd(tex: THREE.Texture): boolean {
-    if (!this.lowEnd) return false;
+    if (!this.lowEnd || !this.softwareRender) return false;
     if (typeof document === 'undefined') return false; // 非浏览器环境（如测试）跳过
-    const MAX = 256; // 低端/32 位机型贴图尺寸上限（最长边）：较 512 再减半 GPU 显存与纹理带宽
-    // 关闭 mipmap + 线性过滤 + 各向异性=1（低配优先首帧速度，避免 mip 链生成与三线性采样开销）
-    tex.generateMipmaps = false;
-    tex.minFilter = THREE.LinearFilter;
-    tex.anisotropy = 1;
-    tex.needsUpdate = true;
+    const MAX = 1024; // 仅对极大贴图温和降尺寸；保留 mipmap，避免观感退化
     const img = tex.image as { width?: number; height?: number } | undefined;
     const w = img?.width ?? 0;
     const h = img?.height ?? 0;
-    if (!w || !h) return true;
+    if (!w || !h) return false;
     const longest = Math.max(w, h);
-    // 大贴图缩尺寸：重绘到较小 canvas，首帧 GPU 上传量随之下降
-    if (longest > MAX) {
-      const scale = MAX / longest;
-      const nw = Math.max(1, Math.round(w * scale));
-      const nh = Math.max(1, Math.round(h * scale));
-      try {
-        const canvas = document.createElement('canvas');
-        canvas.width = nw;
-        canvas.height = nh;
-        const ctx = canvas.getContext('2d');
-        if (ctx) {
-          ctx.drawImage(img as CanvasImageSource, 0, 0, nw, nh);
-          tex.image = canvas;
-          tex.needsUpdate = true;
-        }
-      } catch {
-        /* 个别 ImageBitmap/跨域 drawImage 抛错则保留原图 */
+    if (longest <= MAX) return false;
+    const scale = MAX / longest;
+    const nw = Math.max(1, Math.round(w * scale));
+    const nh = Math.max(1, Math.round(h * scale));
+    try {
+      const canvas = document.createElement('canvas');
+      canvas.width = nw;
+      canvas.height = nh;
+      const ctx = canvas.getContext('2d');
+      if (ctx) {
+        // 不改动 generateMipmaps / minFilter / anisotropy：保留原材质观感，仅缩小像素量
+        ctx.drawImage(img as CanvasImageSource, 0, 0, nw, nh);
+        tex.image = canvas;
+        tex.needsUpdate = true;
+        return true;
       }
+    } catch {
+      /* 个别 ImageBitmap/跨域 drawImage 抛错则保留原图 */
     }
-    return true;
+    return false;
   }
 
   /**
@@ -1787,10 +1794,161 @@ export class MapScene {
     this.buildingBoxes = boxes;
   }
 
+  // -------------------------------------------------------------------------
+  // 常驻楼栋名称标签（无需悬停即显示）
+  // -------------------------------------------------------------------------
+  private ensureLabelStyle(): void {
+    if (this.labelStyleInjected) return;
+    if (document.getElementById('bld-labels-style')) {
+      this.labelStyleInjected = true;
+      return;
+    }
+    const style = document.createElement('style');
+    style.id = 'bld-labels-style';
+    // 标签为纯展示 DOM（pointer-events:none），坐标由 render() 每帧用相机投影写入。
+    style.textContent =
+      '.bld-label{position:absolute;transform:translate(-50%,-100%);pointer-events:none;' +
+      'font-size:12px;line-height:1;padding:3px 7px;border-radius:6px;white-space:nowrap;' +
+      'background:rgba(17,24,39,.78);color:#fff;border:1px solid rgba(255,255,255,.15);' +
+      'box-shadow:0 1px 4px rgba(0,0,0,.35);user-select:none;will-change:transform;' +
+      'transition:opacity .12s ease;z-index:5;font-family:inherit}' +
+      '.bld-label::after{content:"";position:absolute;left:50%;top:100%;transform:translateX(-50%);' +
+      'border:5px solid transparent;border-top-color:rgba(17,24,39,.78)}' +
+      '.bld-label--active{background:rgba(37,99,235,.92);border-color:#fff;font-weight:600}' +
+      '.bld-label--hidden{display:none}';
+    document.head.appendChild(style);
+    this.labelStyleInjected = true;
+  }
+
+  private createLabelLayer(): void {
+    if (this.labelLayer) return;
+    const layer = document.createElement('div');
+    layer.className = 'bld-label-layer';
+    layer.style.position = 'absolute';
+    layer.style.inset = '0';
+    layer.style.overflow = 'hidden';
+    layer.style.pointerEvents = 'none';
+    layer.style.zIndex = '4';
+    this.container.appendChild(layer);
+    this.labelLayer = layer;
+  }
+
+  /** 为每个建筑节点创建一枚常驻标签，并缓存其世界锚点（楼栋顶端中心） */
+  private buildBuildingLabels(): void {
+    if (!this.modelRoot) return;
+    this.ensureLabelStyle();
+    this.createLabelLayer();
+    for (const l of this.buildingLabels) l.el.remove();
+    this.buildingLabels = [];
+    this.modelRoot.updateMatrixWorld(true);
+    const aliases = this.config.buildingNameAliases || {};
+    for (const node of this.buildingNames) {
+      const obj = this.modelRoot.getObjectByName(node);
+      if (!obj) continue;
+      const el = document.createElement('div');
+      el.className = 'bld-label';
+      const display = aliases[node] ?? node;
+      el.textContent = display;
+      el.dataset.node = node;
+      this.labelLayer!.appendChild(el);
+      this.buildingLabels.push({ node, display, obj, anchor: new THREE.Vector3(), el });
+    }
+    this.rebuildLabelAnchors();
+    this.labelsDirty = true;
+    this.updateBuildingLabels();
+  }
+
+  /** 重算每枚标签的世界锚点（模型放置 / 校准位移后需重算） */
+  private rebuildLabelAnchors(): void {
+    if (!this.modelRoot) return;
+    this.modelRoot.updateMatrixWorld(true);
+    for (const entry of this.buildingLabels) {
+      const box = new THREE.Box3().setFromObject(entry.obj);
+      if (box.isEmpty()) {
+        entry.obj.getWorldPosition(entry.anchor);
+        continue;
+      }
+      const c = box.getCenter(new THREE.Vector3());
+      // customCoords 世界坐标中 z 轴为高度方向，楼顶 = box.max.z
+      entry.anchor.set(c.x, c.y, box.max.z);
+    }
+  }
+
+  /** 每帧（或视角/选中变化时）把标签投影到屏幕并定位；密集时做简单纵向去重叠 */
+  private updateBuildingLabels(): void {
+    if (!this.labelLayer || this.buildingLabels.length === 0) return;
+    if (!this.labelsDirty && this.lastViewSig === this.lastLabelSig) return;
+    this.lastLabelSig = this.lastViewSig;
+    this.labelsDirty = false;
+
+    const W = this.container.clientWidth || 1;
+    const H = this.container.clientHeight || 1;
+    const margin = 24;
+    const placements: Array<{ entry: BuildingLabel; x: number; y: number }> = [];
+    for (const entry of this.buildingLabels) {
+      const screen = this.projectToScreen(entry.anchor);
+      if (!screen) {
+        entry.el.classList.add('bld-label--hidden');
+        continue;
+      }
+      if (screen.x < -margin || screen.x > W + margin || screen.y < -margin || screen.y > H + margin) {
+        entry.el.classList.add('bld-label--hidden');
+        continue;
+      }
+      placements.push({ entry, x: screen.x, y: screen.y });
+    }
+
+    // 由下往上放置（y 大者优先），与已放置标签过近则隐藏（选中楼栋始终保留）
+    placements.sort((a, b) => b.y - a.y);
+    const shown: Array<{ x: number; y: number }> = [];
+    const MIN_DX = 80;
+    const MIN_DY = 18;
+    for (const p of placements) {
+      const active = p.entry.node === this.selectedBuildingName;
+      let hidden = false;
+      if (!active) {
+        for (const s of shown) {
+          if (Math.abs(s.x - p.x) < MIN_DX && Math.abs(s.y - p.y) < MIN_DY) {
+            hidden = true;
+            break;
+          }
+        }
+      }
+      if (hidden) {
+        p.entry.el.classList.add('bld-label--hidden');
+        continue;
+      }
+      shown.push({ x: p.x, y: p.y });
+      p.entry.el.classList.remove('bld-label--hidden');
+      p.entry.el.classList.toggle('bld-label--active', active);
+      p.entry.el.style.left = `${p.x}px`;
+      p.entry.el.style.top = `${p.y}px`;
+    }
+  }
+
+  /** 设置当前选中楼栋（高亮其常驻标签）。node 为空字符串表示取消选中。 */
+  setSelectedBuilding(node: string): void {
+    if (this.selectedBuildingName === node) return;
+    this.selectedBuildingName = node || '';
+    this.labelsDirty = true; // 触发一次重排以切换 active 样式（即使视角静止）
+  }
+
+  private destroyLabels(): void {
+    for (const l of this.buildingLabels) l.el.remove();
+    this.buildingLabels = [];
+    if (this.labelLayer) {
+      this.labelLayer.remove();
+      this.labelLayer = null;
+    }
+  }
+
   /** 设置/微调校准参数（增量叠加到基准，传入部分字段即可） */
   setCalibration(partial: Partial<ModelCalibration>): void {
     this.calibration = { ...this.calibration, ...partial };
     this.applyCalibration();
+    // 模型位移/旋转/缩放后，标签的世界锚点需重算，否则标签仍钉在旧位置
+    if (this.buildingLabels.length) this.rebuildLabelAnchors();
+    this.labelsDirty = true;
     // 模型位移/旋转/缩放后，缓存的阴影图需重算一次（autoUpdate=false 时靠 needsUpdate 触发；
     // 仅阴影开启时生效，低配已关闭阴影则无操作）。
     // 用防抖取代「每次调用都重算」：拖拽滑块/模型时 setCalibration 每帧触发，若每帧都重绘阴影图
@@ -2857,6 +3015,7 @@ export class MapScene {
       this.camera.updateProjectionMatrix();
     }
     this.frameCacheDirty = true; // 标记下一帧重渲（低配 RT 路径会据此重渲进 RT；强机路径本就每帧直绘）
+    this.labelsDirty = true;      // 容器尺寸变化会改变投影坐标，标签需重排
     this.scheduleRender();        // 唤醒一次重绘，变更立即上屏（即使地图认为无变化）
   }
 
@@ -2994,6 +3153,9 @@ export class MapScene {
 
     // 截图捕获：在渲染后、buffer 失效前读取
     if (this.captureResolve) this.readSnapshot();
+
+    // 常驻楼栋名称标签：相机已与地图同步，按当前投影定位每枚标签
+    this.updateBuildingLabels();
 
     this.renderer.resetState();
   }
@@ -3270,6 +3432,9 @@ export class MapScene {
       /* ignore */
     }
     this.glLayer = null;
+
+    // 移除常驻标签 DOM，避免跨实例泄漏
+    this.destroyLabels();
 
     // 移除页面可见性监听，避免监听器跨实例泄漏
     if (this.visibilityHandler && typeof document !== 'undefined') {

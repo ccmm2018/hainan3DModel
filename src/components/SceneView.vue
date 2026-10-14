@@ -144,7 +144,7 @@
           :key="item.name"
           @mousedown.prevent="selectByName(item.name)"
         >
-          <span class="search-dropdown__name">{{ item.name }}</span>
+          <span class="search-dropdown__name">{{ displayName(item.name) }}</span>
           <span class="search-dropdown__coord">{{ item.lngLat[0].toFixed(5) }}, {{ item.lngLat[1].toFixed(5) }}</span>
         </li>
       </ul>
@@ -152,7 +152,7 @@
 
     <!-- 悬停 tooltip -->
     <div v-if="hovered" class="tooltip" :style="tooltipStyle">
-      {{ hovered.name }}
+      {{ displayName(hovered.name) }}
       <span v-if="hovered.isRoom" class="tooltip__status" :style="{ color: roomStatusColor(hovered.room) }">
         {{ roomStatusLabel(hovered.room) }}
       </span>
@@ -675,6 +675,13 @@ function resolveBuildingName(raw: string, lngLat?: [number, number]): string {
   return raw;
 }
 
+/** 楼栋显示名：GLB 节点数字(0–25) → 真实楼名（取 buildingNameAliases），未配置则原样返回数字。
+ * 仅用于「界面展示」（搜索下拉 / 悬停 / 属性面板标题），与数据查找键(selectedKey)解耦，可安全替换。 */
+function displayName(raw: string): string {
+  if (!raw) return raw;
+  return DEFAULT_SCENE_CONFIG.buildingNameAliases[raw] ?? raw;
+}
+
 // 分配模式状态
 const selectedRooms = ref<Room[]>([]);
 const allocating = ref(false);
@@ -875,7 +882,9 @@ function unobserveContainer() {
 const filteredObjects = computed(() => {
   const q = searchQuery.value.trim().toLowerCase();
   if (!q) return [];
-  const list = objectList.value.filter((o) => o.name.toLowerCase().includes(q));
+  const list = objectList.value.filter(
+    (o) => o.name.toLowerCase().includes(q) || displayName(o.name).toLowerCase().includes(q),
+  );
   // 精确匹配 / 前缀匹配优先排在前面，避免输入「0」时回车误选「10」「20」等楼栋
   list.sort((a, b) => {
     const rank = (s: string): number => {
@@ -900,7 +909,7 @@ const selectedProps = computed<BuildingProps>(() => {
   const rooms = roomsOf(selectedKey.value);
   const totalFloors = base?.totalFloors ?? (rooms.length ? Math.max(...rooms.map((r) => r.floor)) : undefined);
   const roomCount = base?.roomCount ?? (rooms.length ? rooms.length : undefined);
-  return { ...(base ?? {}), name: selected.value.name, height, totalFloors, roomCount };
+  return { ...(base ?? {}), name: displayName(selected.value.name), height, totalFloors, roomCount };
 });
 
 const categoryLabel = (c?: string) =>
@@ -1501,10 +1510,12 @@ onMounted(async () => {
           panel.measure();
           debugAnchor(`点击「${result.name}」`);
           scene?.highlight(result.target, config.highlightColor);
+          scene?.setSelectedBuilding(result.name);
         } else {
           selected.value = null;
           panelAnchor.value = null;
           scene?.clearHighlight();
+          scene?.setSelectedBuilding('');
         }
       },
       onDoubleClick: (result) => handleDoubleClick(result),

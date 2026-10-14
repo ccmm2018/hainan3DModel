@@ -150,9 +150,13 @@
       </ul>
     </div>
 
-    <!-- 悬停 tooltip -->
-    <div v-if="hovered" class="tooltip" :style="tooltipStyle">
-      {{ displayName(hovered.name) }}
+    <!-- 悬停 tooltip：场景模式下楼栋名称已由常驻标签展示，不再重复弹名称；房间状态 / 分配 / 室内模式仍按需显示 -->
+    <div
+      v-if="hovered && (hovered.isRoom || viewMode !== 'scene')"
+      class="tooltip"
+      :style="tooltipStyle"
+    >
+      <template v-if="viewMode !== 'scene'">{{ displayName(hovered.name) }}</template>
       <span v-if="hovered.isRoom" class="tooltip__status" :style="{ color: roomStatusColor(hovered.room) }">
         {{ roomStatusLabel(hovered.room) }}
       </span>
@@ -464,7 +468,7 @@
 
     <!-- 操作提示 -->
     <div class="hint-bar">
-      <template v-if="viewMode === 'scene'">点击模型拾取建筑 · 双击进入室内视角 · 悬停显示名称 · 输入搜索定位</template>
+      <template v-if="viewMode === 'scene'">点击模型拾取建筑 · 双击进入室内视角 · 楼栋名称常驻显示 · 输入搜索定位</template>
       <template v-else-if="viewMode === 'room'">点击房间查看详情 · 切换楼层查看不同布局</template>
       <template v-else>点击房间选中（可跨楼层） · 右侧查看已选与总面积</template>
     </div>

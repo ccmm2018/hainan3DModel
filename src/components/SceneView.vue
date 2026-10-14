@@ -1520,14 +1520,11 @@ onMounted(async () => {
     });
 
     status.value = 'loading-model';
-    // 把并行下载好的 GLB 缓冲交给 MapScene（若下载失败则回退由 MapScene 自行拉取）
-    try {
-      const modelResp = await modelFetch;
-      const modelBuf = await modelResp.arrayBuffer();
-      scene.setPrefetchedBuffer(modelBuf, config.modelUrl);
-    } catch {
-      /* 预取失败：MapScene 会在 initThree 内自行下载，不影响地图初始化 */
-    }
+    // 关键优化：把「下载中的 fetch」直接交给 MapScene，并立即初始化地图。
+    // 这样「模型下载」与「高德 WebGL 初始化（软件光栅下最慢的一段）」完全并行，
+    // 不再互相等待；MapScene 在 GL 就绪后复用本次下载，不会重复拉取。
+    // （旧写法在 scene.init 之前 await modelFetch，等于等模型下完才建地图，串行浪费数秒。）
+    scene.setPrefetchFetch(modelFetch.then((r) => r.arrayBuffer()));
     scene.init(AMap);
   } catch (err) {
     status.value = 'error';

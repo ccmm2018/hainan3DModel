@@ -131,6 +131,7 @@ export class MapScene {
   private prefetchStartTs = 0;             // 模型预取发起时刻，用于日志
   private prefetchedBuffer: ArrayBuffer | null = null; // 提前并行下载的 GLB 二进制（await loadAMap 期间），就绪后直接 parse
   private prefetchedUrl = '';              // 与 prefetchedBuffer 对应的模型地址
+  private prefetchFetch: Promise<ArrayBuffer> | null = null; // 下载「进行中」的 fetch promise：组件层在 await loadAMap 期间发起，直接交给我们复用，使「模型下载」与「高德 WebGL 初始化」完全并行且不重复拉取
   private scene: THREE.Scene | null = null;
   private camera: THREE.PerspectiveCamera | null = null;
   private modelRoot: THREE.Object3D | null = null;
@@ -563,6 +564,28 @@ export class MapScene {
       this.runModelOnLoad(this.modelPrefetchGltf);
       return;
     }
+    if (this.prefetchFetch) {
+      // 组件层已把「下载中的 fetch」交给我们：复用该次网络请求，避免重复拉取；
+      // 不在此阻塞——fetch 完成（通常已与高德 WebGL 初始化并行）后直接 parse。
+      this.modelPrefetchStarted = true;
+      this.prefetchStartTs = this.loadStartTs || performance.now();
+      if (!this.loadStartTs) this.loadStartTs = this.prefetchStartTs;
+      this.prefetchFetch
+        .then((buf: ArrayBuffer) => {
+          if (this.modelOnLoadRan || this.disposed) return;
+          this.prefetchedBuffer = buf;
+          this.prefetchedUrl = url;
+          this.prefetchFetch = null;
+          this.parsePrefetched(url);
+        })
+        .catch(() => {
+          // 预取失败：退回自行下载
+          this.modelPrefetchStarted = false;
+          this.prefetchFetch = null;
+          this.startModelLoad(url);
+        });
+      return;
+    }
     if (this.prefetchedBuffer) {
       this.parsePrefetched(url);
       return;
@@ -608,6 +631,22 @@ export class MapScene {
         `距地图创建 ${Math.round(performance.now() - this.mapCreateTs)}ms，大小 ${Math.round(buf.byteLength / 1024)}KB`,
     );
     if (this.ready && !this.modelOnLoadRan) this.parsePrefetched(url);
+  }
+
+  /**
+   * 接管组件层在 await loadAMap 期间已发起、尚在进行中的 GLB 下载（fetch in flight）。
+   * 与「等高德 GL 就绪后再下载」不同，这里把 fetch promise 直接交给我们，
+   * 使「模型下载」与「高德 WebGL 初始化（软件光栅下最慢的一段）」完全并行，
+   * 且不会触发重复下载（startModelLoad 检测到 prefetchFetch 即复用本次请求）。
+   */
+  setPrefetchFetch(p: Promise<ArrayBuffer>): void {
+    if (this.modelPrefetchStarted || this.modelOnLoadRan) return;
+    this.modelPrefetchStarted = true;
+    this.prefetchFetch = p;
+    this.prefetchStartTs = performance.now();
+    if (!this.loadStartTs) this.loadStartTs = this.prefetchStartTs;
+    // eslint-disable-next-line no-console
+    console.info(`[MapScene] 接管并行预取（fetch in flight）：距页面加载 ${Math.round(performance.now() - SCENE_T0)}ms`);
   }
 
   /** 用提前下载的缓冲直接解析 GLB（不再经网络），触发后处理与挂载 */

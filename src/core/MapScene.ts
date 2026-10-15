@@ -273,6 +273,8 @@ export class MapScene {
   private mapCreateTs = 0;
   /** 高亮材质缓存（key: `颜色|原材质uuid`），跨悬停复用克隆材质，避免扫过楼群时反复克隆 */
   private highlightMatCache = new Map<string, THREE.Material>();
+  /** 主方向光引用（用于模型放置后按包围盒拟合阴影视锥） */
+  private dirLight: THREE.DirectionalLight | null = null;
 
   // 量算（测距 / 测面）状态
   private AMap: any = null;
@@ -711,13 +713,28 @@ export class MapScene {
     const amb = new THREE.AmbientLight('#ffffff', 0.7);
     this.scene.add(amb);
 
-    const hemi = new THREE.HemisphereLight('#ffffff', '#5a6472', 1.1);
+    // 半球光：天空白、地面浅灰蓝。原地面色 #5a6472 偏深，导致背光/底面在部分角度发暗发黑；
+    // 调亮到 #b3bcc9 后，朝上的立面与底面过渡更自然，整体不再有「某个角度发灰发暗」的观感。
+    const hemi = new THREE.HemisphereLight('#ffffff', '#b3bcc9', 1.15);
     this.scene.add(hemi);
 
     // 主光（带阴影）
     const dir = new THREE.DirectionalLight('#ffffff', 2.0);
     dir.position.set(-200, 400, 150);
     dir.castShadow = true;
+    // 阴影相机：默认 ±5 的正交视锥对 300+ 单位的大场景太小，会把楼栋错误压暗成暗斑；
+    // 放宽到足以覆盖整片校园，并加 normalBias 抑制自阴影锯齿(acne)造成的黑斑。视锥中心在
+    // 光源 target（默认原点），模型放置后会在 fitShadowToModel() 里按实际位置再对齐一次。
+    dir.shadow.mapSize.set(2048, 2048);
+    dir.shadow.camera.near = 1;
+    dir.shadow.camera.far = 1600;
+    dir.shadow.camera.left = -500;
+    dir.shadow.camera.right = 500;
+    dir.shadow.camera.top = 500;
+    dir.shadow.camera.bottom = -500;
+    dir.shadow.bias = -0.0006;
+    dir.shadow.normalBias = 0.6;
+    this.dirLight = dir;
     this.scene.add(dir);
 
     // 补光：从主光对侧打一盏弱光，照亮背光面，使材质细节（贴图、纹理）清晰可辨
@@ -771,11 +788,21 @@ export class MapScene {
                 pm.depthWrite = true;
                 pm.needsUpdate = true;
               }
+              // 抗黑面加固：真实建筑立面在「WebGL1 无环境贴图」或「部分面法线朝内」时，从某些角度会发黑。
+              // 1) 金属度异常的立面（如图书馆被误设为 metalness=1.0）在无 IBL 时会渲染成纯黑 → 压到非反光范围；
+              // 2) 双面渲染，避免单面剔除导致「从外侧看到内侧空洞/背景」而显黑（某些角度黑面最常见根因）。
+              const sm = mat as THREE.MeshStandardMaterial;
+              if (sm && (sm as any).isMeshStandardMaterial) {
+                if ((sm.metalness ?? 0) > 0.5) sm.metalness = 0.1;
+                if (sm.side !== THREE.DoubleSide) sm.side = THREE.DoubleSide;
+                sm.needsUpdate = true;
+              }
             }
           }
         });
 
         this.placeModelAtAnchor();
+        this.fitShadowToModel();
 
         // —— 后处理整体重构为「分片 + 阶段进度」——
         // 旧实现虽有 yield，但每段本身仍是一个整块同步循环（108 张贴图逐张处理），
@@ -1735,6 +1762,25 @@ export class MapScene {
   }
 
   /**
+   * 把主方向光的阴影相机对齐到模型实际位置。
+   * 模型经 placeModelAtAnchor 放在 anchorWorld（远离世界原点），而 DirectionalLight 的 target 默认在原点，
+   * 若不修正，阴影正交视锥会以原点为中心、覆盖不到建筑，导致阴影为错乱的暗斑甚至整片压暗。
+   * 这里把光源 target 设到模型包围盒中心并加入场景图，使 ±500 的视锥正确罩住整片校园。
+   */
+  private fitShadowToModel(): void {
+    if (!this.dirLight || !this.modelRoot) return;
+    const box = new THREE.Box3().setFromObject(this.modelRoot);
+    if (box.isEmpty()) return;
+    const center = box.getCenter(new THREE.Vector3());
+    this.dirLight.target.position.copy(center);
+    this.scene?.add(this.dirLight.target);
+    this.dirLight.target.updateMatrixWorld(true);
+    // 视锥已设为 ±500 宽，足以覆盖本场景；更新一次让投影矩阵生效
+    this.dirLight.shadow.camera.updateProjectionMatrix();
+    if (this.renderer?.shadowMap) this.renderer.shadowMap.needsUpdate = true;
+  }
+
+  /**
    * 冻结模型子树的本地矩阵自动更新：GLB 放置完成后变换永不变化（校准只改 modelRoot 自身），
    * 关闭子节点的 matrixAutoUpdate 后，每帧 updateMatrixWorld 只遍历、不再对每个节点做
    * 四元数→矩阵的合成运算——几百个节点的场景上这是每帧一笔可观的纯 CPU 开销。
@@ -1842,12 +1888,15 @@ export class MapScene {
     this.buildingLabels = [];
     this.modelRoot.updateMatrixWorld(true);
     const aliases = this.config.buildingNameAliases || {};
+    // 调试开关：URL 带 ?nodeids=1 时标签显示 GLB 原始节点号，用于核对「目视楼栋 ↔ 节点编号」映射
+    const debugNodeIds = typeof location !== 'undefined' &&
+      new URLSearchParams(location.search).has('nodeids');
     for (const node of this.buildingNames) {
       const obj = this.modelRoot.getObjectByName(node);
       if (!obj) continue;
       const el = document.createElement('div');
       el.className = 'bld-label';
-      const display = aliases[node] ?? node;
+      const display = debugNodeIds ? `节点${node}` : (aliases[node] ?? node);
       el.textContent = display;
       el.dataset.node = node;
       this.labelLayer!.appendChild(el);
@@ -1858,19 +1907,52 @@ export class MapScene {
     this.updateBuildingLabels();
   }
 
-  /** 重算每枚标签的世界锚点（模型放置 / 校准位移后需重算） */
+  /**
+   * 重算每枚标签的世界锚点（模型放置 / 校准位移后需重算）。
+   *
+   * 做法：对每栋楼（节点对象 entry.obj）遍历其整棵子树，找出「世界包围盒体积最大」
+   * 的那个 mesh 作为该楼的主楼体，把标签钉在该 mesh 的水平中心 + 楼顶高度。
+   *
+   * 为什么取最大 mesh 而不是整棵子树包围盒：
+   * 个别楼栋节点在 Blender 里混入了极小（甚至被误放的）子网格——例如某个小方块装饰。
+   * 若用 setFromObject(整棵子树) 求包围盒，会把远处真楼和这个偶发小方块一起框进去，
+   * 中心落到两者之间的空地，标签就「飘」到楼外了。取体积最大的主楼体可免疫这种干扰，
+   * 标签永远钉在真正的楼身上。这也顺带解决了「教学楼(2) 的标签被误建小方块带偏」的问题。
+   * 仍可用 config.buildingLabelOffsets[node] = [dx, dy] 做最终微调。
+   */
   private rebuildLabelAnchors(): void {
     if (!this.modelRoot) return;
     this.modelRoot.updateMatrixWorld(true);
     for (const entry of this.buildingLabels) {
-      const box = new THREE.Box3().setFromObject(entry.obj);
-      if (box.isEmpty()) {
-        entry.obj.getWorldPosition(entry.anchor);
-        continue;
+      // 选子树下「世界包围盒体积最大」的 mesh 作为主楼体（忽略偶尔混入的极小/误放子网格）
+      let best: THREE.Box3 | null = null;
+      let bestVol = -1;
+      entry.obj.traverse((o) => {
+        const mesh = o as THREE.Mesh;
+        if (!mesh.isMesh || !mesh.geometry) return;
+        const b = new THREE.Box3().setFromObject(mesh);
+        if (b.isEmpty()) return;
+        const s = b.getSize(new THREE.Vector3());
+        const v = s.x * s.y * s.z;
+        if (v > bestVol) {
+          bestVol = v;
+          best = b;
+        }
+      });
+      const anchor = new THREE.Vector3();
+      if (!best) {
+        entry.obj.getWorldPosition(anchor);
+      } else {
+        const b = best as THREE.Box3;
+        const c = b.getCenter(new THREE.Vector3());
+        anchor.set(c.x, c.y, b.max.z); // 钉在楼顶高度
       }
-      const c = box.getCenter(new THREE.Vector3());
-      // customCoords 世界坐标中 z 轴为高度方向，楼顶 = box.max.z
-      entry.anchor.set(c.x, c.y, box.max.z);
+      const off = this.config.buildingLabelOffsets?.[entry.node];
+      if (off) {
+        anchor.x += off[0] ?? 0;
+        anchor.y += off[1] ?? 0;
+      }
+      entry.anchor.copy(anchor);
     }
   }
 

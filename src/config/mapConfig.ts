@@ -113,6 +113,15 @@ export interface SceneConfig {
    */
   buildingNameAliases: Record<string, string>;
   /**
+   * 楼栋名称标签的手动水平微调（可选）。key = GLB 节点名（如 '2'），
+   * value = [dx, dy]：在「楼栋几何包围盒中心」基础上的世界水平面偏移（customCoords 平面，x/y 单位）。
+   * 用于个别楼栋的标签需要避开邻楼 / 落在楼体更合适位置时做精细校正。默认不配置即无偏移。
+   *
+   * 例：{ '2': [0, 40] } 表示把 教学楼(2) 的标签沿模型本地 +z（即世界 +y）方向挪 40 单位，
+   * 使其更靠楼体中部、远离相邻楼栋。
+   */
+  buildingLabelOffsets?: Record<string, [number, number]>;
+  /**
    * 模型节点过滤：加载模型时按「节点名（GLB node name）」保留或隐藏部分子节点。
    *
    * 背景：Blender 导出 GLB 会把整个场景一起导出——屋顶棚(RoofShed)、女儿墙(Parapet)、
@@ -171,7 +180,13 @@ export const DEFAULT_SCENE_CONFIG: SceneConfig = {
   minPitch: 0,
   // 数字孪生底色：浅灰白底图，周边建筑以浅灰「白模」呈现，路网/绿地/水系清晰可见
   mapStyle: 'amap://styles/whitesmoke',
-  modelUrl: '/models/hnjcxy.glb',
+  // 末尾的 ?v= 缓存破坏参数：强制浏览器丢弃旧版 GLB 缓存、重新下载。
+  // 背景：模型里曾有一块「琴剑楼旁的小方块」（仅存在于本地 Blender 源，从未进网页 GLB），
+  // 但部分浏览器缓存了更早含该方块的旧导出，导致刷新后仍显示。模型文件本身已干净，
+  // ?v= 是浏览器缓存破坏参数：模型文件已直接从 GLB 内摘除误建的「小方块」面片
+  // （节点 '2' / 教学2 内的一个 2x2x2 杂项立方体，曾被误建在琴剑楼旁），
+  // 此处版本号用于强制浏览器重新下载更新后的模型。若日后重新导出模型并希望用户刷新缓存，升级该版本号即可。
+  modelUrl: '/models/hnjcxy.glb?v=20261015d',
   dataUrl: '/data/buildings.geojson',
   roomDataUrl: '/data/rooms.geojson',
   anchor: [110.280328, 19.75491],

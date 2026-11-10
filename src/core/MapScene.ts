@@ -1079,9 +1079,10 @@ export class MapScene {
     // 横向余量本就很小，左移会切到左侧建筑/树木属可接受范围。
     const MODEL_SHIFT_FRAC = 0.12;
     const shiftPx = MODEL_SHIFT_FRAC * W;
-    // 默认取景：把模型在屏幕上向下（朝观察者 / 近处）偏移一点点，让上方多留空间，
-    // 视觉上模型「往面前拖」。正值 = 模型偏下（屏幕 y 更大）。取 0.08 使效果明显又不出画。
-    const MODEL_SHIFT_DOWN_FRAC = 0.08;
+    // 默认取景：把模型在屏幕上向下（朝观察者 / 近处）偏移，让上方多留空间，
+    // 视觉上模型「往面前拖」。正值 = 模型偏下（屏幕 y 更大）。
+    // 取 0.11：参考图里模型重心约在画面 60% 高度处，且偏前（近处建筑贴近下缘），故较之前 0.08 加大。
+    const MODEL_SHIFT_DOWN_FRAC = 0.11;
     const shiftDownPx = MODEL_SHIFT_DOWN_FRAC * H;
     // 默认取景在「刚好填满」基础上额外放大一点点（zoom 等级），让模型显得更大些。
     // 注意：放大过多会与左移叠加导致左侧被画面边缘裁切，故保持与左移相匹配的小值。
@@ -1142,12 +1143,12 @@ export class MapScene {
     //    此时最大放大会同时贴满横竖四边（模型刚好填满整个屏幕）。
     //    投影高宽比随俯仰角增大（越平视）而单调减小；搜索范围夹在 [PITCH_MIN, PITCH_MAX]
     //    保持「从上俯视」观感（俯角 30°–45°，pitch 60–45），不出现视角过低。
-    //    PITCH_MIN=PITCH_MAX=55（对应俯角 35°）：本版把加载视角钉在 35° 高空 3/4 俯瞰，
-    //    相机较高、透视变形小、能看到建筑立面又不至过斜（上一版 pitch=72/俯角18° 过斜）。
-    //    钉死后 fit 不会为「填满屏幕」再调俯仰，保证默认俯角严格 35°。手动拖动上限仍由
-    //    config.maxPitch=75 控制（可拖到更平），不影响加载默认值。
-    const PITCH_MIN = 55;
-    const PITCH_MAX = 55;
+    //    PITCH_MIN=PITCH_MAX=35（对应俯角 55°）：本版按用户参考图把加载视角钉在 55° 高空俯瞰，
+    //    比上一版 40°（pitch=50）更俯视、地面更平、模型「往面前倾斜」的观感明显减弱（接近平放）。
+    //    钉死后 fit 不会为「填满屏幕」再调俯仰，保证默认俯角严格 55°。
+    //    手动拖动上限仍由 config.maxPitch=75 控制（可拖到更平/更斜），不影响加载默认值。
+    const PITCH_MIN = 35;
+    const PITCH_MAX = 35;
     // 俯仰角匹配目标：可见区（避开顶 / 底悬浮 UI）的高宽比，而非整屏
     const screenRatio = (H - padTop - padBottom) / Math.max(W - 2 * padX, 1);
     let pitch = THREE.MathUtils.clamp(this.config.pitch, PITCH_MIN, PITCH_MAX);
@@ -1347,9 +1348,9 @@ export class MapScene {
     const bottomPx = ((1 - v.minY) / 2) * H;
     const visCy = (topPx + bottomPx) / 2;
     // 默认取景：让模型在屏幕上向左偏移（与 fitToBuildings 的 shiftPx 一致，用户接受左侧裁切）；
-    // 同时向下（朝观察者）偏移 shiftDownPx（与 fitToBuildings 的 shiftDownPx 一致）
+    // 同时向下（朝观察者）偏移 shiftDownPx（与 fitToBuildings 的 shiftDownPx 一致，0.11）
     const shiftPx = 0.12 * W;
-    const shiftDownPx = 0.08 * H;
+    const shiftDownPx = 0.11 * H;
     const offX = (lx + hx) / 2 - (leftPx + rightPx) / 2;
     const offY = (ly + hy) / 2 - (visCy + shiftDownPx);
     // 两方向填满率：包围盒宽 / 高分别占可见区宽 / 高的比例（>1 有富余、<1 出画）

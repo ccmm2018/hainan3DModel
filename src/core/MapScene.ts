@@ -283,10 +283,20 @@ export class MapScene {
   private measureReportMode: 'distance' | 'area' = 'distance';
   /** 量算顶点（GCJ-02 经纬度） */
   private measurePts: [number, number][] = [];
-  /** 量算图形所在的 Three.js 图层（绘制在 3D 模型之上，不会被 WebGL 自定义层盖住） */
+  /** 量算图形独立渲染场景：主场景渲染完再 clearDepth 叠加，保证永远压在 3D 模型之上 */
+  private measureScene: THREE.Scene | null = null;
+  /** 量算图形容器（挂在 measureScene，不在主 scene 里） */
   private measureGroup: THREE.Group | null = null;
+  /** 预览增量更新用的常驻对象引用（避免每次 pointermove 全量 dispose/重建几何） */
+  private measureLineObj: THREE.Line | null = null;
+  private measureFillObj: THREE.Mesh | null = null;
   /** 是否处于「测量进行中」（已打点、尚未完成） */
   private measuring = false;
+  /** pointermove 跟随预览的 rAF 合并：一帧最多一次几何更新 */
+  private measurePreviewRaf = 0;
+  private measurePreviewPt: [number, number] | null = null;
+  /** 测量期间是否已通知上层清除悬停高亮（避免每次 mousemove 都触发一次回调） */
+  private measureHoverCleared = false;
   // 容器级 DOM 监听：避免事件被 GLCustomLayer 画布吞掉，且可点在 3D 模型上
   private measureDownHandler: ((e: PointerEvent) => void) | null = null;
   private measureMoveDomHandler: ((e: PointerEvent) => void) | null = null;
@@ -567,8 +577,13 @@ export class MapScene {
     }
 
     // 量算图层：独立于模型，始终绘制在模型之上
+    // 量算图形放在独立 scene：renderer.sortObjects=false 会让 renderOrder 失效，
+    // 且 measureGroup 比 modelRoot 更早加入主 scene，导致线/面被后画的建筑盖住。
+    // 改为「主场景渲染完 → clearDepth → 单独渲 measureScene」的 overlay pass，
+    // 既不依赖对象排序，也保持贴地坐标（z=0.5）不产生视差偏移。
+    this.measureScene = new THREE.Scene();
     this.measureGroup = new THREE.Group();
-    this.scene.add(this.measureGroup);
+    this.measureScene.add(this.measureGroup);
 
     this.setupLights();
     this.ready = true;
@@ -2374,9 +2389,16 @@ export class MapScene {
   // -------------------------------------------------------------------------
   private handleMouseMove(e: any): void {
     if (this.measureMode !== 'none') {
-      this.callbacks.onHover?.(null); // 测量时隐藏悬停高亮
+      // 测量期间只需清除一次悬停高亮；原先每次 mousemove 都回调上层，
+      // 会在拖动时高频触发 Vue 更新与 clearHighlight，是额外的 CPU 负担。
+      if (!this.measureHoverCleared) {
+        this.measureHoverCleared = true;
+        this.lastHoverPos = null;
+        this.callbacks.onHover?.(null);
+      }
       return;
     }
+    this.measureHoverCleared = false;
     const { x, y } = this.pixelOf(e);
     // 位移 < 1px 视为同位置，跳过重复拾取（避免原地抖动反复 raycast）
     if (this.lastHoverPos && Math.abs(this.lastHoverPos.x - x) < 1 && Math.abs(this.lastHoverPos.y - y) < 1) {
@@ -2932,8 +2954,11 @@ export class MapScene {
     this.measureMoveDomHandler = (e: PointerEvent) => {
       // 仅在测量进行中才显示跟随预览线，避免已完成测量在鼠标移动时出现多余预览
       if (!this.measuring || this.measurePts.length === 0 || !inMap(e.target)) return;
-      const ll = this.pixelToGcj(e);
-      if (ll) this.renderMeasure(ll);
+      // 拖动地图/模型时完全不更新预览：此时高德自身每帧都在重绘，再叠加
+      // 「重建几何 + 强制整场景重绘 + 额外 map.render()」正是 CPU 直线上升的根因。
+      if (e.buttons !== 0) return;
+      // 未按下时也用 rAF 合并：一个动画帧最多一次几何更新
+      this.scheduleMeasurePreview(e.clientX, e.clientY);
     };
     this.measureDblDomHandler = (e: MouseEvent) => {
       if (!inMap(e.target)) return;
@@ -2969,7 +2994,31 @@ export class MapScene {
     window.addEventListener('click', this.measureClickDomHandler, opt);
   }
 
+  /** 合并一帧内的多次 pointermove：只保留最后一个坐标，下一帧增量更新一次预览线 */
+  private scheduleMeasurePreview(clientX: number, clientY: number): void {
+    this.measurePreviewPt = [clientX, clientY];
+    if (this.measurePreviewRaf) return;
+    this.measurePreviewRaf = requestAnimationFrame(() => {
+      this.measurePreviewRaf = 0;
+      const p = this.measurePreviewPt;
+      this.measurePreviewPt = null;
+      if (!p || !this.measuring || this.disposed) return;
+      const ll = this.pixelToGcj({ clientX: p[0], clientY: p[1] });
+      if (ll) this.updateMeasurePreview(ll);
+    });
+  }
+
+  /** 取消尚未执行的预览帧（停止/重新测量时避免多余重绘） */
+  private cancelMeasurePreview(): void {
+    if (this.measurePreviewRaf) {
+      cancelAnimationFrame(this.measurePreviewRaf);
+      this.measurePreviewRaf = 0;
+    }
+    this.measurePreviewPt = null;
+  }
+
   private unbindMeasureDom(): void {
+    this.cancelMeasurePreview();
     if (!this.container) return;
     const opt = { capture: true } as AddEventListenerOptions;
     if (this.measureDownHandler) window.removeEventListener('pointerdown', this.measureDownHandler, opt);
@@ -3052,17 +3101,52 @@ export class MapScene {
 
   private clearMeasureGraphics(): void {
     if (!this.measureGroup) return;
+    // 圆点共享同一份 geometry/material，用 Set 去重避免重复 dispose
+    const geos = new Set<THREE.BufferGeometry>();
+    const mats = new Set<THREE.Material>();
     for (let i = this.measureGroup.children.length - 1; i >= 0; i--) {
       const obj = this.measureGroup.children[i] as any;
-      obj.geometry?.dispose?.();
+      if (obj.geometry) geos.add(obj.geometry);
       const mat = obj.material;
-      if (Array.isArray(mat)) mat.forEach((m: any) => m.dispose?.());
-      else mat?.dispose?.();
+      if (Array.isArray(mat)) mat.forEach((m: THREE.Material) => mats.add(m));
+      else if (mat) mats.add(mat);
       this.measureGroup.remove(obj);
     }
+    geos.forEach((g) => g.dispose());
+    mats.forEach((m) => m.dispose());
+    this.measureLineObj = null;
+    this.measureFillObj = null;
   }
 
-  /** 在 Three.js 场景中重建量算图形（始终绘制在 3D 模型之上） */
+  /** 跟随鼠标的预览：只替换折线/填充的几何，不重建圆点、不重复上报面板、不整组 dispose。
+   *  这样 pointermove 每帧的开销从「销毁重建 N 个对象」降到「更新 1~2 个小 buffer」。 */
+  private updateMeasurePreview(cursor: [number, number]): void {
+    if (!this.measureGroup || !this.customCoords) return;
+    if (!this.measureLineObj) { this.renderMeasure(cursor); return; }
+    const worldPts = [...this.measurePts, cursor].map((p) => this.gcjToWorld(p));
+    const linePts = this.measureMode === 'area' && worldPts.length >= 3
+      ? [...worldPts, worldPts[0]]
+      : worldPts;
+    this.measureLineObj.geometry.dispose();
+    this.measureLineObj.geometry = new THREE.BufferGeometry().setFromPoints(linePts);
+
+    if (this.measureFillObj) {
+      if (this.measureMode === 'area' && worldPts.length >= 3) {
+        const shape = new THREE.Shape();
+        shape.moveTo(worldPts[0].x, worldPts[0].y);
+        for (let i = 1; i < worldPts.length; i++) shape.lineTo(worldPts[i].x, worldPts[i].y);
+        shape.closePath();
+        this.measureFillObj.geometry.dispose();
+        this.measureFillObj.geometry = new THREE.ShapeGeometry(shape);
+        this.measureFillObj.visible = true;
+      } else {
+        this.measureFillObj.visible = false;
+      }
+    }
+    this.requestRender();
+  }
+
+  /** 完整重建量算图形（打点 / 结束 / 清除时调用；图形由 overlay pass 绘制在模型之上） */
   private renderMeasure(cursor?: [number, number]): void {
     if (!this.measureGroup || !this.customCoords) return;
     this.clearMeasureGraphics();
@@ -3072,18 +3156,10 @@ export class MapScene {
     const worldPts = pts.map((p) => this.gcjToWorld(p));
     const color = this.measureMode === 'distance' ? 0x38bdf8 : 0xf59e0b;
 
-    // 折线 / 多边形边：测面时闭合首尾，使轮廓成为封闭环
-    const linePts = this.measureMode === 'area' && worldPts.length >= 3
-      ? [...worldPts, worldPts[0]]
-      : worldPts;
-    const lineGeo = new THREE.BufferGeometry().setFromPoints(linePts);
-    const lineMat = new THREE.LineBasicMaterial({ color, depthTest: false, transparent: false, opacity: 1 });
-    lineMat.toneMapped = false;
-    const line = new THREE.Line(lineGeo, lineMat);
-    line.renderOrder = 999;
-    this.measureGroup.add(line);
-
-    // 测面：闭合填充
+    // 添加顺序即视觉层级（sortObjects=false，transparent 队列按遍历顺序绘制）：
+    // 半透明填充在最下 → 边线 → 顶点圆点在最上。三者统一放 transparent 队列，
+    // 避免 three 把 opaque 线/圆点先画、再被后画的填充覆盖。
+    // 测面：半透明闭合填充（既能看见面，又不遮死下面的建筑）
     if (this.measureMode === 'area' && worldPts.length >= 3) {
       const shape = new THREE.Shape();
       shape.moveTo(worldPts[0].x, worldPts[0].y);
@@ -3091,17 +3167,34 @@ export class MapScene {
       shape.closePath();
       const fillGeo = new THREE.ShapeGeometry(shape);
       const fillMat = new THREE.MeshBasicMaterial({
-        color, depthTest: false, transparent: false, opacity: 1, side: THREE.DoubleSide,  // opaque: avoid shimmer
+        color, depthTest: false, depthWrite: false, transparent: true, opacity: 0.32, side: THREE.DoubleSide,
       });
       fillMat.toneMapped = false;
       const fill = new THREE.Mesh(fillGeo, fillMat);
       fill.renderOrder = 998;
       this.measureGroup.add(fill);
+      this.measureFillObj = fill;
     }
 
-    // 顶点圆点
-    const dotGeo = new THREE.SphereGeometry(1.4, 12, 12);
-    const dotMat = new THREE.MeshBasicMaterial({ color: 0xffffff, depthTest: false });
+    // 折线 / 多边形边：测面时闭合首尾，使轮廓成为封闭环
+    const linePts = this.measureMode === 'area' && worldPts.length >= 3
+      ? [...worldPts, worldPts[0]]
+      : worldPts;
+    const lineGeo = new THREE.BufferGeometry().setFromPoints(linePts);
+    const lineMat = new THREE.LineBasicMaterial({
+      color, depthTest: false, depthWrite: false, transparent: true, opacity: 1,
+    });
+    lineMat.toneMapped = false;
+    const line = new THREE.Line(lineGeo, lineMat);
+    line.renderOrder = 999;
+    this.measureGroup.add(line);
+    this.measureLineObj = line;
+
+    // 顶点圆点（略放大，便于在俯视/斜视下辨认）
+    const dotGeo = new THREE.SphereGeometry(2.2, 12, 12);
+    const dotMat = new THREE.MeshBasicMaterial({
+      color: 0xffffff, depthTest: false, depthWrite: false, transparent: true, opacity: 1,
+    });
     dotMat.toneMapped = false;
     for (const wp of worldPts) {
       const dot = new THREE.Mesh(dotGeo, dotMat);
@@ -3502,6 +3595,9 @@ export class MapScene {
     // 逐帧直绘模型到 AMap 已清好的画布（见 renderCachedFrame）。降载靠相机同步节流 + 锚点防抖，而非帧缓存。
     this.renderCachedFrame();
 
+    // 量算叠加层：主场景（含低配 RT blit）画完后清深度再画，保证线/面永远在模型之上。
+    this.drawMeasureOverlay();
+
     // 截图捕获：在渲染后、buffer 失效前读取
     if (this.captureResolve) this.readSnapshot();
 
@@ -3509,6 +3605,23 @@ export class MapScene {
     this.updateBuildingLabels();
 
     this.renderer.resetState();
+  }
+
+  /** 量算图形叠加：主场景渲染完毕后清深度单独绘制，彻底绕开 sortObjects=false
+   *  造成的「renderOrder 失效 + 先画的线被后画的建筑盖住」问题。
+   *  坐标仍贴地（z=0.5），不会因抬高产生视差偏移；仅在有量算图形时执行（≤3 个 draw call）。 */
+  private drawMeasureOverlay(): void {
+    const r = this.renderer;
+    if (!r || !this.measureScene || !this.measureGroup || !this.camera) return;
+    if (this.measureGroup.children.length === 0) return;
+    const vw = this.appliedVpW || this.container.clientWidth || 1;
+    const vh = this.appliedVpH || this.container.clientHeight || 1;
+    r.setRenderTarget(null);
+    r.setViewport(0, 0, vw, vh);
+    r.setScissor(0, 0, vw, vh);
+    r.setScissorTest(false);
+    r.clearDepth();
+    r.render(this.measureScene, this.camera);
   }
 
   /**
@@ -3755,6 +3868,11 @@ export class MapScene {
   // -------------------------------------------------------------------------
   destroy(): void {
     this.disposed = true;
+    // 量算叠加层：取消挂起的预览帧、释放几何/材质（measureScene 不在主 scene 里，不会被统一遍历到）
+    this.cancelMeasurePreview();
+    this.clearMeasureGraphics();
+    this.measureScene = null;
+    this.measureGroup = null;
     this.clearRooms();
     // 低配帧缓存 / 贴图场景 / 高亮材质缓存：随渲染器一起释放
     this.frameRt?.dispose();

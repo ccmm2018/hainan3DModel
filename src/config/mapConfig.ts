@@ -169,12 +169,14 @@ export const DEFAULT_SCENE_CONFIG: SceneConfig = {
   // 加载阶段即「近距离正面斜视」；模型就绪后 MapScene.fitToBuildings() 会按当前
   // 屏幕尺寸把缩放精确推到「刚好能看到全部建筑」的最大级别（自动适配不同分辨率）。
   zoom: 17,
-  // 正面倾斜视角：相机在模型正前方、高于地平线 30° 俯瞰（俯角 30°），
-  // 对应高德 pitch = 90° - 30° = 60（pitch 0 为正上方俯视，越大越「平视」）。
-  pitch: 60,
+  // 加载阶段即「从上方俯视」视角：默认俯角 35°（pitch=55）。
+  // 对应高德 pitch = 90° - 35° = 55（pitch 0 为正上方俯视，越大越「平视」）。
+  // 这是平衡的高空 3/4 俯瞰：相机较高、透视变形小、能看到建筑立面又不至过斜。
+  // （上一版 pitch=72/俯角18° 过斜，本版回调到 35° 并抬高视角。）
+  pitch: 55,
   // 旋转限制：地图可水平旋转（绕竖直轴），俯仰角（pitch）被锁在 [0, 75] 之间，
-  // 不允许把地图「翻过来」。上限 75 与 fitToBuildings 的俯仰角自适应搜索上限
-  // （PITCH_MAX=75）一致：宽屏上「模型刚好填满屏幕」需要的俯仰角会超过 60。
+  // 不允许把地图「翻过来」，也不允许俯角低于 15°（pitch 超过 75 = 视角过低）。
+  // 上限 75 与 fitToBuildings 的俯仰角上限（PITCH_MAX）一致；加载默认俯角锁定 35°（pitch=55）。
   // 下限 0 = 正上方俯视。
   maxPitch: 75,
   minPitch: 0,
@@ -186,7 +188,7 @@ export const DEFAULT_SCENE_CONFIG: SceneConfig = {
   // ?v= 是浏览器缓存破坏参数：模型文件已直接从 GLB 内摘除误建的「小方块」面片
   // （节点 '2' / 教学2 内的一个 2x2x2 杂项立方体，曾被误建在琴剑楼旁），
   // 此处版本号用于强制浏览器重新下载更新后的模型。若日后重新导出模型并希望用户刷新缓存，升级该版本号即可。
-  modelUrl: '/models/hnjcxy.glb?v=20261015d',
+  modelUrl: '/models/hnjcxy.glb?v=20261110e',
   dataUrl: '/data/buildings.geojson',
   roomDataUrl: '/data/rooms.geojson',
   anchor: [110.280328, 19.75491],
@@ -244,13 +246,18 @@ export const DEFAULT_SCENE_CONFIG: SceneConfig = {
   // 弱机拖拽/缩放 CPU 80%+ 的首要来源。仅保留 bg(地面轮廓) + road(路网)。需要周边立体感时可加回 'building'。
   mapFeatures: ['bg', 'road'],
   showLabel: false,
-  // 隐藏 Blender 一并导出的辅助几何（屋顶棚/女儿墙/大门/廊架/骨架/空物体），只留楼本体可见；
+  // 隐藏 Blender 一并导出的辅助几何（女儿墙/廊架/骨架/空物体），只留楼本体可见；
   // 具体的「可点击 / 可选中」范围由 buildingNodeNames 单独控制（数字 0–25 才是建筑）。
   modelNodeFilter: {
     mode: 'exclude',
     // 不再隐藏 'roof' / 'rig'：它们对应的 RoofShed_Rig（雨棚/屋顶棚）是「顶棚」网格对象，
-    // 之前被误隐藏导致「凡含顶棚的网格对象都丢失」。现仅隐藏纯装饰/辅助几何（女儿墙/门/廊架/空物体/相机靶/轮廓）。
-    patterns: ['parapet', 'door', 'pergola', 'empty', 'camtarget', 'profile'],
+    // 之前被误隐藏导致「凡含顶棚的网格对象都丢失」。
+    // s472：也不再隐藏 'door'。当前 GLB 里含 door 的 46 个节点全是
+    // S412/S414/S415/S419/S439/S455/S456/S458 门扇几何，位于各楼栋入口且材质色
+    // 与 Blender 完全一致；隐藏它们会让 web 端只露出背后的门厅墙/立面颜色，
+    // 正是用户反馈的「门的颜色和 Blender 不一样」。早期会带偏包围盒的废弃
+    // Entrance_Door_* 已不在模型中，这里仍用精确子串兜底排除，避免将来回流。
+    patterns: ['parapet', 'entrance_door', 'pergola', 'empty', 'camtarget', 'profile'],
   },
   // 可点击 / 可选中的建筑节点白名单（点击只显示这些节点的数字编号，其余不可点击）
   buildingNodeNames: Array.from({ length: 26 }, (_, i) => String(i)),

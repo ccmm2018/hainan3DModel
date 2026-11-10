@@ -544,7 +544,10 @@ export class MapScene {
     //   故 WebGL1 改用 LinearToneMapping（不压暗），保留贴图原始色，材质清晰可见。
     const isWebGL2 = !!this.renderer?.capabilities?.isWebGL2;
     this.renderer.toneMapping = isWebGL2 ? THREE.ACESFilmicToneMapping : THREE.LinearToneMapping;
-    this.renderer.toneMappingExposure = isWebGL2 ? 1.0 : 1.12;
+    // 曝光略微下调：WebGL1 走 LinearToneMapping（不做高光压缩），原 1.12 会把
+    // 烘焙立面的浅色（底图 0.65/墙 0.7~0.9）直接放大到 1.0 溢出成纯白，
+    // 砖纹/门窗的色彩对比被洗掉，观感即「光线过白、颜色不明显」。(s470)
+    this.renderer.toneMappingExposure = isWebGL2 ? 0.95 : 1.0;
 
     // 环境贴图（IBL）：PBR 材质需要环境光照才能呈现正确质感（尤其是金属度/粗糙度与边缘反射）。
     // 缺少 scene.environment 时，很多外立面材质会因为没有环境反射而显得「发灰、发暗、像没贴图」，
@@ -578,7 +581,7 @@ export class MapScene {
    * 与「等高德 GL 就绪」解耦：模型下载+解析可与地图初始化期间重叠，首屏不再被串行卡住。
    */
   private startModelLoad(url: string): void {
-    if (this.modelOnLoadRan) return;
+    if (this.modelOnLoadRan) return;  
     if (this.modelPrefetchGltf) {
       this.runModelOnLoad(this.modelPrefetchGltf);
       return;
@@ -707,24 +710,33 @@ export class MapScene {
 
   private setupLights(): void {
     if (!this.scene) return;
-    // 环境光：保证背光面/底面也有基础照明，避免模型在深色地图底图上糊成一片暗灰
-    // （高德 GLCustomLayer 给的是 WebGL1 上下文，PMREM 环境贴图（IBL）往往无法生成，
-    //  不能依赖 scene.environment，故以「环境光 + 主光 + 补光」构成稳定的三档照明）。
-    const amb = new THREE.AmbientLight('#ffffff', 0.7);
+    // ⚠️ s470 过曝修复：下面四盏灯的强度原先合计 4.75（0.7+1.15+2.0+0.9），
+    // 是历史上「WebGL1 无 IBL → 楼栋发灰发暗」时逐步调高的兜底值。但后来
+    // initThree() 已改为「始终生成 scene.environment（RoomEnvironment PMREM）」，
+    // IBL 现在恒定生效，于是 IBL + 4.75 强光叠加 → 严重过曝：烘焙出来的浅色立面
+    // 与底图被推向纯白、砖纹与门窗的色彩对比被洗掉，即用户反馈的「光线过于白、
+    // 建筑原先的色彩不明显」。s470 把直接光总量降到 2.15（约原值 45%）后用户又反馈
+    // 「有点像早上6点的光亮」偏暗；s471 回调到 3.04（≈原值 64%、s470 的 1.4 倍），
+    // 位于「过曝 4.75」与「偏暗 2.15」之间，配合 exposure 0.95/1.0 让色彩可读又不过亮。
+    // 若日后仍觉得偏亮/偏暗，只需整体等比微调下面四个数（保持 0.50:0.72:1.40:0.42 比例）。
+    // 环境光：保证背光面/底面也有基础照明，避免模型在深色地图底图上糊成一片暗灰。
+    const amb = new THREE.AmbientLight('#ffffff', 0.5);
     this.scene.add(amb);
 
-    // 半球光：天空白、地面浅灰蓝。原地面色 #5a6472 偏深，导致背光/底面在部分角度发暗发黑；
-    // 调亮到 #b3bcc9 后，朝上的立面与底面过渡更自然，整体不再有「某个角度发灰发暗」的观感。
-    const hemi = new THREE.HemisphereLight('#ffffff', '#b3bcc9', 1.15);
+    // 半球光：天空白、地面浅灰蓝，让朝上的立面与底面过渡自然、不发灰发暗。
+    const hemi = new THREE.HemisphereLight('#ffffff', '#b3bcc9', 0.72);
     this.scene.add(hemi);
 
     // 主光（带阴影）
-    const dir = new THREE.DirectionalLight('#ffffff', 2.0);
+    const dir = new THREE.DirectionalLight('#ffffff', 1.4);
     dir.position.set(-200, 400, 150);
     dir.castShadow = true;
     // 阴影相机：默认 ±5 的正交视锥对 300+ 单位的大场景太小，会把楼栋错误压暗成暗斑；
     // 放宽到足以覆盖整片校园，并加 normalBias 抑制自阴影锯齿(acne)造成的黑斑。视锥中心在
     // 光源 target（默认原点），模型放置后会在 fitShadowToModel() 里按实际位置再对齐一次。
+    // s483：normalBias 0.6→1.0。±500m 视锥/2048² 阴影图下每 texel≈0.5m，0.6 不足以
+    // 抑制大平面（地面/幕墙）自阴影波纹（实测开阔地被压暗最多 -70/255）；1.0 实测
+    // acne std 17.7→1.2（波纹彻底消失），且残留最小、贴地阴影脱节风险最低。
     dir.shadow.mapSize.set(2048, 2048);
     dir.shadow.camera.near = 1;
     dir.shadow.camera.far = 1600;
@@ -733,12 +745,12 @@ export class MapScene {
     dir.shadow.camera.top = 500;
     dir.shadow.camera.bottom = -500;
     dir.shadow.bias = -0.0006;
-    dir.shadow.normalBias = 0.6;
+    dir.shadow.normalBias = 1.0;
     this.dirLight = dir;
     this.scene.add(dir);
 
     // 补光：从主光对侧打一盏弱光，照亮背光面，使材质细节（贴图、纹理）清晰可辨
-    const fill = new THREE.DirectionalLight('#dfe7f0', 0.9);
+    const fill = new THREE.DirectionalLight('#dfe7f0', 0.42);
     fill.position.set(220, 180, -160);
     fill.castShadow = false;
     this.scene.add(fill);
@@ -764,6 +776,18 @@ export class MapScene {
           if ((child as THREE.Mesh).isMesh) {
             child.castShadow = true;
             child.receiveShadow = true;
+
+            // ⚠️ 屋面类材质（Roof_*）用在「无顶棚」楼栋的平屋面上。
+            // 根因：平屋面是半光泽材质(rough≈0.8) + 强制 DoubleSide + IBL(envMapIntensity=0.7)，
+            // 会随相机角度出现「一块亮一块暗」的镜面/环境反射斑（有顶棚的楼被盖板遮挡看不见）。
+            // 关掉「接收阴影」可顺手消除设备自投影硬边，但真正消除角度相关斑块的办法是
+            // 把屋面改成纯漫反射（下方在材质遍历里把 rough=1 / metal=0 / envMapIntensity=0）。
+            // 这里保留 castShadow（屋面在地面投下的阴影不受影响）。
+            const _mats = Array.isArray((child as THREE.Mesh).material)
+              ? (child as THREE.Mesh).material as THREE.Material[]
+              : [(child as THREE.Mesh).material as THREE.Material];
+            const _isRoof = _mats.some((m) => !!m && /Roof/i.test(m.name));
+            if (_isRoof) child.receiveShadow = false;
 
             // ⚠️ AMap GLCustomLayer 提供的是 WebGL1 上下文，而 three r162 中
             // MeshPhysicalMaterial 的 transmission（透射/玻璃）着色器会生成
@@ -795,6 +819,50 @@ export class MapScene {
               if (sm && (sm as any).isMeshStandardMaterial) {
                 if ((sm.metalness ?? 0) > 0.5) sm.metalness = 0.1;
                 if (sm.side !== THREE.DoubleSide) sm.side = THREE.DoubleSide;
+                // s470：RoomEnvironment IBL 默认强度 1.0 会把漫反射基色整体提亮泛白，
+                // 与已下调的直接光配合收敛到 0.7 —— 环境反射仍在（金属/粗糙度、背光面
+                // 不发灰），但烘焙贴图里的砖纹/门窗/底图浅灰能重新显出层次。
+                sm.envMapIntensity = 0.7;
+                // s480 屋面反光斑修复：屋面(Roof_*)、屋顶太阳能板(Solar_Panel/RT_Solar)
+                // 及其它屋顶设备(RT_*)改为纯漫反射。根因：这些材质 roughness 0.15~0.8 半光泽，
+                // 在 RoomEnvironment IBL 下产生随相机角度移动的「一块亮一块暗」反射斑
+                //（无顶棚楼栋的裸屋面/板阵尤其明显，有顶棚的被盖板遮挡看不见）。
+                // s481 扩展：BK_Facade_*（烘焙立面/窗带贴图，窗户图案在贴图里）
+                // 同样半光泽(0.32~0.5)，其反光斑贴着楼顶边缘出现（用户仍见
+                // 「楼顶一块亮一块暗」）；一并哑光，观感由烘焙贴图保证。
+                // 池塘水面(BK_M_Pond_Water)的反光是自然现象，保留不动。
+                if (/Roof|^RT_|Solar_Panel|^BK_Facade|Canopy/i.test(mat.name)) {
+                  sm.roughness = 1.0;
+                  sm.metalness = 0.0;
+                  // 注意：envMapIntensity 必须保留 0.7，不能归零——
+                  // roughness=1 时 IBL 反射是完全模糊的半球均匀值（无任何随视角
+                  // 移动的斑块），但仍是屋面的重要环境亮度来源；归零会让
+                  // 屋面/顶棚发灰发暗（s481 教训）。
+                }
+                // s484 z-fighting 修复（楼顶「一块亮一块暗随角度移动」的真正根因）：
+                // 每栋楼的檐口盖板(EaveC_*，材质 Roof_Edge)是一块 0.4m 厚的板，
+                // 其底面与屋面板(Roof_Tier_*，本楼 mesh)的顶面【完全共面 dz=0】
+                // （琴剑楼实测 dz=+0.0000，底面积 2602m² 甚至比屋面 2478m² 还大）。
+                // 双面渲染下，从上方看「檐口底面的背面」与「屋面顶面」逐像素抢深度，
+                // 胜者随相机角度翻转 → 整片屋顶游走花斑。与材质反光(s480)、
+                // 阴影痤疮(s483)相互独立，所以前几轮修复后仍残留。
+                // ① 恢复单面渲染：底面背面从上方被剔除（从下方看檐口悬挑底面仍是
+                //    正面，不受影响）；
+                // ② polygonOffset 把檐口面推后，琴剑楼那种「与屋面同高的上翻檐口
+                //    平台」等残余共面也确定由屋面获胜。
+                if (/Roof_Edge/i.test(mat.name)) {
+                  sm.side = THREE.FrontSide;
+                  sm.polygonOffset = true;
+                  sm.polygonOffsetFactor = 2;
+                  sm.polygonOffsetUnits = 2;
+                }
+                // s484 地面同理：Lawn_GapFill（草地补丁层）顶面与 Lawn_Campus_Fill
+                // 顶面共面 z=0.0000，也是游走花斑源；推后让主草地层稳定获胜。
+                if (/^Lawn_GapFill/i.test(child.name)) {
+                  sm.polygonOffset = true;
+                  sm.polygonOffsetFactor = 1;
+                  sm.polygonOffsetUnits = 1;
+                }
                 sm.needsUpdate = true;
               }
             }
@@ -894,6 +962,10 @@ export class MapScene {
           this.callbacks.onFitComplete?.();
         }
         this.callbacks.onModelReady?.();
+        // 首屏主动补帧：确保 GLCustomLayer 第一时间被绘制，不依赖高德按需渲染在「无视角变化」时
+        // 主动重绘——否则首帧可能不绘制，表现为「遮罩揭开后模型仍不显示 / 需开控制台才出现」。
+        this.requestRender();
+        setTimeout(() => this.requestRender(), 250);
   }
 
   /**
@@ -1000,6 +1072,21 @@ export class MapScene {
     /** 可见区（避开顶 / 底悬浮 UI）的屏幕中心（px）——「居中」以它为准 */
     const visCy = (padTop + (H - padBottom)) / 2;
 
+    // 默认取景微调：把模型在屏幕上向左偏移（fr*W 像素），给右侧留出空间，
+    // 避免模型永远死板地居中。正值 = 模型偏左。
+    // 与 ZOOM_BONUS 的取舍：左移越大、放大越大，左侧越容易被画面边缘裁切；
+    // 但用户明确表示「左侧看不见也没关系」，故大幅左移（0.12）：放平（pitch 大）后
+    // 横向余量本就很小，左移会切到左侧建筑/树木属可接受范围。
+    const MODEL_SHIFT_FRAC = 0.12;
+    const shiftPx = MODEL_SHIFT_FRAC * W;
+    // 默认取景：把模型在屏幕上向下（朝观察者 / 近处）偏移一点点，让上方多留空间，
+    // 视觉上模型「往面前拖」。正值 = 模型偏下（屏幕 y 更大）。取 0.08 使效果明显又不出画。
+    const MODEL_SHIFT_DOWN_FRAC = 0.08;
+    const shiftDownPx = MODEL_SHIFT_DOWN_FRAC * H;
+    // 默认取景在「刚好填满」基础上额外放大一点点（zoom 等级），让模型显得更大些。
+    // 注意：放大过多会与左移叠加导致左侧被画面边缘裁切，故保持与左移相匹配的小值。
+    const ZOOM_BONUS = 0.14;
+
     // 解析试验相机：在指定俯仰角 pitchDeg（高德约定 0=正上方俯视，越大越平视）、
     // 视中心与距离下透视投影全部角点，检查是否都落在屏幕边距内。
     const testCam = new THREE.PerspectiveCamera(params.fov, W / H, 1, 1e7);
@@ -1054,9 +1141,13 @@ export class MapScene {
     // 3) 俯仰角自适应：找一个俯仰角使「最大放大时建筑群投影的高宽比 == 屏幕高宽比」，
     //    此时最大放大会同时贴满横竖四边（模型刚好填满整个屏幕）。
     //    投影高宽比随俯仰角增大（越平视）而单调减小；搜索范围夹在 [PITCH_MIN, PITCH_MAX]
-    //    保持正面斜视观感，两端仍不匹配时取更接近的一端（另一方向留少量空白）。
-    const PITCH_MIN = 35;
-    const PITCH_MAX = 75;
+    //    保持「从上俯视」观感（俯角 30°–45°，pitch 60–45），不出现视角过低。
+    //    PITCH_MIN=PITCH_MAX=55（对应俯角 35°）：本版把加载视角钉在 35° 高空 3/4 俯瞰，
+    //    相机较高、透视变形小、能看到建筑立面又不至过斜（上一版 pitch=72/俯角18° 过斜）。
+    //    钉死后 fit 不会为「填满屏幕」再调俯仰，保证默认俯角严格 35°。手动拖动上限仍由
+    //    config.maxPitch=75 控制（可拖到更平），不影响加载默认值。
+    const PITCH_MIN = 55;
+    const PITCH_MAX = 55;
     // 俯仰角匹配目标：可见区（避开顶 / 底悬浮 UI）的高宽比，而非整屏
     const screenRatio = (H - padTop - padBottom) / Math.max(W - 2 * padX, 1);
     let pitch = THREE.MathUtils.clamp(this.config.pitch, PITCH_MIN, PITCH_MAX);
@@ -1105,8 +1196,9 @@ export class MapScene {
         bxMin = Math.min(bxMin, s.x); bxMax = Math.max(bxMax, s.x);
         byMin = Math.min(byMin, s.y); byMax = Math.max(byMax, s.y);
       }
-      // 「居中」目标 = 可见区中心（水平仍取屏幕中心，垂直避开顶 / 底悬浮 UI）
-      return { offX: (bxMin + bxMax) / 2 - W / 2, offY: (byMin + byMax) / 2 - visCy };
+      // 「居中」目标 = 可见区中心（水平仍取屏幕中心，垂直避开顶 / 底悬浮 UI）。
+      // 叠加 shiftDownPx：让模型整体向下（朝观察者）偏移一点点。
+      return { offX: (bxMin + bxMax) / 2 - W / 2, offY: (byMin + byMax) / 2 - (visCy + shiftDownPx) };
     };
     for (let iter = 0; iter < 3; iter++) {
       placeTestCam(look, dirAt(pitch), fit.d);
@@ -1127,7 +1219,8 @@ export class MapScene {
       const dx = pxOf(look.clone().addScaledVector(rightG, 1)).x - p0.x;
       const dy = pxOf(look.clone().addScaledVector(fwdG, 1)).y - p0.y;
       const look2 = look.clone();
-      if (Math.abs(dx) > 1e-6) look2.addScaledVector(rightG, offX / dx);
+      // 居中目标偏移 shiftPx：让模型在屏幕上偏左一点点（offX 最终收敛到 -shiftPx）
+      if (Math.abs(dx) > 1e-6) look2.addScaledVector(rightG, (offX + shiftPx) / dx);
       if (Math.abs(dy) > 1e-6) look2.addScaledVector(fwdG, offY / dy);
       // 平移后重新收紧距离（居中后常可再放大）；放不下 / 距离异常暴涨则回退平移
       const prevLook = look.clone();
@@ -1148,7 +1241,8 @@ export class MapScene {
     const zoomFit = Math.min(Math.max(zoom0 + Math.log2(dist0 / fit.d), 3), 20);
     // 先应用自适应俯仰角（config.maxPitch 已放宽到与 PITCH_MAX 一致，不会被俯仰钳制拉回）
     this.setPitchSafe(pitch);
-    this.map.setZoomAndCenter(+zoomFit.toFixed(3), fitCenter, true);
+    // 在「刚好填满」基础上额外放大一点点（ZOOM_BONUS），让模型显得更大些
+    this.map.setZoomAndCenter(+(zoomFit + ZOOM_BONUS).toFixed(3), fitCenter, true);
     // eslint-disable-next-line no-console
     console.info(
       `[MapScene] 自动取景：估算 zoom=${zoomFit.toFixed(2)}、pitch=${pitch.toFixed(1)}（建筑角点 ${corners.length} 个，` +
@@ -1252,8 +1346,12 @@ export class MapScene {
     const topPx = ((1 - v.maxY) / 2) * H;
     const bottomPx = ((1 - v.minY) / 2) * H;
     const visCy = (topPx + bottomPx) / 2;
+    // 默认取景：让模型在屏幕上向左偏移（与 fitToBuildings 的 shiftPx 一致，用户接受左侧裁切）；
+    // 同时向下（朝观察者）偏移 shiftDownPx（与 fitToBuildings 的 shiftDownPx 一致）
+    const shiftPx = 0.12 * W;
+    const shiftDownPx = 0.08 * H;
     const offX = (lx + hx) / 2 - (leftPx + rightPx) / 2;
-    const offY = (ly + hy) / 2 - visCy;
+    const offY = (ly + hy) / 2 - (visCy + shiftDownPx);
     // 两方向填满率：包围盒宽 / 高分别占可见区宽 / 高的比例（>1 有富余、<1 出画）
     const availW = Math.max(rightPx - leftPx, 1);
     const availH = Math.max(bottomPx - topPx, 1);
@@ -1261,15 +1359,18 @@ export class MapScene {
     const fY = availH / Math.max(hy - ly, 1e-6);
     const err = Math.log2(Math.min(fX, fY));
     const done = (reason: string): void => {
+      // 在「刚好填满」基础上额外放大一点点（ZOOM_BONUS），让模型显得更大些
+      const zEnd = Number(this.map.getZoom?.() ?? zoomNow) + 0.14;
+      this.map.setZoomAndCenter(+zEnd.toFixed(3), v.center, true);
       this.endFitRefine(); // 结束微调并恢复模型显示
       // eslint-disable-next-line no-console
       console.info(
-        `[MapScene] 取景收敛（${reason}）：zoom=${zoomNow.toFixed(2)}、pitch=${v.pitch.toFixed(1)}，` +
+        `[MapScene] 取景收敛（${reason}）：zoom=${zEnd.toFixed(2)}、pitch=${v.pitch.toFixed(1)}，` +
           `角点屏幕范围 x[${lx.toFixed(0)}~${hx.toFixed(0)}]/${W}，y[${ly.toFixed(0)}~${hy.toFixed(0)}]/${H}`,
       );
     };
     if (
-      Math.abs(offX) <= 3 && Math.abs(offY) <= 3 &&
+      Math.abs(offX + shiftPx) <= 3 && Math.abs(offY) <= 3 &&
       Math.abs(Math.log2(fX)) < 0.01 && Math.abs(Math.log2(fY)) < 0.01
     ) {
       done('居中且填满'); // 已收敛：两方向都贴满可见区
@@ -1308,9 +1409,10 @@ export class MapScene {
       const p0 = prj(lookW);
       const dx = prj(lookW.clone().addScaledVector(rightG, 1)).x - p0.x;
       const dy = prj(lookW.clone().addScaledVector(fwdG, 1)).y - p0.y;
-      // 修正方向：视中心右移 → 内容左移，故取 +off/d；0.9 阻尼防过冲
+      // 修正方向：视中心右移 → 内容左移，故取 +off/d；0.9 阻尼防过冲。
+      // 叠加 shiftPx：让模型最终在屏幕上偏左一点点（offX 收敛到 -shiftPx）。
       const look2 = lookW.clone();
-      if (Math.abs(dx) > 1e-6) look2.addScaledVector(rightG, (0.9 * offX) / dx);
+      if (Math.abs(dx) > 1e-6) look2.addScaledVector(rightG, (0.9 * (offX + shiftPx)) / dx);
       if (Math.abs(dy) > 1e-6) look2.addScaledVector(fwdG, (0.9 * offY) / dy);
       const [wl, wt] = this.worldToWgs84(look2);
       v.center = wgs84ToGcj02(wl, wt);
@@ -1409,7 +1511,15 @@ export class MapScene {
    * 缩放通过离屏 canvas 重绘实现，不改原始模型文件。
    */
   private clampTextureToMaxSize(tex: THREE.Texture): boolean {
-    const maxSize = this.renderer?.capabilities?.maxTextureSize ?? 4096;
+    const hwMax = this.renderer?.capabilities?.maxTextureSize ?? 4096;
+    // s471: GLB now ships a handful of 2048px facade atlases for the largest
+    // buildings (sharper). A 2048x2048 RGBA texture costs 16MB of VRAM; on a
+    // low-end integrated GPU 8+ of those plus ~60 x 1024 can overflow shared
+    // memory and cause the stutter / failed load the user reported. Cap them
+    // at 1024 in lowEnd mode (reuse the existing canvas downscale path below);
+    // capable machines keep the full resolution. 1024 is still well above the
+    // old "<=256" low-end path that made every facade look washed out.
+    const maxSize = this.lowEnd ? Math.min(hwMax, 1024) : hwMax;
     if (typeof document === 'undefined') return false; // 非浏览器环境（如测试）跳过
     const img = tex.image as { width?: number; height?: number } | undefined;
     if (!img || !img.width || !img.height) return false;
@@ -1715,6 +1825,41 @@ export class MapScene {
     });
   }
 
+  /**
+   * 计算模型「可见部分」的世界包围盒。
+   * 与 Box3.setFromObject 的区别：跳过自身或任一祖先 visible=false 的网格 —— 节点过滤
+   * 隐藏的辅助几何（大门/廊架/相机靶等，可能被挪到离场景几百上千米外）不应参与包围盒，
+   * 否则会把居中/阴影/取景的参考中心整体带偏。
+   */
+  private visibleModelBox(): THREE.Box3 | null {
+    if (!this.modelRoot) return null;
+    const box = new THREE.Box3();
+    const v = new THREE.Vector3();
+    let has = false;
+    const walk = (o: THREE.Object3D, ancestorVisible: boolean): void => {
+      const selfVisible = ancestorVisible && o.visible;
+      if (selfVisible) {
+        const mesh = o as THREE.Mesh;
+        if (mesh.isMesh && mesh.geometry) {
+          if (!mesh.geometry.boundingBox) mesh.geometry.computeBoundingBox();
+          const bb = mesh.geometry.boundingBox!;
+          for (const X of [bb.min.x, bb.max.x]) {
+            for (const Y of [bb.min.y, bb.max.y]) {
+              for (const Z of [bb.min.z, bb.max.z]) {
+                v.set(X, Y, Z).applyMatrix4(mesh.matrixWorld);
+                box.expandByPoint(v);
+                has = true;
+              }
+            }
+          }
+        }
+      }
+      for (const child of o.children) walk(child, selfVisible);
+    };
+    walk(this.modelRoot, true);
+    return has ? box : null;
+  }
+
   private placeModelAtAnchor(): void {
     if (!this.modelRoot) return;
 
@@ -1724,18 +1869,28 @@ export class MapScene {
     // 导致几何中心并不在原点：一旦模型在建模软件里不是以原点为中心（CAD/BIM 常以真实坐标为原点），
     // 旋转与定位都会围绕偏离建筑中心的「原点」进行，模型被甩到锚点远处、半进半出视野。
     if (this.config.recenterModel) {
-      const box = new THREE.Box3().setFromObject(this.modelRoot);
-      if (!box.isEmpty()) {
+      this.modelRoot.updateMatrixWorld(true);
+      // 只统计「可见网格」：nodeFilter 隐藏的杂物（如被挪到 (1000,0,-1000) 的 Entrance_Door_2）
+      // 仍是 modelRoot 子树的一员，Box3.setFromObject 不看 visible，会把包围盒中心撑偏 400+ 米。
+      const box = this.visibleModelBox();
+      if (box && !box.isEmpty()) {
         // 只做「水平居中 + 底面落地」：绝不能把整个包围盒中心搬原点，否则建筑底面被压到地面以下 → 模型「钻到地图底部」。
         // 局部坐标下 Y 为高度方向（modelRotation[90°,0,0] 会把它转到世界 Z 向上），
         // 故仅平移 X/Z 使水平中心对齐原点，并把底面(minY)抬到 y=0，旋转后即立于地面 z=0。
         const cx = (box.min.x + box.max.x) / 2;
         const cz = (box.min.z + box.max.z) / 2;
         const minY = box.min.y;
+        const worldDelta = new THREE.Vector3(-cx, -minY, -cz);
+        const inv = new THREE.Matrix3();
         this.modelRoot.traverse((o) => {
           const mesh = o as THREE.Mesh;
           if (mesh.isMesh && mesh.geometry) {
-            mesh.geometry.translate(-cx, -minY, -cz);
+            // 关键：烘焙进几何的位移必须先除掉该 mesh 的节点缩放（linear matrixWorld 的逆）。
+            // 否则带大缩放的节点（如 Ground_Base 的 780×1×800）会把位移放大数百倍，
+            // 地面被甩到几十万米外 —— 表现为「导出模型看不到底图」。
+            inv.setFromMatrix4(mesh.matrixWorld).invert();
+            const t = worldDelta.clone().applyMatrix3(inv);
+            mesh.geometry.translate(t.x, t.y, t.z);
           }
         });
         // 几何已水平居中且底面落地，重置 position 以便后续统一在锚点定位
@@ -1759,6 +1914,12 @@ export class MapScene {
     // 应用（叠加）校准微调量
     this.applyCalibration();
     this.freezeModelMatrices();
+    // 调试辅助：把实例暴露到 window，便于外部 Playwright 排查场景状态（不影响正常功能）
+    if (typeof window !== 'undefined') {
+      (window as unknown as { __map: unknown }).__map = this;
+      const w2 = window as unknown as { __maps?: unknown[] };
+      (w2.__maps = w2.__maps || []).push(this);
+    }
   }
 
   /**
@@ -1769,7 +1930,8 @@ export class MapScene {
    */
   private fitShadowToModel(): void {
     if (!this.dirLight || !this.modelRoot) return;
-    const box = new THREE.Box3().setFromObject(this.modelRoot);
+    // 同 placeModelAtAnchor：只统计可见网格，避免被隐藏的远处杂物把阴影相机中心带偏
+    const box = this.visibleModelBox() ?? new THREE.Box3().setFromObject(this.modelRoot);
     if (box.isEmpty()) return;
     const center = box.getCenter(new THREE.Vector3());
     this.dirLight.target.position.copy(center);
@@ -3229,6 +3391,11 @@ export class MapScene {
         this.endFitRefine(); // 微调失败不影响渲染（并恢复模型显示）
       }
     }
+    // 取景微调仍在进行 → 主动排程下一帧渲染，驱动微调逐步收敛。
+    // 否则在「高德按需渲染」环境下地图不会因视角微调自动重绘，微调循环会断掉，
+    // 导致 onFitComplete 永不触发 → 加载遮罩永久卡在「准备渲染」、需开/关 DevTools
+    // 触发 resize 才偶然解开（即「开控制台才显示模型」的根因）。
+    if (this.fitRefine) this.scheduleRender();
 
     // 逐帧直绘模型到 AMap 已清好的画布（见 renderCachedFrame）。降载靠相机同步节流 + 锚点防抖，而非帧缓存。
     this.renderCachedFrame();

@@ -12,6 +12,7 @@
 
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import { wgs84ToGcj02, gcj02ToWgs84 } from '../utils/coordTransform';
 import type { SceneConfig } from '../config/mapConfig';
@@ -925,6 +926,9 @@ export class MapScene {
         // 所有贴图处理完成后再挂入场景：避免在「让出帧」期间 AMap 提前渲染、把全分辨率贴图先上传一遍 GPU
         // （那样低配机器仍会先承受一次 450MB 上传峰值）。挂入后 AMap 第一次渲染拿到的就是已降级的贴图。
         this.scene!.add(this.modelRoot);
+        // 合并同材质重复网格（削减 draw call / 拖动卡顿）：在取景、楼栋 AABB、标签之前完成，
+        // 使后续包围盒 / 拾取基于合并后的几何。
+        this.simplifyDrawCalls();
         const caps = this.renderer?.capabilities;
         const shadowState = this.renderer?.shadowMap?.enabled ? '单次(静态缓存)' : '关(低配)';
         // eslint-disable-next-line no-console
@@ -1312,8 +1316,11 @@ export class MapScene {
   private refineFitStep(): void {
     const v = this.fitRefine;
     if (!v) return;
-    if (performance.now() - v.startedAt > 3000) {
-      this.endFitRefine(); // 超时放弃（如用户已开始操作地图），恢复模型显示
+    if (performance.now() - v.startedAt > 600) {
+      this.endFitRefine(); // 超时放弃（如用户已开始操作地图），恢复模型显示；放宽收敛容差后正常几帧即收敛，此处仅为兜底。
+      // 微调每帧 setZoomAndCenter 会触发高德底图瓦片重载（见 fitToBuildings 注释），是加载期 CPU 尖峰的主源，
+      // 故把上限压到 600ms：解析取景（fitToBuildings）已给出接近满屏的估算，600ms 微调足够收敛到肉眼无感，
+      // 既保帧又控加载时长；低配设备本就跳过微调（同注释）。
       return;
     }
     if (!this.map || !this.camera || !this.customCoords) return;
@@ -1371,10 +1378,10 @@ export class MapScene {
       );
     };
     if (
-      Math.abs(offX + shiftPx) <= 3 && Math.abs(offY) <= 3 &&
-      Math.abs(Math.log2(fX)) < 0.01 && Math.abs(Math.log2(fY)) < 0.01
+      Math.abs(offX + shiftPx) <= 6 && Math.abs(offY) <= 6 &&
+      Math.abs(Math.log2(fX)) < 0.02 && Math.abs(Math.log2(fY)) < 0.02
     ) {
-      done('居中且填满'); // 已收敛：两方向都贴满可见区
+      done('居中且填满'); // 已收敛：两方向都贴满可见区（容差放宽为 6px / 2%，肉眼无感，避免死循环跑到超时）
       return;
     }
     if (v.tries <= 0) {
@@ -1788,6 +1795,100 @@ export class MapScene {
       /* 个别 ImageBitmap/跨域 drawImage 抛错则保留原图 */
     }
     return false;
+  }
+
+  /**
+   * 加载后合并「同材质」网格，削减 draw call 数量（CPU 端绘制调用是拖动卡顿主因之一）。
+   * 策略（零拾取 / 高亮风险）：
+   *  - 非楼栋网格（道路 / 标线 / 球场 / 水面 / 草地 / 树木 / 装饰）：跨全模型按材质合并 → 永不参与拾取；
+   *  - 楼栋网格：仅在「同一栋楼内」按材质合并，保留楼栋节点 → 悬停高亮 / 射线拾取仍可逐栋向上回溯；
+   *  - 排除：房间格子（需逐层可见性）、被 modelNodeFilter 隐藏的节点子树（合并会解除隐藏并重入包围盒 / 阴影）、
+   *    以及依赖 Object 坐标生成 UV 的树木叶 / 干材质（烘焙世界变换会破坏其贴图采样）。
+   * 注意：仅当同组网格数 ≥ 2 才真正合并（单网格无收益，保留原样，绝不删除几何）。
+   */
+  private simplifyDrawCalls(): void {
+    if (!this.modelRoot) return;
+    const root = this.modelRoot; // 局部 const，供闭包内类型收窄（属性无法跨闭包收窄）
+    const isBuildingName = (n: string): boolean => this.buildingNames.has(n);
+    const filter = this.config.modelNodeFilter;
+    const hidePats = ((filter && filter.patterns) || []).map((p) => p.toLowerCase()).filter(Boolean);
+
+    // 该网格（含任一祖先）是否处于被 modelNodeFilter 隐藏的子树内
+    const isHiddenNode = (o: THREE.Object3D): boolean => {
+      let p: THREE.Object3D | null = o;
+      while (p && p !== root) {
+        if (hidePats.some((pat) => (p!.name || '').toLowerCase().includes(pat))) return true;
+        p = p.parent;
+      }
+      return false;
+    };
+    // 该网格所属楼栋节点（向上找首个名为建筑编号的祖先）
+    const buildingAncestorOf = (o: THREE.Object3D): THREE.Object3D | null => {
+      let p = o.parent;
+      while (p && p !== root) {
+        if (isBuildingName(p.name)) return p;
+        p = p.parent;
+      }
+      return null;
+    };
+    const attrSig = (g: THREE.BufferGeometry): string => {
+      const names = Object.keys(g.attributes).sort().join(',');
+      return (g.index ? 'I' : 'N') + '|' + names;
+    };
+
+    root.updateMatrixWorld(true);
+    interface MergeItem { geom: THREE.BufferGeometry; mesh: THREE.Mesh; }
+    const groups = new Map<string, { mat: THREE.Material; parent: THREE.Object3D; items: MergeItem[] }>();
+    root.traverse((o) => {
+      const mesh = o as THREE.Mesh;
+      if (!mesh.isMesh || !mesh.geometry || !mesh.geometry.attributes.position) return;
+      const ud = mesh.userData as Record<string, unknown> | undefined;
+      if (ud && (ud.isRoom || ud.room)) return; // 房间格子：逐层可见性，保留
+      if (Array.isArray(mesh.material)) return; // 多材质网格：保留
+      const mat = mesh.material as THREE.Material | undefined;
+      if (!mat) return;
+      if (/(^|_)Leaf(_|$)|Trunk|Tree/i.test(mat.name || '')) return; // 树木叶/干：Object 坐标 UV，烘焙会破坏
+      if (isHiddenNode(mesh)) return; // 被节点过滤隐藏：合并会解除隐藏并污染包围盒/阴影
+      const ancestor = buildingAncestorOf(mesh);
+      const targetParent = ancestor ?? root;
+      mesh.updateWorldMatrix(true, false);
+      const invParent = new THREE.Matrix4().copy(targetParent.matrixWorld).invert();
+      const xf = new THREE.Matrix4().multiplyMatrices(invParent, mesh.matrixWorld);
+      const g = mesh.geometry.clone();
+      g.applyMatrix4(xf);
+      const sig = attrSig(g);
+      const key = (ancestor ? 'B:' + ancestor.uuid : 'N') + '|' + mat.uuid + '|' + sig;
+      let grp = groups.get(key);
+      if (!grp) { grp = { mat, parent: targetParent, items: [] }; groups.set(key, grp); }
+      grp.items.push({ geom: g, mesh });
+    });
+
+    let mergedCount = 0;
+    const consumed: THREE.Mesh[] = [];
+    for (const grp of groups.values()) {
+      if (grp.items.length < 2) continue; // 单网格无收益，保留原样
+      let merged: THREE.BufferGeometry | null = null;
+      try { merged = mergeGeometries(grp.items.map((i) => i.geom), false); } catch { merged = null; }
+      if (!merged) continue; // 属性不兼容等：放弃该组合并，保留原网格
+      const m = new THREE.Mesh(merged, grp.mat);
+      m.name = (grp.parent === root ? 'MergedNB_' : 'MergedB_') + mergedCount;
+      // 保留源网格的阴影标志（源网格统一 cast/receive=true，见 runModelOnLoad 的 traverse）；
+      // 合并网格若不设会丢失建筑阴影，故继承首项的标志（同组同类型，结果一致）。
+      const src0 = grp.items[0].mesh;
+      m.castShadow = src0.castShadow;
+      m.receiveShadow = src0.receiveShadow;
+      grp.parent.add(m);
+      mergedCount++;
+      for (const it of grp.items) consumed.push(it.mesh);
+      for (const it of grp.items) it.geom.dispose(); // 已并入 merged 的克隆体，安全释放
+    }
+    for (const mesh of consumed) { if (mesh.parent) mesh.parent.remove(mesh); }
+
+    // eslint-disable-next-line no-console
+    console.info(
+      `[MapScene] 网格合并：候选同材质组已折叠，新增 ${mergedCount} 个合并网格，` +
+        `移除原网格 ${consumed.length} 个；场景 draw call 显著下降（仅同材质重复网格被合并）`,
+    );
   }
 
   /**

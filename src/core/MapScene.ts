@@ -1151,8 +1151,8 @@ export class MapScene {
     //    比上一版 40°（pitch=50）更俯视、地面更平、模型「往面前倾斜」的观感明显减弱（接近平放）。
     //    钉死后 fit 不会为「填满屏幕」再调俯仰，保证默认俯角严格 55°。
     //    手动拖动上限仍由 config.maxPitch=75 控制（可拖到更平/更斜），不影响加载默认值。
-    const PITCH_MIN = 35;
-    const PITCH_MAX = 35;
+    const PITCH_MIN = 70;
+    const PITCH_MAX = 70;
     // 俯仰角匹配目标：可见区（避开顶 / 底悬浮 UI）的高宽比，而非整屏
     const screenRatio = (H - padTop - padBottom) / Math.max(W - 2 * padX, 1);
     let pitch = THREE.MathUtils.clamp(this.config.pitch, PITCH_MIN, PITCH_MAX);

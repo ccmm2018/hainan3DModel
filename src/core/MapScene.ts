@@ -203,6 +203,22 @@ export class MapScene {
   private shadowUpdateTimer: number | null = null;
   /** 重绘排程标志：将分散在各处的 map.render() 合并为「每动画帧至多一次」，消除重绘风暴（悬停扫楼/拖拽/量算时 CPU 尖峰的主因） */
   private renderScheduled = false;
+  /** 悬停用浏览器原生 pointermove（capture）：绕开高德 map.on('mousemove') 的内部事件代理与按需渲染周期 */
+  private hoverDomHandler: ((e: PointerEvent) => void) | null = null;
+  /** 上一次上报的悬停结果指纹：鼠标在同一栋楼内移动时不重复触发 Vue 更新 / 高亮 / 底图重绘 */
+  private lastHoverKey: string | null = null;
+  /** 悬停拾取排程的 rAF id（destroy 时取消，避免跨实例泄漏） */
+  private hoverRafId: number | null = null;
+  /** 原生指针是否按下：部分输入方式下拖动时 pointermove.buttons 会是 0，不能只靠 buttons 判断 */
+  private pointerIsDown = false;
+  /** 最近一次视角变化时间戳：拖动/缩放/飞行期间一律不做悬停拾取（停下 90ms 再恢复） */
+  private lastViewChangeAt = 0;
+  private pointerDownHandler: ((e: PointerEvent) => void) | null = null;
+  private pointerUpHandler: ((e: PointerEvent) => void) | null = null;
+  /** 内容变更后「同步直绘」的时间戳：防止同一帧内多次 markDirty 重复全场景重绘 */
+  private lastImmediateDrawAt = 0;
+  /** 被 12ms 节流跳过的直绘请求排程标记：保证最后一次内容变更一定上屏（不能丢弃） */
+  private immediateDrawScheduled = false;
 
   /** 楼盘表：房间格子可视化 */
   private roomGroup: THREE.Group | null = null;
@@ -313,6 +329,8 @@ export class MapScene {
   private selectedBuildingName = '';
   private labelsDirty = true;
   private lastLabelSig = '';
+  /** 标签重排节流时间戳：拖动时标签 30fps 足够，避免每帧几十次 DOM 写入拖慢渲染 */
+  private lastLabelAt = 0;
   private labelStyleInjected = false;
 
   /** 模型校准（微调对齐）增量参数，叠加在 config 基础定位之上 */
@@ -419,8 +437,32 @@ export class MapScene {
     });
     this.map.add(this.glLayer);
 
-    // 交互事件（地图点击/移动不会在拖拽时误触发）
-    this.map.on('mousemove', (e: any) => this.handleMouseMove(e));
+    // 交互事件（点击仍用高德事件，悬停改用原生指针事件）
+    // 悬停拾取改绑浏览器原生 pointermove（capture）：高德 map.on('mousemove') 需经过其内部事件代理，
+    // 而 GLCustomLayer 是「按需渲染」——地图静止时 AMap 可能整秒不回调 render()，仅靠 map.render()
+    // 唤醒会把高亮推迟到下一个渲染周期（弱机上表现为接近 1 秒的延迟）。原生事件在捕获阶段即可拿到，
+    // 配合 rAF 合帧做到「移动即拾取」，且拖动地图时直接跳过以省 CPU。
+    this.hoverDomHandler = (e: PointerEvent) => {
+      if (this.disposed) return;
+      // ⚠️ 拖动地图时绝不能做悬停拾取：一次拾取会连锁触发 Vue 更新 → 材质克隆/还原
+      // → markDirty 同步重绘整场景，拖动每帧再叠加一次全场景渲染就是「移动模型卡顿」的主因。
+      // 三重门控：
+      //  1) buttons（标准鼠标按下）
+      //  2) 自维护的 pointerdown 标志（某些浏览器/触控/合成事件下拖动时 buttons 恒为 0）
+      //  3) 视角变化后 90ms 冷却（覆盖滚轮缩放、地图飞行、惯性滑动等无按键的视角变化）
+      const now = typeof performance !== 'undefined' ? performance.now() : 0;
+      if (e.buttons !== 0 || this.pointerIsDown || now - this.lastViewChangeAt < 90) return;
+      this.queueHover(e.clientX, e.clientY);
+    };
+    this.container.addEventListener('pointermove', this.hoverDomHandler, { capture: true, passive: true });
+    this.pointerDownHandler = (e: PointerEvent) => {
+      if (e.button === 0 || e.buttons !== 0) this.pointerIsDown = true;
+    };
+    this.pointerUpHandler = () => { this.pointerIsDown = false; };
+    this.container.addEventListener('pointerdown', this.pointerDownHandler, { capture: true, passive: true });
+    // pointerup 可能落在容器外，绑到 window 才能保证标志复位
+    window.addEventListener('pointerup', this.pointerUpHandler, { capture: true, passive: true });
+    window.addEventListener('pointercancel', this.pointerUpHandler, { capture: true, passive: true });
     this.map.on('click', (e: any) => this.handleClick(e));
     this.map.on('dblclick', (e: any) => this.handleDoubleClick(e));
     // 俯仰角锁定：拖动旋转地图时不允许把地图「翻过来」
@@ -433,7 +475,8 @@ export class MapScene {
           this.paused = true;
         } else {
           this.paused = false;
-          this.markDirty();
+          // 切回前台时底图缓冲可能已失效，需要高德重绘整帧（并把自定义层一起回调）
+          this.markDirty(true);
         }
       };
       document.addEventListener('visibilitychange', this.visibilityHandler);
@@ -954,7 +997,8 @@ export class MapScene {
         );
 
         this.callbacks.onModelStage?.('准备渲染');
-        this.markDirty();
+        // 加载阶段 GL 画布/底图刚就绪，需要一次完整的高德整帧
+        this.markDirty(true);
         // 取景前先构建各建筑世界 AABB，供后续悬停拾取做粗筛（避免全模型 raycast）。
         this.refreshBuildingBoxes();
         // 构建常驻楼栋名称标签（钉在每栋楼顶端，无需悬停即显示）。
@@ -1312,7 +1356,8 @@ export class MapScene {
     }
     if (this.modelRoot && !this.modelRoot.visible) {
       this.modelRoot.visible = true;
-      this.markDirty();
+      // 揭开加载遮罩前补一帧完整底图，避免首帧只有模型没有底图
+      this.markDirty(true);
     }
     this.callbacks.onFitComplete?.();
   }
@@ -2237,26 +2282,38 @@ export class MapScene {
 
   /** 每帧（或视角/选中变化时）把标签投影到屏幕并定位；密集时做简单纵向去重叠 */
   private updateBuildingLabels(): void {
-    if (!this.labelLayer || this.buildingLabels.length === 0) return;
+    if (!this.labelLayer || this.buildingLabels.length === 0 || !this.camera) return;
     if (!this.labelsDirty && this.lastViewSig === this.lastLabelSig) return;
+    // 拖动时视角每帧都变，但常驻标签 30fps 足够跟上，不必每帧写几十次 DOM。
+    // 内容变化（选中/校准）走 labelsDirty，仍然立即重排，不做节流。
+    const now = typeof performance !== 'undefined' ? performance.now() : 0;
+    if (!this.labelsDirty && this.lastViewSig !== this.lastLabelSig &&
+        now - this.lastLabelAt < 32) return;
+    this.lastLabelAt = now;
     this.lastLabelSig = this.lastViewSig;
     this.labelsDirty = false;
 
+    // ⚠️ 容器尺寸只读一次。此前循环里每枚标签都调 projectToScreen()，其内部要读
+    // clientWidth/clientHeight；循环中又穿插 classList/style 写入，构成典型的
+    // 「读-写交替 layout thrash」——拖动时每帧强制浏览器重排几十次，是卡顿的一大来源。
     const W = this.container.clientWidth || 1;
     const H = this.container.clientHeight || 1;
     const margin = 24;
+    const v = new THREE.Vector3();
     const placements: Array<{ entry: BuildingLabel; x: number; y: number }> = [];
     for (const entry of this.buildingLabels) {
-      const screen = this.projectToScreen(entry.anchor);
-      if (!screen) {
+      v.copy(entry.anchor).project(this.camera);
+      if (v.z > 1 || v.z < -1) {
         entry.el.classList.add('bld-label--hidden');
         continue;
       }
-      if (screen.x < -margin || screen.x > W + margin || screen.y < -margin || screen.y > H + margin) {
+      const x = (v.x * 0.5 + 0.5) * W;
+      const y = (-v.y * 0.5 + 0.5) * H;
+      if (x < -margin || x > W + margin || y < -margin || y > H + margin) {
         entry.el.classList.add('bld-label--hidden');
         continue;
       }
-      placements.push({ entry, x: screen.x, y: screen.y });
+      placements.push({ entry, x, y });
     }
 
     // 由下往上放置（y 大者优先），与已放置标签过近则隐藏（选中楼栋始终保留）
@@ -2282,8 +2339,11 @@ export class MapScene {
       shown.push({ x: p.x, y: p.y });
       p.entry.el.classList.remove('bld-label--hidden');
       p.entry.el.classList.toggle('bld-label--active', active);
-      p.entry.el.style.left = `${p.x}px`;
-      p.entry.el.style.top = `${p.y}px`;
+      // 像素级取整 + 变化才写：避免每帧对同一位置重复写 DOM 触发样式重算
+      const left = `${Math.round(p.x)}px`;
+      const top = `${Math.round(p.y)}px`;
+      if (p.entry.el.style.left !== left) p.entry.el.style.left = left;
+      if (p.entry.el.style.top !== top) p.entry.el.style.top = top;
     }
   }
 
@@ -2387,35 +2447,52 @@ export class MapScene {
   // -------------------------------------------------------------------------
   // 交互：拾取 / 高亮
   // -------------------------------------------------------------------------
-  private handleMouseMove(e: any): void {
+  /**
+   * 悬停拾取统一入口（入参为浏览器视口像素）。
+   * 由原生 pointermove 捕获阶段直接驱动，不经过高德事件代理，也不依赖 GLCustomLayer 的按需渲染回调。
+   * 三级降载：位置去重（<1px 跳过）→ rAF 合帧（每帧至多一次 raycast）→ 结果去重（同楼栋内移动零后续开销）。
+   */
+  private queueHover(clientX: number, clientY: number): void {
     if (this.measureMode !== 'none') {
-      // 测量期间只需清除一次悬停高亮；原先每次 mousemove 都回调上层，
-      // 会在拖动时高频触发 Vue 更新与 clearHighlight，是额外的 CPU 负担。
+      // 测量期间只需清除一次悬停高亮，避免高频触发 Vue 更新与 clearHighlight。
       if (!this.measureHoverCleared) {
         this.measureHoverCleared = true;
         this.lastHoverPos = null;
+        this.lastHoverKey = null;
         this.callbacks.onHover?.(null);
       }
       return;
     }
     this.measureHoverCleared = false;
-    const { x, y } = this.pixelOf(e);
+    const canvas = this.renderer?.domElement as HTMLCanvasElement | undefined;
+    if (!canvas) return;
+    const r = canvas.getBoundingClientRect();
+    const x = clientX - r.left;
+    const y = clientY - r.top;
+    if (!isFinite(x) || !isFinite(y)) return;
     // 位移 < 1px 视为同位置，跳过重复拾取（避免原地抖动反复 raycast）
     if (this.lastHoverPos && Math.abs(this.lastHoverPos.x - x) < 1 && Math.abs(this.lastHoverPos.y - y) < 1) {
       return;
     }
     this.hoverLatest = { x, y };
-    // rAF 节流：把连续 mousemove 合并到下一帧最多拾取一次。
-    // 既保证高亮随鼠标即时触发（不依赖 render 每帧回调），又压住 CPU（每帧至多一次 raycast）。
     if (this.hoverRafScheduled) return;
     this.hoverRafScheduled = true;
-    requestAnimationFrame(() => {
+    this.hoverRafId = requestAnimationFrame(() => {
       this.hoverRafScheduled = false;
+      this.hoverRafId = null;
       if (this.disposed) return;
       const p = this.hoverLatest;
       if (!p) return;
       const result = this.pick(p.x, p.y);
       this.lastHoverPos = { x: p.x, y: p.y };
+      // 结果去重：鼠标仍在同一栋楼（或同一片空地）上时，不再上抛 Vue 更新、
+      // 不再 clearHighlight/highlight 重建材质、不再唤醒整张高德底图重绘。
+      // 这是「扫楼时 CPU 飙升」与「弱机高亮滞后」的关键削减点。
+      const key = result
+        ? (result.isRoom ? `R:${result.room?.roomNo ?? result.name}` : `B:${result.name}`)
+        : 'N';
+      if (key === this.lastHoverKey) return;
+      this.lastHoverKey = key;
       this.callbacks.onHover?.(result);
     });
   }
@@ -3530,15 +3607,63 @@ export class MapScene {
     });
   }
 
-  private markDirty(): void {
+  /**
+   * @param wakeMap 是否需要强制高德地图重绘整帧。默认 false —— 绝大多数调用只是
+   *   「场景内容变化」（高亮 / 房间 / 楼层 / 材质），靠下方同步直绘即可当帧上屏。
+   */
+  private markDirty(wakeMap = false): void {
     // 低配 RT 合成路径：内容变化（高亮/选型/房间/校准等）走「RT→blit」同源路径
     // （与空闲帧同一贴图路径），从根上避免「直绘↔贴图」路径切换导致的悬停闪烁；
     // 故置 contentDirty 而非 frameCacheDirty。下一帧 renderCachedFrame 会重渲 RT 再贴图。
     this.contentDirty = true;
-    // 仅需在地图空闲（AMap 停止持续回调 render()）时主动唤醒一次，让变更立即上屏。
-    // 唤醒走 scheduleRender() 合并：同一动画帧内多次 markDirty 只触发一次整帧重绘，
-    // 避免悬停扫楼 / 校准拖拽时高频调用 map.render() 造成的「重绘风暴」与 CPU 尖峰。
-    this.scheduleRender();
+
+    // ⚠️ 高德 GLCustomLayer 是「按需渲染」：地图静止时 AMap 可能整秒都不回调 render()
+    //（实测空闲 600ms 内回调 0 次）。仅靠 map.render() 唤醒，会把「高亮材质已改」
+    // 推迟到 AMap 下一个渲染周期才可见——这正是悬停高亮感觉「慢 1 秒」的根因，弱机更明显。
+    // 因此内容变更后立即同步把模型层重画到当前画布：只 clearDepth、不清颜色（底图保留），
+    // 高亮当帧即可见。加 12ms 节流避免同一动画帧内多次 markDirty 重复全场景重绘。
+    const now = typeof performance !== 'undefined' ? performance.now() : 0;
+    const canDraw = !!(this.renderer && this.scene && this.camera && !this.paused);
+    if (canDraw && now - this.lastImmediateDrawAt > 12) {
+      this.lastImmediateDrawAt = now;
+      try {
+        // ⚠️ 这里绝不能调用 renderer.resetState()：three 的 resetState 会真实改写
+        // 共享 WebGL context 的 GL 状态（disable BLEND/DEPTH_TEST、clearColor(0,0,0,0)、
+        // blendFunc 等一二十个调用）。它只允许出现在 AMap 的自定义层 render 回调内；
+        // 在本处（AMap 帧之外）调用会打乱高德底图渲染器的状态缓存。
+        // render() 收尾已经做过一次 resetState，three 的状态缓存与 GL 实际状态一致，
+        // 这里直接沿用即可。
+        this.renderCachedFrame();
+        this.drawMeasureOverlay();
+      } catch {
+        // GL 画布尚未就绪（加载早期）时忽略，后续正常帧会补上
+      }
+    } else if (canDraw && !this.immediateDrawScheduled) {
+      // ⚠️ 节流的请求绝不能**丢弃**：悬停换楼时 clearHighlight() 与 highlight() 会连着
+      // 调两次 markDirty，第二次常被 12ms 节流挡下。以前还有 scheduleRender() 兜底，
+      // 现在不再唤醒高德，若不补画「高亮」这一帧就永远不会上屏。
+      // 改为合并到下一个 rAF 补一次（同帧多次变更只补一次），保证最终状态一定可见。
+      this.immediateDrawScheduled = true;
+      requestAnimationFrame(() => {
+        this.immediateDrawScheduled = false;
+        if (this.disposed || this.paused || !this.renderer || !this.scene || !this.camera) return;
+        try {
+          this.renderCachedFrame();
+          this.drawMeasureOverlay();
+        } catch {
+          /* GL 尚未就绪，后续正常帧会补上 */
+        }
+      });
+    }
+
+    // ⚠️ 白光闪屏 + 拖动卡顿的根因（s502）：此前每次内容变更（含悬停高亮）都会无条件
+    // scheduleRender() → map.render()，强制高德**整帧重绘底图**。按需渲染模式下高德常常
+    // 只重画底图、却不回调 GLCustomLayer.render()，于是出现一帧「只有浅色底图、没有模型」；
+    // 画布是透明的，下面 .amap-container 的 #f2f2f2 就透出来 → 整个背景白亮闪一下。
+    // 拖动地图时这次额外的整帧重绘还会与高德自身的拖动帧叠加，等于每帧多画一遍底图。
+    // 内容变更已由上方同步直绘上屏，无需再唤醒高德；只有确实需要重建底图/相机的场景
+    // （切回前台、resize、fitRefine、量算）才显式传 wakeMap=true 或自行 scheduleRender()。
+    if (wakeMap) this.scheduleRender();
   }
 
   private render(): void {
@@ -3662,7 +3787,10 @@ export class MapScene {
         this.camera.updateProjectionMatrix();
       }
     }
-    this.renderer.resetState();
+    // ⚠️ 不在这里 resetState()：render() 开头（AMap 自定义层回调内）已统一做一次状态同步，
+    // 此处再到一次纯属重复（每帧 20+ 个无谓 GL 状态调用）。更重要的是 markDirty() 的
+    // 同步直绘也会走本函数，而它发生在 AMap 帧之外 —— 在那里 resetState 会打乱高德
+    // 底图渲染器的 GL 状态缓存，造成底图丢帧 / 背景白闪。状态同步只允许在 AMap 回调内做。
 
     // ── 低配/软件渲染：离屏 RT 合成（空闲帧只贴图压 CPU；拖拽直绘保跟手；内容变化走同源 blit 防闪烁）──
     if (this.lowEnd && !this.frameCacheBroken) {
@@ -3676,14 +3804,7 @@ export class MapScene {
       if (this.contentDirty) {
         // 内容变化（高亮/选型/房间/校准等）：渲染进离屏 RT 后贴图，与空闲帧同一 blit 路径，
         // 从根上避免「直绘↔贴图」两路切换导致的悬停整模型闪一下。
-        this.renderer.setRenderTarget(this.frameRt);
-        this.renderer.setViewport(0, 0, bufW, bufH);
-        this.renderer.setScissor(0, 0, bufW, bufH);
-        this.renderer.setScissorTest(false);
-        this.renderer.setClearColor(0x000000, 0);
-        this.renderer.clear(true, true, false);
-        this.renderer.render(this.scene, this.camera);
-        this.renderer.setRenderTarget(null);
+        this.renderToRt(this.frameRt!, bufW, bufH);
         this.contentDirty = false;
         this.rtStale = false; // RT 已含最新内容，后续空闲帧可直接贴图
         // 落到下方 blit 把新 RT 贴到屏幕
@@ -3701,14 +3822,7 @@ export class MapScene {
         this.renderer.setRenderTarget(null);
         this.renderer.clearDepth();
         this.renderer.render(this.scene, this.camera);
-        this.renderer.setRenderTarget(this.frameRt);
-        this.renderer.setViewport(0, 0, bufW, bufH);
-        this.renderer.setScissor(0, 0, bufW, bufH);
-        this.renderer.setScissorTest(false);
-        this.renderer.setClearColor(0x000000, 0);
-        this.renderer.clear(true, true, false);
-        this.renderer.render(this.scene, this.camera);
-        this.renderer.setRenderTarget(null);
+        this.renderToRt(this.frameRt!, bufW, bufH);
         this.rtStale = false;
         return;
       }
@@ -3805,22 +3919,34 @@ export class MapScene {
   /** 把场景渲染进指定离屏 RT（按给定尺寸设视口/裁剪，透明清空） */
   private renderToRt(rt: THREE.WebGLRenderTarget, w: number, h: number): void {
     if (!this.renderer || !this.scene || !this.camera) return;
-    this.renderer.setRenderTarget(rt);
-    this.renderer.setViewport(0, 0, w, h);
-    this.renderer.setScissor(0, 0, w, h);
-    this.renderer.setScissorTest(false);
-    this.renderer.setClearColor(0x000000, 0);
-    this.renderer.clear(true, true, false);
-    this.renderer.render(this.scene, this.camera);
-    this.renderer.setRenderTarget(null);
+    const r = this.renderer;
+    // ⚠️ setClearColor 是 renderer 的**持久全局状态**，而这里的 WebGL context 与高德底图共享。
+    // 低配 RT 路径每次内容变化都会把它改成透明黑；若不还原，高德按自己的状态缓存清屏时
+    // 可能沿用错误颜色 → 底图整片变成透明，露出 .amap-container 的浅灰白底（背景白闪）。
+    // 故先保存、用完立即还原，绝不把临时清屏色留给底图渲染器。
+    const prevColor = r.getClearColor(new THREE.Color()).clone();
+    const prevAlpha = r.getClearAlpha();
+    r.setRenderTarget(rt);
+    r.setViewport(0, 0, w, h);
+    r.setScissor(0, 0, w, h);
+    r.setScissorTest(false);
+    r.setClearColor(0x000000, 0);
+    r.clear(true, true, false);
+    r.render(this.scene, this.camera);
+    r.setRenderTarget(null);
+    r.setClearColor(prevColor, prevAlpha);
   }
 
   /** 构建交互期降分辨率 RT（拖拽/缩放时降填充率压 CPU）；尺寸随全分辨率 RT 同步 */
   private buildLowRt(w: number, h: number): void {
     if (!this.renderer) return;
-    this.frameRtLow?.dispose();
     const lw = Math.max(1, Math.round(w * MapScene.INTERACT_SCALE));
     const lh = Math.max(1, Math.round(h * MapScene.INTERACT_SCALE));
+    // ⚠️ ensureFrameCache() 每帧都会调用本方法。此前这里无条件 dispose + new WebGLRenderTarget，
+    // 等于拖拽/移动时**每帧销毁并重建一张 GPU 纹理 + FBO**（还伴随事件注册与 GC 抖动），
+    // 是移动模型持续卡顿的一个实打实的开销源。尺寸没变就直接复用。
+    if (this.frameRtLow && this.lowRtW === lw && this.lowRtH === lh) return;
+    this.frameRtLow?.dispose();
     const isWebGL2 = !!this.renderer?.capabilities?.isWebGL2;
     const samples = this.lowEnd || this.softwareRender ? 0 : (isWebGL2 ? 4 : 0);
     const opts: THREE.RenderTargetOptions = {
@@ -3860,6 +3986,8 @@ export class MapScene {
     }
     if (sig === this.lastViewSig) return;
     this.lastViewSig = sig;
+    // 视角正在变化 → 记录时间戳，供 hoverDomHandler 在拖动/缩放/飞行期间跳过悬停拾取
+    this.lastViewChangeAt = typeof performance !== 'undefined' ? performance.now() : 0;
     this.callbacks.onViewChange?.();
   }
 
@@ -3868,6 +3996,25 @@ export class MapScene {
   // -------------------------------------------------------------------------
   destroy(): void {
     this.disposed = true;
+    // 悬停拾取：移除原生监听并取消挂起的 rAF，避免跨实例泄漏
+    if (this.hoverDomHandler) {
+      this.container.removeEventListener('pointermove', this.hoverDomHandler, { capture: true } as EventListenerOptions);
+      this.hoverDomHandler = null;
+    }
+    if (this.pointerDownHandler) {
+      this.container.removeEventListener('pointerdown', this.pointerDownHandler, { capture: true } as EventListenerOptions);
+      this.pointerDownHandler = null;
+    }
+    if (this.pointerUpHandler) {
+      window.removeEventListener('pointerup', this.pointerUpHandler, { capture: true } as EventListenerOptions);
+      window.removeEventListener('pointercancel', this.pointerUpHandler, { capture: true } as EventListenerOptions);
+      this.pointerUpHandler = null;
+    }
+    this.pointerIsDown = false;
+    if (this.hoverRafId !== null) {
+      cancelAnimationFrame(this.hoverRafId);
+      this.hoverRafId = null;
+    }
     // 量算叠加层：取消挂起的预览帧、释放几何/材质（measureScene 不在主 scene 里，不会被统一遍历到）
     this.cancelMeasurePreview();
     this.clearMeasureGraphics();

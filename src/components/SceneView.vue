@@ -1565,7 +1565,14 @@ onBeforeUnmount(() => {
   background: #0e1420;
 }
 
-.scene-map { position: absolute; inset: 0; }
+.scene-map {
+  position: absolute;
+  inset: 0;
+  /* 高德 .amap-container 自带 #f2f2f2 浅灰白底，而 GL 画布是透明的。
+     按需渲染时若某帧画布没被完整重绘，纯白底会透出来形成「背景白光闪一下」。
+     用与天空/地面接近的渐变兜底，即使出现空帧也不会刺眼地发白。 */
+  background: linear-gradient(180deg, #a9c9e6 0%, #c9dded 30%, #e9eef1 58%, #e7e7e5 100%) !important;
+}
 
 .scene-overlay {
   position: absolute;

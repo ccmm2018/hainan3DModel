@@ -3477,6 +3477,79 @@ export class MapScene {
     };
   }
 
+  /**
+   * 当前量算图形在屏幕上的「结果卡片锚点 + 包围盒」。
+   * 上层用它把量算结果显示在测绘范围内（而不是固定右下角），视角变化时重新调用即可跟随图形。
+   * - 测面：多边形质心（鞋带公式）；质心落在凹多边形外时回退到包围盒中心
+   * - 测距：折线按屏幕弧长的中点
+   * 返回 null 表示当前没有可显示的量算图形。
+   */
+  getMeasureAnchor(): {
+    x: number; y: number;
+    minX: number; minY: number; maxX: number; maxY: number;
+  } | null {
+    if (!this.camera || this.measurePts.length === 0) return null;
+    const pts: Array<{ x: number; y: number }> = [];
+    for (const ll of this.measurePts) {
+      const p = this.projectToScreen(this.gcjToWorld(ll));
+      if (p) pts.push(p);
+    }
+    if (pts.length === 0) return null;
+
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const p of pts) {
+      minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x);
+      minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y);
+    }
+    let anchor = { x: (minX + maxX) / 2, y: (minY + maxY) / 2 };
+    const mode = this.measuring ? this.measureMode : this.measureReportMode;
+
+    if (mode === 'area' && pts.length >= 3) {
+      // 屏幕平面下的多边形质心（投影是仿射变换，质心位置仍然正确）
+      let a2 = 0, cx = 0, cy = 0;
+      for (let i = 0; i < pts.length; i++) {
+        const p = pts[i], q = pts[(i + 1) % pts.length];
+        const cross = p.x * q.y - q.x * p.y;
+        a2 += cross;
+        cx += (p.x + q.x) * cross;
+        cy += (p.y + q.y) * cross;
+      }
+      if (Math.abs(a2) > 1e-6) {
+        const c = { x: cx / (3 * a2), y: cy / (3 * a2) };
+        // 凹多边形质心可能落在形外：射线法判定，形外则回退包围盒中心
+        let inside = false;
+        for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+          const pi = pts[i], pj = pts[j];
+          if ((pi.y > c.y) !== (pj.y > c.y) &&
+              c.x < ((pj.x - pi.x) * (c.y - pi.y)) / (pj.y - pi.y) + pi.x) inside = !inside;
+        }
+        if (inside) anchor = c;
+      }
+    } else if (pts.length >= 2) {
+      // 折线中点：按屏幕像素弧长插值，避免长段 / 短段把锚点拉偏
+      const segs: number[] = [];
+      let total = 0;
+      for (let i = 1; i < pts.length; i++) {
+        const d = Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y);
+        segs.push(d);
+        total += d;
+      }
+      let half = total / 2;
+      for (let i = 0; i < segs.length; i++) {
+        if (half <= segs[i] || i === segs.length - 1) {
+          const t = segs[i] > 1e-6 ? Math.min(1, half / segs[i]) : 0;
+          anchor = {
+            x: pts[i].x + (pts[i + 1].x - pts[i].x) * t,
+            y: pts[i].y + (pts[i + 1].y - pts[i].y) * t,
+          };
+          break;
+        }
+        half -= segs[i];
+      }
+    }
+    return { x: anchor.x, y: anchor.y, minX, minY, maxX, maxY };
+  }
+
   /** 某个房间格子的屏幕位置（用于房间详情浮层跟随节点） */
   getRoomScreenPos(roomId: string): { x: number; y: number } | null {
     const mesh = this.roomCellMeshes.get(roomId);

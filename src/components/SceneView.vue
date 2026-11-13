@@ -115,8 +115,20 @@
       <div class="measure-guide__sub">结束方式：点「完成测量」、双击地图空白处，或按 Enter；按 Esc 清除本次测量</div>
     </div>
 
-    <!-- 量算结果面板 -->
-    <div v-if="measureResult" class="measure-panel" :class="measureResult.mode === 'area' ? 'measure-panel--area' : 'measure-panel--distance'">
+    <!-- 量算结果：锚定在测绘范围内（图形质心 / 折线中点），随视角变化跟随图形 -->
+    <div
+      v-if="measureResult && measureAnchor"
+      class="measure-anchor"
+      :class="measureResult.mode === 'area' ? 'measure-anchor--area' : ''"
+      :style="measureAnchorStyle"
+    ></div>
+    <div
+      v-if="measureResult"
+      ref="measurePanelEl"
+      class="measure-panel"
+      :class="measureResult.mode === 'area' ? 'measure-panel--area' : 'measure-panel--distance'"
+      :style="measurePanelStyle"
+    >
       <div class="measure-panel__head">
         <strong>{{ measureResult.mode === 'distance' ? '测距结果' : '测面结果' }}</strong>
         <span v-if="measureActive" class="measure-panel__state measure-panel__state--live">测量中</span>
@@ -135,9 +147,9 @@
         <div class="measure-panel__total">总面积：<b>{{ formatArea(measureResult.value) }}</b></div>
         <div class="measure-panel__meta">顶点数：{{ measureResult.points }}</div>
       </div>
-      <div class="measure-panel__tip">
-        <template v-if="measureActive">打完最后一个点后，点上方「完成测量」或双击地图即可结束</template>
-        <template v-else>已结束 · 再点地图可开始新一次测量，点「清除」退出量算</template>
+      <!-- 测量中由上方引导条负责说明操作，这里不再重复占高度；结束后给一句简短提示 -->
+      <div v-if="!measureActive" class="measure-panel__tip">
+        已结束 · 再点地图可开始新一次测量，点「清除」退出量算
       </div>
     </div>
 
@@ -827,6 +839,69 @@ function createAnchoredPanel(
   return { style, measure };
 }
 
+// ---------------------------------------------------------------------------
+// 量算结果：锚定到「测绘范围」内（图形质心 / 折线中点），而不是固定右下角
+// ---------------------------------------------------------------------------
+type MeasureAnchor = {
+  x: number; y: number;
+  minX: number; minY: number; maxX: number; maxY: number;
+};
+const measureAnchor = ref<MeasureAnchor | null>(null);
+const measurePanelEl = ref<HTMLElement | null>(null);
+const measurePanelSize = ref({ w: 236, h: 150 });
+
+/** 卡片内容变化（点数 / 分段 / 状态）后重测真实尺寸，定位才算得准 */
+watch([measureResult, measureActive], () => {
+  nextTick(() => {
+    const el = measurePanelEl.value;
+    if (el && el.offsetWidth && el.offsetHeight) {
+      measurePanelSize.value = { w: el.offsetWidth, h: el.offsetHeight };
+    }
+  });
+}, { flush: 'post' });
+
+/** 锚点小圆点：明确指示这张卡片对应哪一处测绘图形 */
+const measureAnchorStyle = computed(() => {
+  const a = measureAnchor.value;
+  return a ? { left: `${Math.round(a.x)}px`, top: `${Math.round(a.y)}px` } : {};
+});
+
+/** 卡片定位：测面尽量夹在图形包围盒内；测距放到折线中点上方、横向仍贴着测绘范围 */
+const measurePanelStyle = computed(() => {
+  const cw = containerSize.value.w || window.innerWidth;
+  const ch = containerSize.value.h || window.innerHeight;
+  const m = EDGE_MARGIN;
+  const { w, h } = measurePanelSize.value;
+  const a = measureAnchor.value;
+  // 拿不到锚点时兜底回右下角，避免卡片消失
+  if (!a) return toStyle({ left: Math.max(m, cw - w - m), top: Math.max(m, ch - h - m) });
+
+  const isArea = measureResult.value?.mode === 'area';
+  const pad = 24;
+  const minL = Math.max(m, a.minX - pad);
+  const maxL = Math.min(cw - w - m, a.maxX + pad - w);
+  const minT = Math.max(m, a.minY - pad);
+  const maxT = Math.min(ch - h - m, a.maxY + pad - h);
+  let left = a.x - w / 2;
+  if (maxL >= minL) left = clamp(left, minL, maxL);
+  else left = clamp(left, m, Math.max(m, cw - w - m));
+
+  let top: number;
+  if (isArea) {
+    // 测面：卡片中心对准质心，并尽量夹在图形包围盒内
+    top = a.y - h / 2;
+    if (maxT >= minT) top = clamp(top, minT, maxT);
+    else top = clamp(top, m, Math.max(m, ch - h - m));
+  } else {
+    // 测距：整块卡片放到折线包围盒上方，避免压住量出来的线；
+    // 上方空间不够时改放下方，最后统一夹紧到容器内
+    const above = a.minY - h - 16;
+    top = above >= m ? above : a.maxY + 16;
+    top = clamp(top, m, Math.max(m, ch - h - m));
+  }
+  return toStyle({ left, top });
+});
+
 /** 被点击节点在容器内的像素坐标（面板 / 房间详情各一份） */
 const panelAnchor = ref<{ x: number; y: number } | null>(null);
 const roomAnchor = ref<{ x: number; y: number } | null>(null);
@@ -880,6 +955,22 @@ function updateAnchors() {
       Math.abs(roomAnchor.value.y - pos.y) > 0.5)) {
       roomAnchor.value = pos;
     }
+  }
+  // 量算结果卡片：图形变了或视角变了都重新投影，保证卡片一直跟着测绘范围
+  if (measureResult.value) {
+    const a = scene.getMeasureAnchor();
+    const p = measureAnchor.value;
+    if (!a) {
+      // 图形整体跑出视野时退回右下角兜底位置，不留一个飘在旧位置的卡片
+      if (p) measureAnchor.value = null;
+    } else if (!p ||
+      Math.abs(p.x - a.x) > 0.5 || Math.abs(p.y - a.y) > 0.5 ||
+      Math.abs(p.minX - a.minX) > 0.5 || Math.abs(p.maxX - a.maxX) > 0.5 ||
+      Math.abs(p.minY - a.minY) > 0.5 || Math.abs(p.maxY - a.maxY) > 0.5) {
+      measureAnchor.value = a;
+    }
+  } else if (measureAnchor.value) {
+    measureAnchor.value = null;
   }
 }
 
@@ -1576,6 +1667,8 @@ onMounted(async () => {
       // 量算结果回调：null 表示清除；finished（measuringMode==='none'）时仅保留结果、取消按钮高亮
       onMeasureUpdate: (data) => {
         measureResult.value = data;
+        // 打点 / 结束时视角没变，onViewChange 不会触发，这里主动重算一次锚点
+        updateAnchors();
       },
       onMeasureActive: (active: boolean) => {
         measureActive.value = active;
@@ -2617,19 +2710,42 @@ onBeforeUnmount(() => {
 }
 
 /* 量算结果面板 */
+/* 结果卡片现在锚定在测绘范围内（left/top 由 measurePanelStyle 计算），不再是固定右下角 */
 .measure-panel {
   position: absolute;
   z-index: 150;
-  bottom: 16px;
-  right: 16px;
-  width: 252px;
-  max-width: calc(100% - 32px);
-  border: 1px solid #24324a;
+  width: 236px;
+  max-width: calc(100% - 24px);
+  border: 1px solid #38bdf8;
   border-radius: 10px;
-  background: rgba(20, 27, 43, 0.96);
-  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.4);
-  backdrop-filter: blur(12px);
+  background: rgba(16, 24, 40, 0.94);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(10px);
   overflow: hidden;
+  /* 卡片浮在地图中间：只让「关闭按钮 / 分段列表」接收指针事件，
+     其余部分点击穿透到地图，不挡继续打点或重新测量 */
+  pointer-events: none;
+}
+.measure-panel--area { border-color: #f59e0b; }
+.measure-panel__close, .measure-panel__segs { pointer-events: auto; }
+
+/* 锚点小圆点：标出这张结果卡片对应的是哪一处测绘图形 */
+.measure-anchor {
+  position: absolute;
+  z-index: 149;
+  width: 12px;
+  height: 12px;
+  margin: -6px 0 0 -6px;
+  border: 2px solid #38bdf8;
+  border-radius: 50%;
+  background: rgba(56, 189, 248, 0.25);
+  box-shadow: 0 0 0 5px rgba(56, 189, 248, 0.18), 0 0 12px rgba(56, 189, 248, 0.6);
+  pointer-events: none;
+}
+.measure-anchor--area {
+  border-color: #f59e0b;
+  background: rgba(245, 158, 11, 0.25);
+  box-shadow: 0 0 0 5px rgba(245, 158, 11, 0.18), 0 0 12px rgba(245, 158, 11, 0.6);
 }
 .measure-panel__head {
   display: flex;
@@ -2676,7 +2792,7 @@ onBeforeUnmount(() => {
   margin: 8px 0 0;
   padding: 0;
   list-style: none;
-  max-height: 180px;
+  max-height: 96px;
   overflow-y: auto;
 }
 .measure-panel__segs li {
@@ -2694,10 +2810,10 @@ onBeforeUnmount(() => {
 .measure-panel__segs li span:last-child { font-family: ui-monospace, monospace; color: #eaf2ff; }
 .measure-panel__meta { margin-top: 6px; font-size: 12px; color: #8a97ad; }
 .measure-panel__tip {
-  padding: 9px 12px;
+  padding: 7px 10px;
   border-top: 1px solid #24324a;
   color: #b6c4da;
-  font-size: 12px;
+  font-size: 11px;
   line-height: 1.5;
 }
 

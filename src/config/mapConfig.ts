@@ -189,7 +189,7 @@ export const DEFAULT_SCENE_CONFIG: SceneConfig = {
   // ?v= 是浏览器缓存破坏参数：模型文件已直接从 GLB 内摘除误建的「小方块」面片
   // （节点 '2' / 教学2 内的一个 2x2x2 杂项立方体，曾被误建在琴剑楼旁），
   // 此处版本号用于强制浏览器重新下载更新后的模型。若日后重新导出模型并希望用户刷新缓存，升级该版本号即可。
-  modelUrl: '/models/hnjcxy.glb?v=20261110e',
+  modelUrl: '/models/hnjcxy.glb?v=20261112l',
   dataUrl: '/data/buildings.geojson',
   roomDataUrl: '/data/rooms.geojson',
   anchor: [110.280328, 19.75491],

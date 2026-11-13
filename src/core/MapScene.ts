@@ -231,6 +231,10 @@ export class MapScene {
   private indoorView = false;
   private indoorTarget: THREE.Object3D | null = null;
   private savedCamera: { zoom: number; center: [number, number]; pitch: number; rotation: number } | null = null;
+  /** 初始水平朝向（度）：init 时由 config.initialRotation / ?rot= 解析，供 2D→3D 切换后复原 */
+  private initialRotation = 0;
+  /** 初始朝向是否已应用（取景完成钩子会被两条路径调用，需幂等） */
+  private initialRotationApplied = false;
 
   /** 截图捕获请求 */
   private captureResolve: ((dataUrl: string) => void) | null = null;
@@ -375,6 +379,16 @@ export class MapScene {
     this.mapCreateTs = performance.now();
     // 低配判定需在建图前完成：低配要据此减少底图要素（去 3D 楼块/标注），削减高德每帧开销。
     this.resolveLowEnd();
+    // 初始水平朝向：只绕竖直轴旋转视角，俯仰角（pitch）与缩放（zoom）保持原值。
+    // 关键：这里【不】设置 rotation——让 fitToBuildings() 仍在原来的正北朝向下取景，
+    // 得到的 zoom / center / pitch 与改动前完全一致；等取景收敛、加载遮罩揭开前
+    // 再调用 applyInitialRotation() 单纯旋转朝向，这才是严格的「只旋转、缩放不变」。
+    // URL 参数 ?rot=<角度> 可临时覆盖配置值，方便不重新构建就试角度。
+    const urlRot = new URLSearchParams(window.location.search).get('rot');
+    const initialRotation = urlRot !== null && Number.isFinite(Number(urlRot))
+      ? Number(urlRot)
+      : (this.config.initialRotation ?? 0);
+    this.initialRotation = initialRotation;
     this.map = new AMap.Map(this.container, {
       center: this.gcjCenter,
       zoom: this.config.zoom,
@@ -1022,6 +1036,7 @@ export class MapScene {
                 `距地图创建合计=${Math.round(performance.now() - this.mapCreateTs)}ms`,
             );
           }
+          this.applyInitialRotation(); // 低配跳过微调的路径：同样在遮罩揭开前完成旋转
           this.callbacks.onFitComplete?.();
         }
         this.callbacks.onModelReady?.();
@@ -1343,11 +1358,31 @@ export class MapScene {
     };
   }
 
+  /**
+   * 取景完成后应用初始水平朝向：只 setRotation（绕视中心水平旋转），
+   * 不碰 zoom / center / pitch，故加载后的缩放、俯仰与改动前完全一致。
+   * 在加载遮罩揭开前执行，用户看不到「先正北、再旋转」的中间态。幂等。
+   */
+  private applyInitialRotation(): void {
+    if (this.initialRotationApplied || !this.map) return;
+    this.initialRotationApplied = true;
+    if (this.initialRotation === 0) return;
+    try {
+      const before = `${Number(this.map.getZoom?.()).toFixed(3)}/${Number(this.map.getPitch?.()).toFixed(1)}`;
+      this.map.setRotation(this.initialRotation);
+      const after = `${Number(this.map.getZoom?.()).toFixed(3)}/${Number(this.map.getPitch?.()).toFixed(1)}`;
+      this.markDirty(true);
+      // eslint-disable-next-line no-console
+      console.info(`[MapScene] 初始朝向已应用 rotation=${this.initialRotation}°（zoom/pitch ${before} → ${after}，center 不动）`);
+    } catch { /* 个别高德版本不支持 setRotation，忽略 */ }
+  }
+
   /** 结束取景微调：恢复模型显示（微调期间隐藏以避免逐帧修正被看成「加载时抖动」），
    *  并通知上层取景已完成（加载遮罩可以揭开了） */
   private endFitRefine(): void {
     if (!this.fitRefine) return; // 幂等：重复调用不重复回调
     this.fitRefine = null;
+    this.applyInitialRotation();
     if (this.loadStartTs && this.onLoadEntryTs) {
       const parseMs = Math.round(this.onLoadEntryTs - this.loadStartTs);
       const postMs = Math.round(performance.now() - this.onLoadEntryTs);
@@ -2972,6 +3007,10 @@ export class MapScene {
       this.map.setRotation(0);
     } else {
       this.setPitchSafe(mode === '2.5d' ? 35 : this.config.pitch);
+      // 从 2D（正北朝上）切回立体视角时，恢复默认朝向，避免视角被悄悄拧回 0°
+      if (this.initialRotation !== 0 && Math.abs(this.map.getRotation?.() ?? 0) < 0.01) {
+        this.map.setRotation(this.initialRotation);
+      }
     }
     this.map.setZoomAndCenter(zoom, center, true);
     this.markDirty(); // 视角参数变化需立即上屏

@@ -3019,29 +3019,25 @@ export class MapScene {
   }
 
   // -------------------------------------------------------------------------
-  // 视图切换（2D / 2.5D / 三维 / 退出室内），切换后保留当前定位
+  // 视图切换（2.5D / 三维，切换后保留当前定位与朝向）
+  // 2D 已按需求移除：SceneView 工具栏不再有 2D 按钮，这里也不再提供 2D 分支。
   // 说明：AMap JSAPI 2.0 没有运行时的 setViewMode（仅构造参数 viewMode 支持），
-  // 因此「2D/3D」通过 setPitch + setRotation 实现：2D = 俯仰 0（正上方平视），
-  // 2.5D/三维 = 不同俯仰角。setViewMode 仅作兼容兜底（部分版本存在）。
+  // 2.5D / 三维都运行在 3D 模式下，仅俯仰角不同（2.5D=35、三维=config.pitch）。
+  // 如需恢复 2D：参数类型加回 '2d'，并加回 setViewMode('2D') / pitch=0 / rotation=0 分支。
   // -------------------------------------------------------------------------
-  setMapView(mode: '2d' | '2.5d' | '3d'): void {
+  setMapView(mode: '2.5d' | '3d'): void {
     if (!this.map) return;
     if (this.indoorView) this.exitIndoorView(); // 若在室内，先退出并恢复原视角
     const center = this.map.getCenter();
     const zoom = this.map.getZoom();
     // 兼容兜底：旧版 1.4 才有 setViewMode，2.0 不存在，故先 typeof 判断
     if (typeof this.map.setViewMode === 'function') {
-      try { this.map.setViewMode(mode === '2d' ? '2D' : '3D'); } catch { /* ignore */ }
+      try { this.map.setViewMode('3D'); } catch { /* ignore */ }
     }
-    if (mode === '2d') {
-      this.setPitchSafe(0);
-      this.map.setRotation(0);
-    } else {
-      this.setPitchSafe(mode === '2.5d' ? 35 : this.config.pitch);
-      // 从 2D（正北朝上）切回立体视角时，恢复默认朝向，避免视角被悄悄拧回 0°
-      if (this.initialRotation !== 0 && Math.abs(this.map.getRotation?.() ?? 0) < 0.01) {
-        this.map.setRotation(this.initialRotation);
-      }
+    this.setPitchSafe(mode === '2.5d' ? 35 : this.config.pitch);
+    // 若朝向被手动转到 0（正北朝上），切回立体视角时恢复默认朝向
+    if (this.initialRotation !== 0 && Math.abs(this.map.getRotation?.() ?? 0) < 0.01) {
+      this.map.setRotation(this.initialRotation);
     }
     this.map.setZoomAndCenter(zoom, center, true);
     this.markDirty(); // 视角参数变化需立即上屏

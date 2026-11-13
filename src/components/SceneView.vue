@@ -38,7 +38,6 @@
     <div class="toolbar">
       <div class="toolbar__group">
         <span class="toolbar__label">视图</span>
-        <button class="toolbar__btn" :class="{ active: currentView === '2d' }" @click="setView('2d')">2D</button>
         <button class="toolbar__btn" :class="{ active: currentView === '2.5d' }" @click="setView('2.5d')">2.5D</button>
         <button class="toolbar__btn" :class="{ active: currentView === '3d' }" @click="setView('3d')">三维</button>
         <button class="toolbar__btn" :class="{ active: isIndoorView }" @click="toggleIndoor">室内</button>
@@ -699,7 +698,10 @@ const objectList = ref<Array<{ name: string; lngLat: [number, number]; object: T
 let scene: MapScene | null = null;
 
 // 视图 / 量算 UI 状态
-const currentView = ref<'2d' | '2.5d' | '3d'>('3d');
+// 2D 入口已按需求移除：页面只保留 2.5D 与默认三维（3D 模型视角）。
+// 如需恢复：在工具栏加回 `setView('2d')` 按钮、把此处类型加回 '2d'，
+// 并在 MapScene.setMapView() 里加回 pitch=0 / rotation=0 的分支。
+const currentView = ref<'2.5d' | '3d'>('3d');
 const measureActive = ref(false); // 是否正在打点测量中（控制「完成」按钮显隐）
 const measureTool = ref<'none' | 'distance' | 'area'>('none'); // 已选中的量算工具（高亮，清除前保持）
 const measureResult = ref<MeasureResult | null>(null);
@@ -1194,7 +1196,7 @@ function handleEscKey(e: KeyboardEvent) {
 // ---------------------------------------------------------------------------
 // 视图切换 & 量算
 // ---------------------------------------------------------------------------
-function setView(mode: '2d' | '2.5d' | '3d') {
+function setView(mode: '2.5d' | '3d') {
   currentView.value = mode;
   isIndoorView.value = false;
   scene?.setMapView(mode); // 内部会处理退出室内；中心/缩放保持不变（定位不丢失）

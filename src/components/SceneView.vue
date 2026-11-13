@@ -52,8 +52,10 @@
         <button v-if="measureActive" class="toolbar__btn toolbar__btn--ok" title="结束本次测量并保留结果（也可双击地图或按 Enter）" @click="completeMeasure">完成</button>
         <button class="toolbar__btn toolbar__btn--ghost" @click="stopMeasure">清除</button>
       </div>
-      <button class="toolbar__btn" @click="exportOpen = true">打印 / 导出</button>
-      <button class="toolbar__btn" :class="{ active: calibrateMode }" @click="toggleCalibrate">校准</button>
+      <!-- 工具按钮：底图为浅色（白/淡蓝）时，透明底 + 浅色字会糊成一片。
+           这里直接给按钮实底 + 高对比文字；不套外层容器，避免工具栏变宽挤到搜索框。 -->
+      <button class="toolbar__btn toolbar__btn--standalone toolbar__btn--primary" @click="exportOpen = true">打印 / 导出</button>
+      <button class="toolbar__btn toolbar__btn--standalone" :class="{ active: calibrateMode }" @click="toggleCalibrate">校准</button>
     </div>
 
     <!-- 校准面板（微调 GLB 对齐） -->
@@ -2483,7 +2485,7 @@ onBeforeUnmount(() => {
 }
 .toolbar__label {
   padding: 0 6px 0 4px;
-  color: #6b7890;
+  color: #94a3b8;
   font-size: 11px;
   white-space: nowrap;
 }
@@ -2507,6 +2509,42 @@ onBeforeUnmount(() => {
 }
 .toolbar__btn--ghost { border-style: dashed; color: #f87171; }
 .toolbar__btn--ghost:hover { border-color: #f87171; background: rgba(248, 113, 113, 0.12); color: #fca5a5; }
+
+/* 「打印 / 导出」「校准」独立按钮：底图为浅色（白/淡蓝）时，
+   原来的透明底 + 浅色字会糊成一片。这里改成实底 + 高对比文字，
+   并加深色投影与旁边的深色分组对齐；不套外层容器以免挤到搜索框。 */
+.toolbar__btn--standalone {
+  height: 40px;
+  padding: 0 12px;
+  border-color: #475569;
+  color: #f8fafc;
+  background: rgba(30, 41, 59, 0.96);
+  font-weight: 600;
+  box-shadow: 0 6px 18px rgba(2, 6, 23, 0.28);
+  backdrop-filter: blur(8px);
+}
+.toolbar__btn--standalone:hover {
+  border-color: #38bdf8;
+  background: #334155;
+  color: #ffffff;
+}
+.toolbar__btn--standalone.active {
+  border-color: #38bdf8;
+  background: #38bdf8;
+  color: #06121f;
+  font-weight: 700;
+}
+/* 「打印 / 导出」作为主操作：蓝色实底 + 白字，与「校准」的深色次级按钮区分 */
+.toolbar__btn--standalone.toolbar__btn--primary {
+  border-color: #3b82f6;
+  color: #ffffff;
+  background: #2563eb;
+}
+.toolbar__btn--standalone.toolbar__btn--primary:hover {
+  border-color: #60a5fa;
+  background: #3b82f6;
+  color: #ffffff;
+}
 
 /* 量算操作引导条：测量进行时常驻在画面上方，明确告知如何结束 */
 .measure-guide {

@@ -233,6 +233,8 @@ export class MapScene {
   private savedCamera: { zoom: number; center: [number, number]; pitch: number; rotation: number } | null = null;
   /** 初始水平朝向（度）：init 时由 config.initialRotation / ?rot= 解析，供 2D→3D 切换后复原 */
   private initialRotation = 0;
+  /** 加载取景的额外屏幕平移 [往左, 往远处]（占屏幕宽/高比例）：init 时由 config.viewNudge / ?nx=&ny= 解析 */
+  private viewNudge: [number, number] = [0, 0];
 
   /** 截图捕获请求 */
   private captureResolve: ((dataUrl: string) => void) | null = null;
@@ -387,6 +389,16 @@ export class MapScene {
       ? Number(urlRot)
       : (this.config.initialRotation ?? 0);
     this.initialRotation = initialRotation;
+    // 额外屏幕平移：只改取景中心，模型本身、zoom / pitch / rotation 都不动。
+    // URL ?nx=&ny= 可临时覆盖，方便不重新构建就把「往左 / 往远处」的量试到位。
+    const urlParams = new URLSearchParams(window.location.search);
+    const cfgNudge = this.config.viewNudge ?? [0, 0];
+    const nx = urlParams.get('nx');
+    const ny = urlParams.get('ny');
+    this.viewNudge = [
+      nx !== null && Number.isFinite(Number(nx)) ? Number(nx) : cfgNudge[0],
+      ny !== null && Number.isFinite(Number(ny)) ? Number(ny) : cfgNudge[1],
+    ];
     this.map = new AMap.Map(this.container, {
       center: this.gcjCenter,
       zoom: this.config.zoom,
@@ -1321,14 +1333,40 @@ export class MapScene {
 
     // 取景中心（建筑群屏幕居中后的地面点）→ GCJ-02 经纬度
     const [wlng, wlat] = this.worldToWgs84(look);
-    const fitCenter: [number, number] = wgs84ToGcj02(wlng, wlat);
+    let fitCenter: [number, number] = wgs84ToGcj02(wlng, wlat);
 
     // 距离 → 缩放级别：d ∝ 2^(-zoom)，以实测 (zoom0, dist0) 为基准换算；夹在地图缩放范围 [3, 20] 内
     const zoomFit = Math.min(Math.max(zoom0 + Math.log2(dist0 / fit.d), 3), 20);
     // 先应用自适应俯仰角（config.maxPitch 已放宽到与 PITCH_MAX 一致，不会被俯仰钳制拉回）
     this.setPitchSafe(pitch);
+    const finalZoom = +(zoomFit + ZOOM_BONUS).toFixed(3);
     // 在「刚好填满」基础上额外放大一点点（ZOOM_BONUS），让模型显得更大些
-    this.map.setZoomAndCenter(+(zoomFit + ZOOM_BONUS).toFixed(3), fitCenter, true);
+    this.map.setZoomAndCenter(finalZoom, fitCenter, true);
+
+    // —— 额外屏幕平移：模型在画面里再往左 / 往远处（屏幕上）各挪一点 ——
+    // 用高德自己的「容器像素 ↔ 经纬度」换算做精确平移。不能用上面解析相机的 px/米
+    // 灵敏度：那是「世界点相对固定斜视相机」的投影灵敏度，而平移地图 center 的屏幕
+    // 灵敏度由 zoom 决定；斜视下两者差好几倍，直接套用会把几十像素放大成几百像素。
+    // 只改取景中心：zoom / pitch / rotation 一律不变，模型世界坐标也不动。
+    const [nudgeL, nudgeF] = this.viewNudge;
+    if (Math.abs(nudgeL) > 1e-6 || Math.abs(nudgeF) > 1e-6) {
+      try {
+        // 内容左移 nudgeL*W、上移 nudgeF*H ⟺ 新取景中心 = 当前视图里容器坐标
+        // (W/2 + nudgeL*W, H/2 + nudgeF*H) 对应的地面点；设为中心后原中心会显示在
+        // (W/2 - nudgeL*W, H/2 - nudgeF*H)，即整体往左、往上（远处）挪。
+        const converter = this.map.containerToLngLat || this.map.pixelToLngLat;
+        const ll = converter.call(this.map, new this.AMap.Pixel(W / 2 + nudgeL * W, H / 2 + nudgeF * H));
+        const nudgedCenter: [number, number] = [ll.getLng(), ll.getLat()];
+        this.map.setZoomAndCenter(finalZoom, nudgedCenter, true);
+        fitCenter = nudgedCenter; // 低配 / 微调路径也以平移后的中心为准
+        // eslint-disable-next-line no-console
+        console.info(`[MapScene] 取景平移：左 ${(nudgeL * W).toFixed(0)}px / 远处 ${(nudgeF * H).toFixed(0)}px（zoom/pitch/rotation 不变）`);
+      } catch {
+        // 个别高德版本没有容器↔经纬度换算：保持原取景，不影响加载
+        // eslint-disable-next-line no-console
+        console.warn('[MapScene] 取景平移不可用（containerToLngLat 缺失），已跳过');
+      }
+    }
     // eslint-disable-next-line no-console
     console.info(
       `[MapScene] 自动取景：估算 zoom=${zoomFit.toFixed(2)}、pitch=${pitch.toFixed(1)}（建筑角点 ${corners.length} 个，` +
@@ -1442,8 +1480,10 @@ export class MapScene {
     const visCy = (topPx + bottomPx) / 2;
     // 默认取景：让模型在屏幕上向左偏移（与 fitToBuildings 的 shiftPx 一致，用户接受左侧裁切）；
     // 同时向下（朝观察者）偏移 shiftDownPx（与 fitToBuildings 的 shiftDownPx 一致，0.11）
-    const shiftPx = 0.12 * W;
-    const shiftDownPx = 0.11 * H;
+    // 与 fitToBuildings 的默认平移保持一致，再叠加 config.viewNudge 的额外量，
+    // 避免低配 / 微调路径与解析取景落在不同位置。
+    const shiftPx = (0.12 + this.viewNudge[0]) * W;
+    const shiftDownPx = (0.11 - this.viewNudge[1]) * H;
     const offX = (lx + hx) / 2 - (leftPx + rightPx) / 2;
     const offY = (ly + hy) / 2 - (visCy + shiftDownPx);
     // 两方向填满率：包围盒宽 / 高分别占可见区宽 / 高的比例（>1 有富余、<1 出画）

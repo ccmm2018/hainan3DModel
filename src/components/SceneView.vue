@@ -49,7 +49,7 @@
         <span class="toolbar__label">量算</span>
         <button class="toolbar__btn" :class="{ active: measureTool === 'distance' }" @click="startMeasure('distance')">测距</button>
         <button class="toolbar__btn" :class="{ active: measureTool === 'area' }" @click="startMeasure('area')">测面</button>
-        <button v-if="measureActive" class="toolbar__btn toolbar__btn--ok" @click="completeMeasure">完成</button>
+        <button v-if="measureActive" class="toolbar__btn toolbar__btn--ok" title="结束本次测量并保留结果（也可双击地图或按 Enter）" @click="completeMeasure">完成</button>
         <button class="toolbar__btn toolbar__btn--ghost" @click="stopMeasure">清除</button>
       </div>
       <button class="toolbar__btn" @click="exportOpen = true">打印 / 导出</button>
@@ -101,10 +101,24 @@
       </div>
     </div>
 
+    <!-- 量算操作引导条：测量进行时常驻，明确告知「怎么结束」，避免只靠隐蔽的双击提示 -->
+    <div v-if="measureActive" class="measure-guide" :class="measureTool === 'area' ? 'measure-guide--area' : ''">
+      <span class="measure-guide__dot"></span>
+      <div class="measure-guide__text">
+        <strong>{{ measureTool === 'area' ? '测面中' : '测距中' }}</strong>
+        <span>{{ measureGuideText }}</span>
+      </div>
+      <button class="measure-guide__finish" @click="completeMeasure">✓ 完成测量 <kbd>Enter</kbd></button>
+      <button class="measure-guide__cancel" @click="stopMeasure">清除 <kbd>Esc</kbd></button>
+      <div class="measure-guide__sub">结束方式：点「完成测量」、双击地图空白处，或按 Enter；按 Esc 清除本次测量</div>
+    </div>
+
     <!-- 量算结果面板 -->
     <div v-if="measureResult" class="measure-panel" :class="measureResult.mode === 'area' ? 'measure-panel--area' : 'measure-panel--distance'">
       <div class="measure-panel__head">
         <strong>{{ measureResult.mode === 'distance' ? '测距结果' : '测面结果' }}</strong>
+        <span v-if="measureActive" class="measure-panel__state measure-panel__state--live">测量中</span>
+        <span v-else class="measure-panel__state">已完成</span>
         <button class="measure-panel__close" aria-label="清除" @click="stopMeasure">×</button>
       </div>
       <div v-if="measureResult.mode === 'distance'" class="measure-panel__body">
@@ -119,7 +133,10 @@
         <div class="measure-panel__total">总面积：<b>{{ formatArea(measureResult.value) }}</b></div>
         <div class="measure-panel__meta">顶点数：{{ measureResult.points }}</div>
       </div>
-      <div class="measure-panel__tip">在地图或模型上连续点击打点 · 双击或点「完成」结束</div>
+      <div class="measure-panel__tip">
+        <template v-if="measureActive">打完最后一个点后，点上方「完成测量」或双击地图即可结束</template>
+        <template v-else>已结束 · 再点地图可开始新一次测量，点「清除」退出量算</template>
+      </div>
     </div>
 
     <!-- 室内视角提示 -->
@@ -711,6 +728,19 @@ const measureActive = ref(false); // 是否正在打点测量中（控制「完�
 const measureTool = ref<'none' | 'distance' | 'area'>('none'); // 已选中的量算工具（高亮，清除前保持）
 const measureResult = ref<MeasureResult | null>(null);
 
+/** 测量引导条主文案：随已打点数变化，始终说明「下一步做什么 / 何时可以结束」，
+ *  避免用户只看到隐蔽的双击提示而不知道如何收尾。 */
+const measureGuideText = computed(() => {
+  const pts = measureResult.value?.points ?? 0;
+  const isArea = measureTool.value === 'area';
+  if (pts === 0) {
+    return isArea ? '在地图上连续点击打点，至少 3 个点围成面' : '在地图上连续点击打点，至少 2 个点连成线';
+  }
+  if (isArea && pts < 3) return `已打 ${pts} 个点，还需 ${3 - pts} 个点才能围成面`;
+  if (!isArea && pts < 2) return `已打 ${pts} 个点，再点 1 个点即可连成线`;
+  return `已打 ${pts} 个点，现在可以点「完成测量」结束`;
+});
+
 // ---------------------------------------------------------------------------
 // 浮层锚定：弹窗显示在被点击的「模型节点」位置，而不是固定右下角
 // ---------------------------------------------------------------------------
@@ -1180,6 +1210,14 @@ function handleDoubleClick(result: PickResult | null) {
 }
 
 function handleEscKey(e: KeyboardEvent) {
+  // 测量中按 Enter = 完成（与「完成测量」按钮等效）；输入框内不劫持回车
+  if (e.key === 'Enter' && measureActive.value) {
+    const t = e.target as HTMLElement | null;
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+    e.preventDefault();
+    completeMeasure();
+    return;
+  }
   if (e.key === 'Escape') {
     if (measureTool.value !== 'none' || measureResult.value) {
       stopMeasure();
@@ -2470,6 +2508,76 @@ onBeforeUnmount(() => {
 .toolbar__btn--ghost { border-style: dashed; color: #f87171; }
 .toolbar__btn--ghost:hover { border-color: #f87171; background: rgba(248, 113, 113, 0.12); color: #fca5a5; }
 
+/* 量算操作引导条：测量进行时常驻在画面上方，明确告知如何结束 */
+.measure-guide {
+  position: absolute;
+  z-index: 165;
+  top: 64px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 10px;
+  max-width: calc(100% - 32px);
+  padding: 10px 14px 8px;
+  border: 1px solid #38bdf8;
+  border-radius: 12px;
+  background: rgba(16, 24, 40, 0.95);
+  box-shadow: 0 16px 44px rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(10px);
+}
+.measure-guide--area { border-color: #f59e0b; }
+.measure-guide__dot {
+  flex: none;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #38bdf8;
+  box-shadow: 0 0 0 4px rgba(56, 189, 248, 0.18);
+}
+.measure-guide--area .measure-guide__dot { background: #f59e0b; box-shadow: 0 0 0 4px rgba(245, 158, 11, 0.18); }
+.measure-guide__text { display: flex; flex-direction: column; gap: 2px; min-width: 210px; }
+.measure-guide__text strong { font-size: 13px; font-weight: 700; color: #eaf2ff; }
+.measure-guide__text span { font-size: 12px; color: #b6c4da; }
+.measure-guide__finish {
+  border: 0;
+  border-radius: 8px;
+  padding: 9px 15px;
+  background: #22c55e;
+  color: #052e16;
+  font-size: 13px;
+  font-weight: 700;
+  white-space: nowrap;
+  cursor: pointer;
+  box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.18);
+}
+.measure-guide__finish:hover { background: #4ade80; }
+.measure-guide__cancel {
+  border: 1px solid #3a4a63;
+  border-radius: 8px;
+  padding: 8px 12px;
+  background: transparent;
+  color: #a7b4c8;
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.measure-guide__cancel:hover { border-color: #f87171; color: #fca5a5; }
+.measure-guide__sub { flex-basis: 100%; text-align: center; font-size: 11px; color: #8a97ad; }
+.measure-guide kbd {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 1px 5px;
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  border-radius: 4px;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 10px;
+  font-weight: 600;
+  opacity: 0.85;
+}
+
 /* 量算结果面板 */
 .measure-panel {
   position: absolute;
@@ -2494,6 +2602,19 @@ onBeforeUnmount(() => {
   color: #eaf2ff;
 }
 .measure-panel__head strong { flex: 1; font-size: 13px; font-weight: 600; }
+.measure-panel__state {
+  flex: none;
+  padding: 2px 7px;
+  border-radius: 10px;
+  font-size: 11px;
+  color: #8a97ad;
+  background: rgba(138, 151, 173, 0.12);
+}
+.measure-panel__state--live {
+  color: #86efac;
+  background: rgba(34, 197, 94, 0.16);
+  border: 1px solid rgba(34, 197, 94, 0.35);
+}
 .measure-panel__close {
   width: 22px;
   height: 22px;
@@ -2535,10 +2656,11 @@ onBeforeUnmount(() => {
 .measure-panel__segs li span:last-child { font-family: ui-monospace, monospace; color: #eaf2ff; }
 .measure-panel__meta { margin-top: 6px; font-size: 12px; color: #8a97ad; }
 .measure-panel__tip {
-  padding: 8px 12px;
+  padding: 9px 12px;
   border-top: 1px solid #24324a;
-  color: #6b7890;
-  font-size: 11px;
+  color: #b6c4da;
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 /* 校准面板（微调 GLB 对齐） */

@@ -3054,7 +3054,8 @@ export class MapScene {
   //  2. 旧实现用 map.on('click'/'dblclick')，事件易被 GLCustomLayer 吞掉，
   //     且禁用 doubleClickZoom 后 map 的 dblclick 不再可靠触发。现改用容器级
   //     DOM 监听 + map.containerToLngLat 取坐标，点在模型上也照样拾取；
-  //     结束用容器 dblclick + 显式「完成」按钮双保险。
+  //     结束有三条等价路径：容器 dblclick / SceneView 引导条的「完成测量」按钮（或 Enter 键）。
+  //     SceneView 在测量进行时会常驻一条操作引导条，避免用户不知道「如何结束」。
   // -------------------------------------------------------------------------
   startMeasure(mode: 'distance' | 'area'): void {
     if (!this.map || !this.scene) return;

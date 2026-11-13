@@ -119,6 +119,35 @@ export interface MapSceneCallbacks {
   onMeasureActive?: (active: boolean) => void;
 }
 
+/** 模型数据概览：全部由运行时遍历当前已加载的 GLB 统计得出，不含任何写死/示例数值。
+ *  上层在 onModelReady 之后调用 getModelStats() 取用。 */
+export interface ModelStats {
+  /** 可拾取/可搜索的楼栋节点数（listObjects 口径） */
+  buildings: number;
+  /** glTF 场景节点总数 */
+  nodes: number;
+  /** 实际可见的网格数（父级被过滤隐藏的不计入） */
+  meshes: number;
+  /** 可见网格的顶点总数 */
+  vertices: number;
+  /** 可见网格的三角面总数 */
+  triangles: number;
+  /** 去重后的材质数 */
+  materials: number;
+  /** 去重后的贴图数 */
+  textures: number;
+  /** GLB 文件字节数（优先取实际下载缓冲长度，退化取 Content-Length） */
+  bytes: number;
+  /** 下载+解析耗时 ms */
+  parseMs: number;
+  /** 下载+解析+后处理+挂载总耗时 ms */
+  loadMs: number;
+  /** 上一帧的 draw call 数（renderer.info，可能为 0） */
+  drawCalls: number;
+  /** 模型 URL 上的版本号，如 20261112l */
+  version: string;
+}
+
 const R_METERS_PER_DEG = 111319.49; // 墨卡托经度方向 米/度
 
 export class MapScene {
@@ -134,6 +163,8 @@ export class MapScene {
   private lowEnd = false; // 低配设备标记：用于降低渲染负载（关阴影 / 跳过 PMREM / 像素比封顶）
   private loadStartTs = 0; // 模型下载+解析发起时刻（prefetchModel 或 startModelLoad 入口），用于量「下载+解析」耗时
   private onLoadEntryTs = 0; // 模型解析完成的入口时刻（下载+解析完成后），用于把耗时拆分为「下载/解析」与「后处理」两段
+  private modelReadyTs = 0;  // 模型挂载完成（onModelReady 触发前）时刻，用于统计总加载耗时
+  private modelBytes = 0;    // GLB 字节数，来自预取缓冲或下载进度事件的 Content-Length
   private modelPrefetchGltf: any = null;   // 已解析完成的 GLTF（来源：预取缓冲或即时 load）
   private modelPrefetchStarted = false;    // 预取是否已发起（防止重复下载同一模型）
   private modelOnLoadRan = false;          // runModelOnLoad 是否已执行（防止重复后处理/挂载）
@@ -717,6 +748,7 @@ export class MapScene {
       },
       (event: ProgressEvent) => {
         if (event.lengthComputable) {
+          this.modelBytes = event.total; // 无预取缓冲时，用 Content-Length 兜底
           this.callbacks.onModelProgress?.(Math.round((event.loaded / event.total) * 100));
         }
       },
@@ -774,6 +806,7 @@ export class MapScene {
       return;
     }
     const buf = this.prefetchedBuffer;
+    this.modelBytes = buf.byteLength; // 记录体积后再释放缓冲
     this.prefetchedBuffer = null; // 释放，避免长期持有大块内存
     const loader = new GLTFLoader();
     const path = url.substring(0, url.lastIndexOf('/') + 1);
@@ -1056,6 +1089,7 @@ export class MapScene {
           }
           this.callbacks.onFitComplete?.();
         }
+        this.modelReadyTs = performance.now();
         this.callbacks.onModelReady?.();
         // 首屏主动补帧：确保 GLCustomLayer 第一时间被绘制，不依赖高德按需渲染在「无视角变化」时
         // 主动重绘——否则首帧可能不绘制，表现为「遮罩揭开后模型仍不显示 / 需开控制台才出现」。
@@ -3708,6 +3742,72 @@ export class MapScene {
       }
     });
     return result;
+  }
+
+  /** 模型数据概览：遍历当前挂载的 GLB，实时统计几何 / 材质 / 贴图与加载指标。
+   *  几何口径为「实际可见网格」——祖先被 applyNodeFilter 隐藏的不计入，
+   *  与用户真正看到的模型一致；不含任何写死或示例数值。 */
+  getModelStats(): ModelStats | null {
+    if (!this.modelRoot) return null;
+    const matSet = new Set<string>();
+    const texSet = new Set<string>();
+    let nodes = 0;
+    let meshes = 0;
+    let vertices = 0;
+    let triangles = 0;
+
+    const visibleInHierarchy = (obj: THREE.Object3D): boolean => {
+      let cur: THREE.Object3D | null = obj;
+      while (cur) {
+        if (!cur.visible) return false;
+        if (cur === this.modelRoot) break;
+        cur = cur.parent;
+      }
+      return true;
+    };
+
+    this.modelRoot.traverse((obj) => {
+      nodes++;
+      const mesh = obj as THREE.Mesh;
+      if (!(mesh as any).isMesh || !visibleInHierarchy(obj)) return;
+      meshes++;
+      const geo = mesh.geometry as THREE.BufferGeometry;
+      if (geo) {
+        const pos = geo.getAttribute('position');
+        const vCount = pos ? pos.count : 0;
+        const idx = geo.getIndex();
+        const inst = (mesh as any).isInstancedMesh ? ((mesh as any).count as number) : 1;
+        vertices += vCount * inst;
+        triangles += Math.floor((idx ? idx.count : vCount) / 3) * inst;
+      }
+      const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+      for (const m of mats) {
+        if (!m) continue;
+        matSet.add(m.uuid);
+        // 材质上的 map / normalMap / roughnessMap … 都可能是贴图；按 uuid 去重
+        for (const val of Object.values(m as unknown as Record<string, unknown>)) {
+          const t = val as any;
+          if (t && t.isTexture) texSet.add(t.uuid as string);
+        }
+      }
+    });
+
+    return {
+      buildings: this.listObjects().length,
+      nodes,
+      meshes,
+      vertices,
+      triangles,
+      materials: matSet.size,
+      textures: texSet.size,
+      bytes: this.modelBytes,
+      parseMs: this.loadStartTs && this.onLoadEntryTs
+        ? Math.max(0, Math.round(this.onLoadEntryTs - this.loadStartTs)) : 0,
+      loadMs: this.loadStartTs && this.modelReadyTs
+        ? Math.max(0, Math.round(this.modelReadyTs - this.loadStartTs)) : 0,
+      drawCalls: this.renderer?.info.render.calls ?? 0,
+      version: /[?&]v=([^&]+)/.exec(this.config.modelUrl)?.[1] ?? '',
+    };
   }
 
   get model(): THREE.Object3D | null {

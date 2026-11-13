@@ -34,6 +34,85 @@
       海南警察学院 · 3D 可视化场景
     </div>
 
+    <!-- 校园建筑概览：面向使用者的业务数据（楼栋 / 楼层 / 房间 / 面积）。
+         数值由 buildingData、roomData、objectList 实时聚合，不写死；
+         模型楼栋数（GLB 节点）与已录入业务楼栋数分开标注，避免把局部面积当成全校数据。
+         技术参数（顶点 / 三角面 / 材质等）默认隐藏在底部「技术参数（开发用）」折叠区。 -->
+    <div
+      v-if="modelStats || buildingOverview.modelBuildings"
+      class="model-stats"
+      :class="{ 'model-stats--collapsed': !statsExpanded }"
+    >
+      <button
+        class="model-stats__head"
+        type="button"
+        :aria-expanded="statsExpanded"
+        :title="statsExpanded ? '收起建筑概览' : '展开建筑概览'"
+        @click="statsExpanded = !statsExpanded"
+      >
+        <span class="model-stats__dot"></span>
+        <strong>校园建筑概览</strong>
+        <span class="model-stats__brief">{{ buildingOverview.modelBuildings }} 栋 · {{ buildingOverview.roomTotal }} 间房</span>
+        <span class="model-stats__caret">{{ statsExpanded ? '−' : '+' }}</span>
+      </button>
+      <div v-if="statsExpanded" class="model-stats__content">
+        <div v-if="!businessReady" class="model-stats__warn">业务数据未加载 · 当前为内置示例，数值仅供参考</div>
+        <div class="model-stats__grid">
+          <div class="model-stats__cell"><span>模型楼栋</span><b>{{ buildingOverview.modelBuildings }} 栋</b></div>
+          <div class="model-stats__cell"><span>业务楼栋（已录）</span><b>{{ buildingOverview.recordedBuildings }} 栋</b></div>
+          <div class="model-stats__cell"><span>建筑总面积</span><b>{{ fmtArea(buildingOverview.buildingArea) }}</b></div>
+          <div class="model-stats__cell"><span>使用面积</span><b>{{ fmtArea(buildingOverview.usableArea) }}</b></div>
+          <div class="model-stats__cell"><span>楼层总数（已录）</span><b>{{ buildingOverview.totalFloors }} 层</b></div>
+          <div class="model-stats__cell"><span>房间总数</span><b>{{ buildingOverview.roomTotal }} 间</b></div>
+        </div>
+        <div class="model-stats__section">
+          <div class="model-stats__section-title">楼层分布 <small>各层房间数</small></div>
+          <div class="model-stats__bars">
+            <div v-for="f in buildingOverview.floors" :key="f.floor" class="model-stats__bar">
+              <b>{{ f.count }}</b>
+              <i :style="{ height: Math.max(5, Math.round(f.count / buildingOverview.maxFloorCount * 24)) + 'px' }"></i>
+              <span>{{ f.floor }}F</span>
+            </div>
+          </div>
+        </div>
+        <div class="model-stats__section">
+          <div class="model-stats__section-title">房间状态</div>
+          <div class="model-stats__legend">
+            <span v-for="s in buildingOverview.status" :key="s.key" class="model-stats__legend-item">
+              <i :style="{ background: s.color }"></i>{{ s.label }} <b>{{ s.count }}</b>
+            </span>
+          </div>
+        </div>
+        <div class="model-stats__foot">
+          <span>{{ businessReady ? '数据源：buildings / rooms.geojson' : '数据源：内置示例' }}（{{ buildingOverview.recordedBuildings }} 栋已录入）</span>
+        </div>
+        <div class="model-stats__actions">
+          <button class="model-stats__more" type="button" @click="detailsOpen = !detailsOpen">
+            {{ detailsOpen ? '收起' : '查看' }}楼栋明细（{{ buildingOverview.recordedBuildings }}）
+          </button>
+          <button class="model-stats__tech-toggle" type="button" @click="techOpen = !techOpen">
+            技术参数 {{ techOpen ? '−' : '+' }}
+          </button>
+        </div>
+        <div v-if="detailsOpen" class="model-stats__list">
+          <div v-for="d in buildingOverview.details" :key="d.name" class="model-stats__row">
+            <strong>{{ d.name }}</strong>
+            <span>{{ d.floors != null ? `${d.floors} 层` : '—' }} · {{ fmtArea(d.area) }} · {{ d.rooms }} 间</span>
+          </div>
+          <div class="model-stats__types">模型楼栋构成：{{ buildingOverview.typesText }}</div>
+        </div>
+        <div v-if="techOpen && modelStats" class="model-stats__tech">
+          <span>网格 {{ fmtCount(modelStats.meshes) }}</span>
+          <span>三角面 {{ fmtCount(modelStats.triangles) }}</span>
+          <span>顶点 {{ fmtCount(modelStats.vertices) }}</span>
+          <span>材质 / 贴图 {{ modelStats.materials }} / {{ modelStats.textures }}</span>
+          <span>体积 {{ fmtMB(modelStats.bytes) }}</span>
+          <span>加载 {{ fmtSec(modelStats.loadMs) }}</span>
+          <span v-if="modelStats.version">v{{ modelStats.version }}</span>
+        </div>
+      </div>
+    </div>
+
     <!-- 工具栏 -->
     <div class="toolbar">
       <div class="toolbar__group">
@@ -552,7 +631,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch, t
 import * as THREE from 'three';
 import { ElMessage } from 'element-plus';
 import { loadAMap } from '../utils/loadAMap';
-import { MapScene, type ModelCalibration, type PickResult, type MeasureResult } from '../core/MapScene';
+import { MapScene, type ModelCalibration, type PickResult, type MeasureResult, type ModelStats } from '../core/MapScene';
 import { DEFAULT_SCENE_CONFIG, type SceneConfig } from '../config/mapConfig';
 import {
   SAMPLE_BUILDING_DATA,
@@ -598,6 +677,28 @@ const modelStageText = computed(() => {
   if (modelProgress.value >= 100) return '解析模型数据…';
   return '';
 });
+
+// 首页「模型概览」：onModelReady 后由 MapScene.getModelStats() 从当前 GLB 实时统计，
+// 不写死、也不使用 SAMPLE_BUILDING_DATA 等示例数据；可收起以免遮挡地图。
+const modelStats = ref<ModelStats | null>(null); // 技术参数默认隐藏，仅「开发用」折叠区展示
+const statsExpanded = ref(true);
+const detailsOpen = ref(false);   // 楼栋明细列表
+const techOpen = ref(false);      // 技术参数（开发用）
+const businessReady = ref(false); // buildings.geojson / rooms.geojson 是否都加载成功（防止把示例数据当真实数据展示）
+function fmtCount(n: number): string {
+  if (!isFinite(n) || n <= 0) return '0';
+  if (n >= 10000) return `${(n / 10000).toFixed(n >= 100000 ? 1 : 2)} 万`;
+  return n.toLocaleString('zh-CN');
+}
+function fmtArea(n: number | null): string {
+  return n != null ? `${n.toLocaleString('zh-CN')} ㎡` : '—';
+}
+function fmtMB(bytes: number): string {
+  return bytes > 0 ? `${(bytes / 1024 / 1024).toFixed(2)} MB` : '—';
+}
+function fmtSec(ms: number): string {
+  return ms > 0 ? `${(ms / 1000).toFixed(1)} s` : '—';
+}
 
 const config: SceneConfig = DEFAULT_SCENE_CONFIG;
 // 属性数据源：优先从 GeoJSON / 后端 API 读取，失败则回退到内置示例数据
@@ -1066,6 +1167,85 @@ const selectedProps = computed<BuildingProps>(() => {
 
 const categoryLabel = (c?: string) =>
   ({ building: '建筑', road: '道路', water: '水系', other: '其他' } as Record<string, string>)[c ?? 'other'] ?? '其他';
+
+// ---------------------------------------------------------------------------
+// 首页「校园建筑概览」：业务口径（楼栋 / 楼层 / 房间 / 面积），
+// 全部由 buildingData、roomData、objectList 实时聚合，不写死任何数值。
+// 注意：模型楼栋数（GLB 真实节点）与已录入业务楼栋数是两个不同口径，界面分别标注，
+// 不把 6 栋的面积说成全校 26 栋的面积。
+// ---------------------------------------------------------------------------
+function classifyBuilding(raw: string): string {
+  const n = displayName(raw);
+  if (n.includes('教学楼')) return '教学楼';
+  if (n.includes('宿舍')) return '宿舍楼';
+  if (n.includes('模拟街区')) return '模拟街区';
+  if (n.includes('食堂')) return '食堂';
+  if (/体育馆|游泳馆|射击馆|搏击馆|琴剑楼/.test(n)) return '场馆';
+  return '其他';
+}
+
+const buildingOverview = computed(() => {
+  // buildingStore.registerBuildings() 会把 GLB 的 26 个数字节点作为「空属性记录」
+  // 登记进 buildingData（供 DXF 归属候选使用），它们不是业务楼栋，必须排除：
+  // 只统计带有层数 / 面积 / 房间数等真实业务字段的记录。
+  const props = Object.values(buildingData.value).filter(
+    (p) => (p.category ?? 'building') === 'building' &&
+      (p.totalFloors != null || p.buildingArea != null || p.roomCount != null || p.usableArea != null),
+  );
+  const rooms = Object.values(roomData.value).flat();
+
+  const floorMap = new Map<number, number>();
+  const roomByBuilding = new Map<string, number>();
+  const statusMap = new Map<string, number>();
+  for (const r of rooms) {
+    floorMap.set(r.floor, (floorMap.get(r.floor) ?? 0) + 1);
+    roomByBuilding.set(r.building, (roomByBuilding.get(r.building) ?? 0) + 1);
+    statusMap.set(r.status, (statusMap.get(r.status) ?? 0) + 1);
+  }
+  const floors = [...floorMap.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([floor, count]) => ({ floor, count }));
+
+  const status = ROOM_STATUS_ORDER.filter((k) => (statusMap.get(k) ?? 0) > 0).map((k) => ({
+    key: k,
+    label: ROOM_STATUS_CONFIG[k].label,
+    color: ROOM_STATUS_CONFIG[k].deep,
+    count: statusMap.get(k) ?? 0,
+  }));
+
+  const details = props.map((p) => ({
+    name: p.name,
+    floors: p.totalFloors ?? null,
+    area: p.buildingArea ?? null,
+    rooms: roomByBuilding.get(p.name) ?? p.roomCount ?? 0,
+    dept: (p.department as string) ?? '',
+  }));
+
+  const typeMap = new Map<string, number>();
+  for (const o of objectList.value) {
+    const t = classifyBuilding(o.name);
+    typeMap.set(t, (typeMap.get(t) ?? 0) + 1);
+  }
+  const typesText = [...typeMap.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([t, n]) => `${t} ${n}`)
+    .join(' · ');
+
+  return {
+    modelBuildings: objectList.value.length,
+    recordedBuildings: props.length,
+    totalFloors: props.reduce((s, p) => s + (Number(p.totalFloors) || 0), 0),
+    buildingArea: props.reduce((s, p) => s + (Number(p.buildingArea) || 0), 0),
+    usableArea: props.reduce((s, p) => s + (Number(p.usableArea) || 0), 0),
+    roomTotal: rooms.length,
+    roomArea: rooms.reduce((s, r) => s + (Number(r.area) || 0), 0),
+    floors,
+    maxFloorCount: Math.max(1, ...floors.map((f) => f.count)),
+    status,
+    details,
+    typesText,
+  };
+});
 
 /**
  * 按建筑名查找房间列表（容错版）。
@@ -1537,26 +1717,31 @@ function onSearchEnter() {
 // ---------------------------------------------------------------------------
 // 数据加载
 // ---------------------------------------------------------------------------
-async function loadBuildingData(): Promise<void> {
+/** 返回是否成功加载到真实业务数据（首页概览据此标注数据源，避免把示例数据当真实值） */
+async function loadBuildingData(): Promise<boolean> {
   const url = config.dataUrl;
-  if (!url) return;
+  if (!url) return false;
   try {
     buildingData.value = await fetchBuildingData(url);
+    return true;
   } catch (err) {
     console.warn('[建筑数据] 加载失败，回退示例数据：', err);
+    return false;
   }
 }
 
-async function loadRoomData(): Promise<void> {
+async function loadRoomData(): Promise<boolean> {
   const url = config.roomDataUrl;
-  if (!url) return;
+  if (!url) return false;
   try {
     const fetched = await fetchRoomData(url);
     // 以示例数据为兜底底座，再叠加真实数据：保证任何楼栋都不会因单条数据缺失而空白
     roomData.value = { ...SAMPLE_ROOM_DATA, ...fetched };
+    return true;
   } catch (err) {
     console.warn('[房间数据] 加载失败，回退示例数据：', err);
     roomData.value = SAMPLE_ROOM_DATA;
+    return false;
   }
 }
 
@@ -1567,9 +1752,10 @@ onMounted(async () => {
   // 浮层定位依赖容器尺寸，必须尽早读取（否则尺寸为 0 会把弹窗夹到页面左上角）
   observeContainer();
 
-  // 并行加载建筑/房间属性数据（不阻塞地图初始化）
-  loadBuildingData();
-  loadRoomData();
+  // 并行加载建筑/房间属性数据（不阻塞地图初始化）；两者都成功才标记为真实业务数据源
+  Promise.all([loadBuildingData(), loadRoomData()]).then(([b, r]) => {
+    businessReady.value = b && r;
+  });
 
   window.addEventListener('keydown', handleEscKey);
 
@@ -1612,6 +1798,12 @@ onMounted(async () => {
       onModelReady: () => {
         modelReady = true;
         objectList.value = scene?.listObjects() ?? [];
+        // 模型概览：从当前 GLB 实时统计（几何/材质/贴图/体积/耗时）
+        modelStats.value = scene?.getModelStats() ?? null;
+        // 首帧渲染后再刷新一次，renderer.info 的 draw call 才有真实值
+        window.setTimeout(() => {
+          if (scene) modelStats.value = scene.getModelStats();
+        }, 1200);
         // 把 GLB 里真实存在的建筑节点名（0–25）登记进楼栋表，
         // 否则 DXF 第 6 步「确认归属」候选列表里找不到当前选中的建筑。
         buildingStore.registerBuildings(objectList.value.map((o) => o.name));
@@ -1816,6 +2008,210 @@ onBeforeUnmount(() => {
   border-radius: 50%;
   background: #34d399;
   box-shadow: 0 0 0 3px rgba(52, 211, 153, 0.15);
+}
+
+/* 首页模型数据概览：左上角、标题徽标下方，可收起 */
+.model-stats {
+  position: absolute;
+  z-index: 120;
+  top: 60px;
+  left: 16px;
+  width: 272px;
+  border: 1px solid #24324a;
+  border-radius: 10px;
+  background: rgba(16, 24, 40, 0.9);
+  box-shadow: 0 12px 32px rgba(2, 6, 23, 0.28);
+  backdrop-filter: blur(10px);
+  overflow: hidden;
+}
+.model-stats--collapsed { width: auto; }
+.model-stats__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 36px;
+  padding: 0 10px;
+  border: 0;
+  background: transparent;
+  color: #e2e8f0;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+.model-stats__head:hover { background: rgba(56, 189, 248, 0.08); }
+.model-stats__dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #34d399;
+  box-shadow: 0 0 0 3px rgba(52, 211, 153, 0.15);
+}
+.model-stats__brief {
+  margin-left: auto;
+  color: #94a3b8;
+  font-size: 11px;
+  white-space: nowrap;
+}
+.model-stats__caret {
+  width: 12px;
+  color: #94a3b8;
+  font-size: 15px;
+  line-height: 1;
+  text-align: center;
+}
+.model-stats__grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1px;
+  background: #24324a;
+  border-top: 1px solid #24324a;
+}
+.model-stats__cell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 5px 9px;
+  background: rgba(16, 24, 40, 0.94);
+}
+.model-stats__cell span { color: #94a3b8; font-size: 10px; line-height: 1.25; }
+.model-stats__cell b {
+  color: #eaf2ff;
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.25;
+  font-variant-numeric: tabular-nums;
+}
+.model-stats__warn {
+  padding: 6px 10px;
+  border-top: 1px solid #f59e0b;
+  color: #fcd34d;
+  background: rgba(245, 158, 11, 0.12);
+  font-size: 10.5px;
+}
+.model-stats__section {
+  padding: 5px 10px 4px;
+  border-top: 1px solid #24324a;
+}
+.model-stats__section-title {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  color: #cbd5e1;
+  font-size: 11px;
+  font-weight: 600;
+}
+.model-stats__section-title small {
+  color: #64748b;
+  font-size: 10px;
+  font-weight: 400;
+}
+.model-stats__bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+  height: 46px;
+  margin-top: 4px;
+}
+.model-stats__bar {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 2px;
+  height: 100%;
+}
+.model-stats__bar b { color: #eaf2ff; font-size: 10px; font-weight: 600; }
+.model-stats__bar i {
+  display: block;
+  width: 100%;
+  max-width: 22px;
+  border-radius: 2px 2px 0 0;
+  background: linear-gradient(180deg, #38bdf8, #2563eb);
+}
+.model-stats__bar span { color: #94a3b8; font-size: 9.5px; }
+.model-stats__legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 4px;
+}
+.model-stats__legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #b6c4da;
+  font-size: 10.5px;
+}
+.model-stats__legend-item i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+.model-stats__legend-item b { color: #eaf2ff; font-variant-numeric: tabular-nums; }
+.model-stats__actions {
+  display: flex;
+  border-top: 1px solid #24324a;
+}
+.model-stats__more,
+.model-stats__tech-toggle {
+  flex: 1;
+  display: block;
+  padding: 5px 8px;
+  border: 0;
+  background: transparent;
+  color: #7dd3fc;
+  font-size: 10px;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.model-stats__tech-toggle {
+  flex: 0 0 84px;
+  border-left: 1px solid #24324a;
+  color: #64748b;
+  text-align: center;
+}
+.model-stats__more:hover,
+.model-stats__tech-toggle:hover { background: rgba(56, 189, 248, 0.08); }
+.model-stats__list {
+  max-height: 150px;
+  overflow-y: auto;
+  border-top: 1px solid #24324a;
+  background: rgba(10, 17, 30, 0.5);
+}
+.model-stats__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid rgba(36, 50, 74, 0.6);
+}
+.model-stats__row strong { color: #e2e8f0; font-size: 11px; font-weight: 600; }
+.model-stats__row span { color: #94a3b8; font-size: 10px; white-space: nowrap; }
+.model-stats__types {
+  padding: 7px 10px;
+  color: #94a3b8;
+  font-size: 10px;
+  line-height: 1.5;
+}
+.model-stats__foot {
+  padding: 5px 10px;
+  border-top: 1px solid #24324a;
+  color: #64748b;
+  font-size: 10px;
+}
+.model-stats__tech {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  padding: 8px 10px;
+  border-top: 1px solid #24324a;
+  color: #94a3b8;
+  font-size: 10px;
 }
 
 /* 工具栏 */

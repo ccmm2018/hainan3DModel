@@ -38,12 +38,10 @@
     <div class="toolbar">
       <div class="toolbar__group">
         <span class="toolbar__label">视图</span>
-        <!-- 2.5D 暂时注释：目前没有 2.5D 图/素材，视图工具栏先只保留「三维」。
-             恢复方法：删除本注释的包裹（保留下面这行按钮），并删除 setView() 里的 2.5D 禁用判断。
-        <button class="toolbar__btn" :class="{ active: currentView === '2.5d' }" @click="setView('2.5d')">2.5D</button>
-        -->
+        <!-- 2.5D / 室内暂未开发：按钮不放在本行（会加宽工具栏压住搜索框），
+             改由下方 .toolbar-pending 占位展示；此处只保留默认三维。
+             恢复方法见下方待开发占位条的注释与 setView() / toggleIndoor()。 -->
         <button class="toolbar__btn" :class="{ active: currentView === '3d' }" @click="setView('3d')">三维</button>
-        <button class="toolbar__btn" :class="{ active: isIndoorView }" @click="toggleIndoor">室内</button>
       </div>
       <div class="toolbar__group">
         <span class="toolbar__label">量算</span>
@@ -56,6 +54,22 @@
            这里直接给按钮实底 + 高对比文字；不套外层容器，避免工具栏变宽挤到搜索框。 -->
       <button class="toolbar__btn toolbar__btn--standalone toolbar__btn--primary" @click="exportOpen = true">打印 / 导出</button>
       <button class="toolbar__btn toolbar__btn--standalone" :class="{ active: calibrateMode }" @click="toggleCalibrate">校准</button>
+    </div>
+
+    <!-- 待开发功能占位：让用户知道规划里有 2.5D / 室内，但明确不可点（置灰）。
+         单独占右上角第二行，不塞进主工具栏——主工具栏右移会压住居中的搜索框。
+         恢复 2.5D：去掉 disabled 与 --pending 样式，把按钮移回「视图」组并绑回 setView('2.5d')，
+                    再删除 setView() 中的 2.5D 禁用判断（MapScene.setMapView 的 35° 分支一直保留）。
+         恢复室内：去掉 disabled 与 --pending 样式，把按钮移回「视图」组并绑回 toggleIndoor，
+                   再取消 toggleIndoor() / handleDoubleClick() / onDoubleClick 注册 / ESC 分支 /
+                   室内视角提示 badge 的注释（MapScene.enterIndoorView 等底层实现一直保留）。 -->
+    <div class="toolbar-pending">
+      <button class="toolbar__btn toolbar__btn--pending" disabled aria-disabled="true" title="2.5D 视图待开发">
+        2.5D<span class="toolbar__btn__tag">（待开发）</span>
+      </button>
+      <button class="toolbar__btn toolbar__btn--pending" disabled aria-disabled="true" title="室内视角待开发">
+        室内<span class="toolbar__btn__tag">（待开发）</span>
+      </button>
     </div>
 
     <!-- 校准面板（微调 GLB 对齐） -->
@@ -153,11 +167,12 @@
       </div>
     </div>
 
-    <!-- 室内视角提示 -->
+    <!-- 【待开发·已注释】室内视角提示：恢复室内功能时取消本注释包裹即可。
     <div v-if="isIndoorView" class="indoor-badge">
       <span class="indoor-badge__dot"></span>
       室内视角 · 按 ESC 退出
     </div>
+    -->
 
     <!-- 搜索框 -->
     <div class="search-box">
@@ -501,7 +516,8 @@
 
     <!-- 操作提示 -->
     <div class="hint-bar">
-      <template v-if="viewMode === 'scene'">点击模型拾取建筑 · 双击进入室内视角 · 楼栋名称常驻显示 · 输入搜索定位</template>
+      <!-- 【待开发】原提示含「双击进入室内视角」，室内功能注释后已去掉；恢复时加回该短语 -->
+      <template v-if="viewMode === 'scene'">点击模型拾取建筑 · 楼栋名称常驻显示 · 输入搜索定位</template>
       <template v-else-if="viewMode === 'room'">点击房间查看详情 · 切换楼层查看不同布局</template>
       <template v-else>点击房间选中（可跨楼层） · 右侧查看已选与总面积</template>
     </div>
@@ -732,9 +748,11 @@ const objectList = ref<Array<{ name: string; lngLat: [number, number]; object: T
 let scene: MapScene | null = null;
 
 // 视图 / 量算 UI 状态
-// 2D 入口已按需求移除；2.5D 因暂无 2.5D 图/素材，已在模板中注释按钮并禁用 setView 分支，
-// 页面视图切换目前只保留默认三维（3D 模型视角）。类型与 MapScene.setMapView 的 2.5D 实现均保留，便于恢复。
-// 恢复 2.5D：放开模板里 2.5D 按钮的注释包裹，并删除 setView() 中的 `if (mode === '2.5d') return;`。
+// 2D 入口已按需求移除。
+// 2.5D / 室内：功能暂未开发，入口全部禁用/注释，只在工具栏下方保留「（待开发）」置灰占位按钮，
+// 让用户知道有此规划。类型与 MapScene.setMapView() 的 35° 分支、enterIndoorView() 等底层实现均保留，便于恢复。
+// 恢复 2.5D：删除 setView() 中的 `if (mode === '2.5d') return;`，并按模板占位条注释把按钮接回「视图」组。
+// 恢复室内：取消 toggleIndoor() / handleDoubleClick() / onDoubleClick 注册 / ESC 分支 / badge 的注释。
 // 恢复 2D：在工具栏加回 `setView('2d')` 按钮、把此处类型加回 '2d'，
 // 并在 MapScene.setMapView() 里加回 pitch=0 / rotation=0 的分支。
 const currentView = ref<'2.5d' | '3d'>('3d');
@@ -1293,13 +1311,15 @@ const exportTitle = computed(() => {
   return '海南警察学院-3D场景';
 });
 
+/** 【待开发·已注释】双击建筑进入室内视角（忽略房间格子/空白）。
+ * 恢复室内功能：取消下方函数体注释，并恢复 callbacks 里的 onDoubleClick 注册。 */
 function handleDoubleClick(result: PickResult | null) {
-  // 双击建筑进入室内视角（忽略房间格子/空白）
-  if (!result || result.isRoom) return;
-  selected.value = null;
-  scene?.clearHighlight();
-  scene?.enterIndoorView(result.target);
-  isIndoorView.value = true;
+  void result; // 入口已关闭，参数保留便于恢复
+  // if (!result || result.isRoom) return;
+  // selected.value = null;
+  // scene?.clearHighlight();
+  // scene?.enterIndoorView(result.target);
+  // isIndoorView.value = true;
 }
 
 function handleEscKey(e: KeyboardEvent) {
@@ -1316,10 +1336,12 @@ function handleEscKey(e: KeyboardEvent) {
       stopMeasure();
       return;
     }
-    if (isIndoorView.value) {
-      scene?.exitIndoorView();
-      isIndoorView.value = false;
-    } else if (viewMode.value === 'allocate') {
+    // 室内视角待开发：以下分支整体注释，保留 else-if 链结构（恢复时取消注释并把 if 改回联用）
+    // if (isIndoorView.value) {
+    //   scene?.exitIndoorView();
+    //   isIndoorView.value = false;
+    // } else
+    if (viewMode.value === 'allocate') {
       exitAllocationMode();
     } else if (exportOpen.value) {
       exportOpen.value = false;
@@ -1334,29 +1356,32 @@ function handleEscKey(e: KeyboardEvent) {
 // ---------------------------------------------------------------------------
 function setView(mode: '2.5d' | '3d') {
   // 暂无 2.5D 图/素材：暂时禁用 2.5D 切换（代码保留，素材就绪后即可恢复）。
-  // 恢复：删除下面的 if，并放开模板中 2.5D 按钮的注释包裹。
+  // 恢复：删除下面的 if，并按上方待开发占位条注释把 2.5D 按钮接回「视图」组。
   if (mode === '2.5d') return;
   currentView.value = mode;
   isIndoorView.value = false;
   scene?.setMapView(mode); // 内部会处理退出室内；中心/缩放保持不变（定位不丢失）
 }
 
+/** 【待开发·已注释】工具栏「室内」按钮原入口。
+ * 按钮已置灰不可点，双击进入室内视角的入口也已注释（功能整体关闭，代码保留）。
+ * 恢复：取消下方函数体注释，并把按钮接回 @click="toggleIndoor"。 */
 function toggleIndoor() {
-  if (isIndoorView.value) {
-    scene?.exitIndoorView();
-    isIndoorView.value = false;
-    currentView.value = '3d';
-    return;
-  }
-  let target: THREE.Object3D | null =
-    selected.value && !selected.value.isRoom ? (selected.value.target as THREE.Object3D) : null;
-  if (!target && objectList.value.length) target = objectList.value[0].object;
-  if (!target) {
-    window.alert('请先在场景中点击选中一栋建筑，再进入室内视角');
-    return;
-  }
-  scene?.enterIndoorView(target);
-  isIndoorView.value = true;
+  // if (isIndoorView.value) {
+  //   scene?.exitIndoorView();
+  //   isIndoorView.value = false;
+  //   currentView.value = '3d';
+  //   return;
+  // }
+  // let target: THREE.Object3D | null =
+  //   selected.value && !selected.value.isRoom ? (selected.value.target as THREE.Object3D) : null;
+  // if (!target && objectList.value.length) target = objectList.value[0].object;
+  // if (!target) {
+  //   window.alert('请先在场景中点击选中一栋建筑，再进入室内视角');
+  //   return;
+  // }
+  // scene?.enterIndoorView(target);
+  // isIndoorView.value = true;
 }
 
 function startMeasure(mode: 'distance' | 'area') {
@@ -1663,7 +1688,8 @@ onMounted(async () => {
           scene?.setSelectedBuilding('');
         }
       },
-      onDoubleClick: (result) => handleDoubleClick(result),
+      // 【待开发·已注释】双击进入室内视角：恢复室内功能时取消下行注释
+      // onDoubleClick: (result) => handleDoubleClick(result),
       // 量算结果回调：null 表示清除；finished（measuringMode==='none'）时仅保留结果、取消按钮高亮
       onMeasureUpdate: (data) => {
         measureResult.value = data;
@@ -2602,6 +2628,42 @@ onBeforeUnmount(() => {
 }
 .toolbar__btn--ghost { border-style: dashed; color: #f87171; }
 .toolbar__btn--ghost:hover { border-color: #f87171; background: rgba(248, 113, 113, 0.12); color: #fca5a5; }
+
+/* 待开发功能占位条：单独占右上角第二行，避免加宽主工具栏压住居中的搜索框。
+   按钮置灰 + 虚线边框 + not-allowed，明确「有此规划、暂不可点」。 */
+.toolbar-pending {
+  position: absolute;
+  z-index: 120;
+  top: 64px;
+  right: 16px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid #24324a;
+  border-radius: 8px;
+  background: rgba(20, 27, 43, 0.9);
+  backdrop-filter: blur(8px);
+}
+.toolbar-pending .toolbar__label {
+  padding: 0 4px;
+  color: #64748b;
+}
+.toolbar__btn--pending,
+.toolbar__btn--pending:hover {
+  border-color: #3b475c;
+  border-style: dashed;
+  color: #8492a8;
+  background: rgba(30, 41, 59, 0.45);
+  font-weight: 400;
+  cursor: not-allowed;
+  opacity: 0.78;
+}
+.toolbar__btn__tag {
+  margin-left: 2px;
+  font-size: 10px;
+  color: #7b8aa1;
+}
 
 /* 「打印 / 导出」「校准」独立按钮：底图为浅色（白/淡蓝）时，
    原来的透明底 + 浅色字会糊成一片。这里改成实底 + 高对比文字，

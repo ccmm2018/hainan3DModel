@@ -38,7 +38,10 @@
     <div class="toolbar">
       <div class="toolbar__group">
         <span class="toolbar__label">视图</span>
+        <!-- 2.5D 暂时注释：目前没有 2.5D 图/素材，视图工具栏先只保留「三维」。
+             恢复方法：删除本注释的包裹（保留下面这行按钮），并删除 setView() 里的 2.5D 禁用判断。
         <button class="toolbar__btn" :class="{ active: currentView === '2.5d' }" @click="setView('2.5d')">2.5D</button>
+        -->
         <button class="toolbar__btn" :class="{ active: currentView === '3d' }" @click="setView('3d')">三维</button>
         <button class="toolbar__btn" :class="{ active: isIndoorView }" @click="toggleIndoor">室内</button>
       </div>
@@ -698,8 +701,10 @@ const objectList = ref<Array<{ name: string; lngLat: [number, number]; object: T
 let scene: MapScene | null = null;
 
 // 视图 / 量算 UI 状态
-// 2D 入口已按需求移除：页面只保留 2.5D 与默认三维（3D 模型视角）。
-// 如需恢复：在工具栏加回 `setView('2d')` 按钮、把此处类型加回 '2d'，
+// 2D 入口已按需求移除；2.5D 因暂无 2.5D 图/素材，已在模板中注释按钮并禁用 setView 分支，
+// 页面视图切换目前只保留默认三维（3D 模型视角）。类型与 MapScene.setMapView 的 2.5D 实现均保留，便于恢复。
+// 恢复 2.5D：放开模板里 2.5D 按钮的注释包裹，并删除 setView() 中的 `if (mode === '2.5d') return;`。
+// 恢复 2D：在工具栏加回 `setView('2d')` 按钮、把此处类型加回 '2d'，
 // 并在 MapScene.setMapView() 里加回 pitch=0 / rotation=0 的分支。
 const currentView = ref<'2.5d' | '3d'>('3d');
 const measureActive = ref(false); // 是否正在打点测量中（控制「完成」按钮显隐）
@@ -1197,6 +1202,9 @@ function handleEscKey(e: KeyboardEvent) {
 // 视图切换 & 量算
 // ---------------------------------------------------------------------------
 function setView(mode: '2.5d' | '3d') {
+  // 暂无 2.5D 图/素材：暂时禁用 2.5D 切换（代码保留，素材就绪后即可恢复）。
+  // 恢复：删除下面的 if，并放开模板中 2.5D 按钮的注释包裹。
+  if (mode === '2.5d') return;
   currentView.value = mode;
   isIndoorView.value = false;
   scene?.setMapView(mode); // 内部会处理退出室内；中心/缩放保持不变（定位不丢失）

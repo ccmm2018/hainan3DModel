@@ -477,12 +477,18 @@ const INSPECT_LABELS: Record<InspectStatus, string> = {
 /** 预览模式强制按审图状态分色（in-progress 数据无业务状态） */
 const effectiveColorMode = computed<ColorMode>(() => (props.embedded ? 'inspect' : colorMode.value));
 
+/**
+ * HSL → HEX（h∈[0,360]，s/l∈[0,100]）。
+ * 注意：公式里的 l 必须是 0~1，传进来的 55 要先 /100；否则会算出 #13d31d2559c0
+ * 这类超长非法色值，SVG 解析失败直接渲染成黑色（部门/用途分色黑底的根因）。
+ */
 function hslToHex(h: number, s: number, l: number): string {
-  const a = (s * Math.min(l, 1 - l)) / 100;
+  const l01 = Math.min(1, Math.max(0, l / 100));
+  const a = (s * Math.min(l01, 1 - l01)) / 100;
   const f = (n: number) => {
     const k = (n + h / 30) % 12;
-    const c = l - a * Math.max(Math.min(k - 3, 9 - k, 1), -1);
-    return Math.round(255 * c)
+    const c = l01 - a * Math.max(Math.min(k - 3, 9 - k, 1), -1);
+    return Math.round(255 * Math.min(1, Math.max(0, c)))
       .toString(16)
       .padStart(2, '0');
   };
@@ -548,6 +554,66 @@ function hashHue(s: string): number {
   let h = 0;
   for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) & 0xffffffff;
   return Math.abs(h) % 360;
+}
+
+/**
+ * 「所属部门 / 房间用途」分色专用柔和色板。
+ * 设计约束（针对「黑底 + 灰字看不清 / 底部发黑」的反馈）：
+ *  - top 一律高明度浅色 → 房间四行文字固定用深色，对比度足够，不用眯眼看；
+ *  - deep 是同色系加深一档，用作房间前缘/底部色带与 2.5D 侧墙，绝不用黑色或深灰；
+ *  - stroke 是更实一点的同色描边，让浅色块在白底上有清晰边界。
+ * 12 色相错开，常见的部门数量（6~10 个）不会撞色；超出则循环使用。
+ */
+interface CategoryColor {
+  top: string;
+  deep: string;
+  stroke: string;
+}
+const CATEGORY_PALETTE: CategoryColor[] = [
+  { top: '#D6EAF8', deep: '#9CC9EA', stroke: '#4A90C4' }, // 蓝
+  { top: '#D8F0DC', deep: '#A0D9AF', stroke: '#4FA36A' }, // 绿
+  { top: '#FBE7C9', deep: '#EFC38A', stroke: '#C98A38' }, // 橙
+  { top: '#E7DDFA', deep: '#C3AFEA', stroke: '#8B6BC7' }, // 紫
+  { top: '#F8DCE3', deep: '#E9B0C1', stroke: '#C26B85' }, // 玫红
+  { top: '#D3EFEC', deep: '#9FD8D2', stroke: '#4FA39C' }, // 青
+  { top: '#F2EDCD', deep: '#DCD395', stroke: '#A79A42' }, // 柠檬
+  { top: '#DCE4F7', deep: '#AFBEE9', stroke: '#5A73BE' }, // 靛
+  { top: '#DCEFD9', deep: '#B0DBA9', stroke: '#6AA262' }, // 薄荷
+  { top: '#FBE0D4', deep: '#EFB69C', stroke: '#C87951' }, // 珊瑚
+  { top: '#DEE7EA', deep: '#B4C6CD', stroke: '#6E8892' }, // 灰蓝
+  { top: '#F0E0F2', deep: '#D8B2DE', stroke: '#A46BAC' }, // 丁香
+];
+
+/**
+ * 把当前楼层真实出现的类别按名称排序后稳定分配色板，保证
+ * 「房间顶面 / 顶部图例 / 底部色带」三处用同一组颜色；排序分配也避免了哈希撞色。
+ */
+const categoryColors = computed<Map<string, CategoryColor>>(() => {
+  const mode = effectiveColorMode.value;
+  const map = new Map<string, CategoryColor>();
+  if (mode !== 'dept' && mode !== 'purpose') return map;
+  const keys = new Set<string>();
+  for (const r of displayedRooms.value) {
+    const k = (mode === 'dept' ? r.dept : r.usePurpose)?.trim();
+    if (k) keys.add(k);
+  }
+  [...keys]
+    .sort((a, b) => a.localeCompare(b, 'zh-CN'))
+    .forEach((k, i) => map.set(k, CATEGORY_PALETTE[i % CATEGORY_PALETTE.length]!));
+  return map;
+});
+
+/** 取某房间在「部门 / 用途」模式下的配色；非这两种模式、或该字段为空时返回 null。 */
+function categoryColorOf(room: RoomLike): CategoryColor | null {
+  const mode = effectiveColorMode.value;
+  if (mode !== 'dept' && mode !== 'purpose') return null;
+  const key = (mode === 'dept' ? room.dept : room.usePurpose)?.trim();
+  if (!key) return null;
+  // 演示 / 合成房间不在 displayedRooms 里，按名称哈希兜底，同样只会拿到色板中的合法浅色
+  return (
+    categoryColors.value.get(key) ??
+    CATEGORY_PALETTE[hashHue(key) % CATEGORY_PALETTE.length]!
+  );
 }
 
 /**
@@ -651,13 +717,12 @@ function distPointToSeg(p: [number, number], a: [number, number], b: [number, nu
 function colorFor(room: RoomLike): string {
   switch (effectiveColorMode.value) {
     case 'inspect':
-      return INSPECT_COLORS[room.inspectStatus];
+      return INSPECT_COLORS[room.inspectStatus] ?? UNASSIGNED_FILL;
     case 'use':
-      return room.useStatus ? USE_COLORS[room.useStatus] : UNASSIGNED_FILL;
+      return (room.useStatus && USE_COLORS[room.useStatus]) || UNASSIGNED_FILL;
     case 'dept':
-      return room.dept ? hslToHex(hashHue(room.dept), 65, 55) : UNASSIGNED_FILL;
     case 'purpose':
-      return room.usePurpose ? hslToHex(hashHue(room.usePurpose), 65, 55) : UNASSIGNED_FILL;
+      return categoryColorOf(room)?.top ?? UNASSIGNED_FILL;
   }
 }
 
@@ -669,10 +734,34 @@ function roomFill(room: RoomLike): string {
   return colorFor(room);
 }
 
-/** 业务着色模式下按状态取描边（颜色 + 实/虚线）；其他着色模式返回 null → 用默认描边 */
+/**
+ * 房间前缘（底部）色带 / 2.5D 侧墙的颜色：
+ *  - 部门 / 用途模式：取同色系加深色，与浅色顶面呼应，绝不回落到黑色；
+ *  - 其余模式：仍是业务使用状态色（与图例一致），并对异常状态值做了兜底，避免 undefined → SVG 默认黑。
+ */
+function roomBottomColor(room: RoomLike): string {
+  const cat = categoryColorOf(room);
+  if (cat) return cat.deep;
+  return (room.useStatus && USE_COLORS[room.useStatus]) || UNASSIGNED_FILL;
+}
+
+/**
+ * 房间下方的隔墙配色：部门 / 用途模式的房间是柔和浅色，配原来的深灰墙会让
+ * 「房间底部」看起来发黑；这两种模式改用浅灰墙，其余模式保持原有立体灰色。
+ */
+const softWallMode = computed(
+  () => effectiveColorMode.value === 'dept' || effectiveColorMode.value === 'purpose',
+);
+const wallSideFill = computed(() =>
+  softWallMode.value ? 'rgba(198,207,219,0.95)' : 'rgba(140,148,162,0.97)',
+);
+const wallTopFill = computed(() => (softWallMode.value ? '#e8edf3' : '#cdd5df'));
+
+/** 业务着色模式下按状态取描边（颜色 + 实/虚线）；部门/用途模式取同色系描边；其余返回默认描边。 */
 function useStrokeStyle(room: RoomLike): { stroke: string; dash?: string } | null {
-  if (effectiveColorMode.value !== 'use') return null;
-  return USE_STROKES[room.useStatus];
+  if (effectiveColorMode.value === 'use') return USE_STROKES[room.useStatus] ?? null;
+  const cat = categoryColorOf(room);
+  return cat ? { stroke: cat.stroke } : null;
 }
 
 /** 选中态「内嵌描边」多边形：把顶面四边形各边沿法向内缩 d px（平行四边形各边平移后取角点），
@@ -1069,14 +1158,16 @@ const roomBlocks = computed<RoomBlock[]>(() => {
     // 顶面填充色：跟随「着色」模式（业务=使用状态 / 审图=审图状态 / 部门 / 用途），使状态修改即时体现在图层上
     const fill = roomFill(room);
     const useStyle = useStrokeStyle(room);
-    const textColor = isLight(fill) ? '#1f2937' : '#ffffff';
+    // 部门 / 用途模式一律浅底深字；其余模式按填充亮度自动取深/白字
+    const textColor = isLight(fill) ? '#1b2733' : '#ffffff';
     const number = room.number || room.code || `房${idx + 1}`;
     const name = cleanName(room.name);
     const dept = room.dept || '—';
     const area = `${room.useArea > 0 ? room.useArea.toFixed(2) : '—'}㎡ / ${room.buildArea > 0 ? room.buildArea.toFixed(2) : '—'}㎡`;
 
-    // 状态色条：沿顶面「朝观察者前缘」(t3→t2) 画一条细带，颜色恒为业务使用状态色，与图例一致。
+    // 前缘（底部）色带：沿顶面「朝观察者前缘」(t3→t2) 画一条细带。
     // 取前缘中点相对房间中心的内法线方向，向内推 thk 像素，得到一条贴边的细色带（画在顶面之下，仅露出贴边部分）。
+    // 部门 / 用途模式用同色系加深色，其余模式仍是业务状态色；两者都不会出现黑色。
     const emX = (t3[0] + t2[0]) / 2;
     const emY = (t3[1] + t2[1]) / 2;
     let inx = cx - emX;
@@ -1085,7 +1176,7 @@ const roomBlocks = computed<RoomBlock[]>(() => {
     inx /= inl;
     iny /= inl;
     const thk = Math.max(2, Math.min(4, roomHpx * 0.18));
-    const statusColor = room.useStatus ? USE_COLORS[room.useStatus] : UNASSIGNED_FILL;
+    const statusColor = roomBottomColor(room);
     const statusBar =
       `${t3[0].toFixed(1)},${t3[1].toFixed(1)} ` +
       `${t2[0].toFixed(1)},${t2[1].toFixed(1)} ` +
@@ -1302,8 +1393,9 @@ interface RoomBlock {
   yArea: number;
   sizeNumber: number;
   sizeOther: number;
-  /** 状态色条：沿房间顶面「朝观察者前缘」的一条细色带，颜色恒为业务使用状态色（与图例一致），
-   *  与当前「着色」模式无关——即便按部门/用途分色，也能一眼扫出每间房的使用状态，无需在画布与图例间来回对照。
+  /** 前缘（底部）色带：沿房间顶面「朝观察者前缘」的一条细色带。
+   *  业务/审图模式恒为业务使用状态色（与图例一致）；部门/用途模式改为同色系加深色，
+   *  与浅色顶面呼应，且任何模式都不会出现黑色块。
    *  多边形四点：前缘两角 → 向内推 thk 像素，画在顶面之下，仅露出贴边的一条细带。 */
   statusColor: string;
   statusBar: string;
@@ -1336,24 +1428,23 @@ interface RoomFill {
   labelX: number;
 }
 
-/** 房间文字标签：固定 4 项（房间号 / 名称 / 建筑面积 / 使用面积），房间号缺省兜底「未命名」。
- *  文字颜色由顶面填充色亮度自动决定：深色填充用深字、浅色/彩色填充用白字。 */
+/** 房间文字标签：固定 4 项（房间号 / 名称 / 部门 / 两个面积），房间号缺省兜底「未命名」。
+ *  文字颜色由顶面填充色亮度自动决定；浅色顶（含部门/用途色板）统一用高对比深色，
+ *  副行也从原来的中灰 #4b5563 加深到 #3b4654，避免「灰字压浅底看不清」。 */
 function buildLabelLines(room: RoomLike, fill: string): Omit<LabelLine, 'y'>[] {
   const code = (room.code || room.number || room.name || '').trim();
   const d = (s: string) => (s.trim() !== '' ? s.trim() : '—');
-  // 与合成网格（roomBlocks）完全一致的四行：号码(大字) / 名称 / 部门 / 使用面积㎡ / 建筑面积㎡；
-  // 深色顶面用深字、浅色/彩色顶面用白字（与顶面对比，保证可读）。
   const light = isLight(fill);
-  const main = light ? '#2d3a47' : '#ffffff';
-  const sub = light ? '#4b5563' : 'rgba(255,255,255,0.92)';
+  const main = light ? '#1b2733' : '#ffffff';
+  const sub = light ? '#3b4654' : 'rgba(255,255,255,0.96)';
   return [
     { text: code !== '' ? code : '未命名房间', size: 13, weight: 700, color: main, badge: false },
-    { text: d(room.name), size: 9, weight: 400, color: sub, badge: false },
-    { text: d(room.dept), size: 9, weight: 400, color: sub, badge: false },
+    { text: d(room.name), size: 9, weight: 500, color: sub, badge: false },
+    { text: d(room.dept), size: 9, weight: 500, color: sub, badge: false },
     {
       text: `${room.useArea > 0 ? room.useArea.toFixed(2) : '—'}㎡ / ${room.buildArea > 0 ? room.buildArea.toFixed(2) : '—'}㎡`,
       size: 9,
-      weight: 500,
+      weight: 600,
       color: main,
       badge: false,
     },
@@ -1522,11 +1613,11 @@ function wallFaces(seg: { a: [number, number]; b: [number, number] }): { sides: 
   // 2.5D 两面明暗着色：沿对齐后 X 轴（水平/正面）的墙=较亮，沿 Y 轴（深度/侧面）的墙=较暗。
   // 基于「对齐后」方向分类，保证左右两侧壁（均为深度墙）明暗一致，盒子立体感对称清晰。
   const isXWall = Math.abs(dx) >= Math.abs(dy);
-  const frontFill = 'rgba(158,166,180,0.92)'; // 正面墙：较亮灰
-  const sideFill = 'rgba(112,120,136,0.92)'; // 侧面墙：较暗灰（深度方向，强化立体）
+  const frontFill = softWallMode.value ? 'rgba(208,216,226,0.92)' : 'rgba(158,166,180,0.92)'; // 正面墙：较亮灰
+  const sideFill = softWallMode.value ? 'rgba(184,194,206,0.92)' : 'rgba(112,120,136,0.92)'; // 侧面墙：较暗灰（深度方向，强化立体）
   const longFill = isXWall ? frontFill : sideFill;
   const endFill = isXWall ? sideFill : frontFill;
-  const topFill = '#e3e8ef'; // 楼顶(拉伸墙顶部面)：浅灰，区别于白色房间地面，呈现「盖子」悬浮感
+  const topFill = softWallMode.value ? '#f0f3f7' : '#e3e8ef'; // 楼顶(拉伸墙顶部面)：浅灰，区别于白色房间地面，呈现「盖子」悬浮感
   const sides: Face[] = [
     { points: `${q(P(A1, 0))} ${q(P(B1, 0))} ${q(P(B1, H))} ${q(P(A1, H))}`, fill: longFill },
     { points: `${q(P(A2, 0))} ${q(P(B2, 0))} ${q(P(B2, H))} ${q(P(A2, H))}`, fill: longFill },
@@ -1631,9 +1722,13 @@ const roomFills = computed<RoomFill[]>(() => {
       const Pb0 = project(srcB[0], srcB[1], 0);
       const PaH = project(srcA[0], srcA[1], H);
       const PbH = project(srcB[0], srcB[1], H);
-      // 前墙(法线偏 ±y)稍亮、侧墙(法线偏 ±x)更暗，强化长方体立体
+      // 前墙(法线偏 ±y)稍亮、侧墙(法线偏 ±x)更暗，强化长方体立体。
+      // 部门 / 用途模式改用房间自身的同色系加深色（浅顶 + 彩底），不再用中性深灰，避免房间底部发黑。
       const isFront = Math.abs(ny) >= Math.abs(nx);
-      const fill = isFront ? 'rgba(150,158,172,0.96)' : 'rgba(112,120,136,0.96)';
+      const cat = categoryColorOf(room);
+      const fill = cat
+        ? (isFront ? cat.deep : darken(cat.deep, 0.12))
+        : (isFront ? 'rgba(150,158,172,0.96)' : 'rgba(112,120,136,0.96)');
       sides.push({ points: `${q(Pa0)} ${q(Pb0)} ${q(PbH)} ${q(PaH)}`, fill });
     }
     // 标签锚点：顶面质心（z=H），文字落在盒子顶面上
@@ -1894,7 +1989,7 @@ function resetPopPosition(): void {
 }
 
 /** 选中房间缩略图：用房间自身轮廓生成一张「对应的图片」（无外部图片数据时也能稳定展示） */
-const roomThumb = computed<{ viewBox: string; points: string; fill: string } | null>(() => {
+const roomThumb = computed<{ viewBox: string; points: string; fill: string; stroke: string } | null>(() => {
   const r = selectedRoom.value;
   if (!r) return null;
   const poly = polyOf(r);
@@ -1924,7 +2019,10 @@ const roomThumb = computed<{ viewBox: string; points: string; fill: string } | n
       return `${px.toFixed(1)},${py.toFixed(1)}`;
     })
     .join(' ');
-  return { viewBox: `0 0 ${W} ${H}`, points, fill: colorFor(r) };
+  const fill = colorFor(r);
+  // 部门 / 用途模式用色板自带的同色描边；其余模式用顶面色的温和加深，缩略图不再出现黑边
+  const stroke = categoryColorOf(r)?.stroke ?? darken(fill, 0.28);
+  return { viewBox: `0 0 ${W} ${H}`, points, fill, stroke };
 });
 
 /** 弹窗数据：一行两个属性，按 [label, value] 成对排列 */
@@ -2550,7 +2648,7 @@ const currentFloorBrief = computed(() => {
 const GUIDE_HTML = `
 <div style="line-height:1.75;font-size:13px">
   <p style="margin:0 0 8px">这个界面用来查看和标注一栋楼<b>各楼层的房间</b>。所有操作都在<b>画布上方的一排工具栏</b>里，从左到右分 6 区：</p>
-  <p style="margin:0 0 6px">① <b>显示方式</b>：切换房间按什么字段上色（使用状态 / 审图状态 / 所属部门 / 房间用途）。<b>只换颜色，不改数据</b>。「审图状态」用于 DXF 导入质检；部门、用途没填数据时画面不会变化。</p>
+  <p style="margin:0 0 6px">① <b>显示方式</b>：切换房间按什么字段上色（使用状态 / 审图状态 / 所属部门 / 房间用途）。<b>只换颜色，不改数据</b>。「审图状态」用于 DXF 导入质检；部门、用途用一组柔和浅色区分，文字统一深色、房间下方墙体改浅灰，不再出现黑底黑边；字段没填数据时画面不会变化。</p>
   <p style="margin:0 0 6px">② <b>图例</b>：说明每种颜色代表什么。浏览时只读；<b>进入编辑 + 使用状态</b>时，先点色块再点房间即可批量标注状态。</p>
   <p style="margin:0 0 6px">③ <b>楼层</b>：点 1F / 2F 切换楼层，标题里显示本层房间数与面积。</p>
   <p style="margin:0 0 6px">④ <b>视图工具</b>：源对齐（把图纸转正）、导入图纸、放大 / 缩小 / 复位；画布也支持滚轮缩放、按住拖拽平移。</p>
@@ -2879,8 +2977,8 @@ function enterEdit(): void {
               v-for="w in roomWalls"
               :key="w.id"
             >
-              <polygon v-for="(s, si) in w.sides" :key="'ws' + si" :points="s" fill="rgba(140,148,162,0.97)" :stroke="w.stroke" stroke-width="0.5" pointer-events="none" />
-              <polygon :points="w.top" fill="#cdd5df" :stroke="w.stroke" stroke-width="0.5" pointer-events="none" />
+              <polygon v-for="(s, si) in w.sides" :key="'ws' + si" :points="s" :fill="wallSideFill" :stroke="w.stroke" stroke-width="0.5" pointer-events="none" />
+              <polygon :points="w.top" :fill="wallTopFill" :stroke="w.stroke" stroke-width="0.5" pointer-events="none" />
             </template>
             <!-- ③c 选中房间高亮（2026-10-03 优化）：内嵌描边 2px #1976D2 —— 多边形向内缩 1px 后描边，
                  视觉上 2px 全部落在房间内部；画在隔墙之后（之上），彻底解决「选中描边被隔墙盖住看不出」 -->
@@ -2936,7 +3034,7 @@ function enterEdit(): void {
               <div v-if="popMode !== 'maint'" class="fpv-pop__body">
                 <div v-if="roomThumb" class="fpv-pop__img">
                   <svg :viewBox="roomThumb.viewBox" preserveAspectRatio="xMidYMid meet">
-                    <polygon :points="roomThumb.points" :fill="roomThumb.fill" :stroke="darken(roomThumb.fill, 0.45)" stroke-width="2" />
+                    <polygon :points="roomThumb.points" :fill="roomThumb.fill" :stroke="roomThumb.stroke" stroke-width="2" />
                   </svg>
                   <span class="fpv-pop__img-tag">缩略图</span>
                 </div>
@@ -3095,8 +3193,8 @@ function enterEdit(): void {
           v-for="w in roomWalls"
           :key="w.id"
         >
-          <polygon v-for="(s, si) in w.sides" :key="'ws' + si" :points="s" fill="rgba(140,148,162,0.97)" :stroke="w.stroke" stroke-width="0.5" pointer-events="none" />
-          <polygon :points="w.top" fill="#cdd5df" :stroke="w.stroke" stroke-width="0.5" pointer-events="none" />
+          <polygon v-for="(s, si) in w.sides" :key="'ws' + si" :points="s" :fill="wallSideFill" :stroke="w.stroke" stroke-width="0.5" pointer-events="none" />
+          <polygon :points="w.top" :fill="wallTopFill" :stroke="w.stroke" stroke-width="0.5" pointer-events="none" />
         </template>
         <!-- ③c 选中房间高亮：内嵌描边 2px #1976D2，画在隔墙之上、完全落在房间内部（与主视图一致） -->
         <template
@@ -3361,7 +3459,8 @@ function enterEdit(): void {
 .fpv-side { display: flex; flex-direction: column; gap: 10px; width: 240px; flex-shrink: 0; }
 .fpv-legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 13px; color: #4b5563; }
 .fpv-legend__item { display: inline-flex; align-items: center; gap: 5px; }
-.fpv-legend i { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+/* 部门/用途色板是浅色，给色点加一圈淡描边，白底上才看得清（此前非法色值时色点是空白） */
+.fpv-legend i { width: 11px; height: 11px; border-radius: 50%; display: inline-block; border: 1px solid rgba(31,41,55,.22); box-sizing: border-box; }
 /* 编辑态：图例项变为可点击的「状态选择器」 */
 .fpv-legend--clickable { gap: 8px; }
 .fpv-legend__item--clickable { cursor: pointer; padding: 3px 8px 3px 6px; border-radius: 999px; border: 1px solid transparent; transition: background .15s, border-color .15s, box-shadow .15s; }

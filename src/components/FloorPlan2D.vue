@@ -400,13 +400,14 @@ function loadMaint(r: RoomLike | null): void {
   maintForm.note = m?.note ?? '';
 }
 
-function saveMaint(): void {
+/** notify=false 供合并保存调用（由 saveRoomAll 统一给一次提示，避免连弹两个 toast） */
+function saveMaint(notify = true): void {
   const f = currentFloor.value;
   const r = liveRoom.value;
   if (!f || !r) return;
   if (!isRealRoom(r)) {
     // 合成预览房间不入库，仅给出提示，不写 store
-    ElMessage.info('当前为预览房间，维护信息未写入数据库');
+    if (notify) ElMessage.info('当前为预览房间，维护信息未写入数据库');
     return;
   }
   store.updateRoom(f.id, r.id, {
@@ -416,7 +417,7 @@ function saveMaint(): void {
       note: maintForm.note.trim() || undefined,
     },
   });
-  ElMessage.success('已保存维护信息');
+  if (notify) ElMessage.success('已保存维护信息');
 }
 
 // ---- 空状态 / 错误状态 / 部分成功状态（store 模式，针对当前选中楼层）----
@@ -467,6 +468,12 @@ const USE_LABELS: Record<UseStatus, string> = {
   vacant: '空置',
   '': '未分配',
 };
+/** 只读详情卡里的业务状态快捷切换：点色块直接改这一间，不必进编辑表单 */
+const STATUS_QUICK: { value: Exclude<UseStatus, ''>; label: string }[] = [
+  { value: 'occupied', label: '使用中' },
+  { value: 'noaccess', label: '无权限' },
+  { value: 'vacant', label: '空置' },
+];
 const INSPECT_LABELS: Record<InspectStatus, string> = {
   normal: '正常',
   highlight: '需复核',
@@ -1845,7 +1852,9 @@ const statusStatItems = computed(() =>
 // ---- 交互：仅点击选中弹出小卡片（已移除 hover tooltip，避免遮挡与误触）----
 const selectedId = ref<string | null>(null);
 const selectedIds = ref<string[]>([]);
-const popMode = ref<'edit' | 'maint' | null>(null);
+/** 详情卡子面板：null = 只读信息；'edit' = 一个表单（基础资料 + 维护台账）。
+ *  2026-11-15 简化：原「修改信息」「维护房间信息」两个入口 / 两个保存按钮合并为「编辑本房间」一次保存。 */
+const popMode = ref<'edit' | null>(null);
 
 /** 弹窗相对 .fpv-main 的锚点（点击点在 main 内的像素坐标）。弹窗从该锚点向左上展开，
  *  使点击点落在弹窗右下角附近 —— 即「在点击的左上角显示」。 */
@@ -1900,7 +1909,7 @@ const popupSize = ref({ w: 340, h: 380 });
 const stageSize = ref({ w: 0, h: 0 });
 
 /** 弹窗最终屏幕位置：以 popupBase 为基准，叠加当前图层变换(pan+zoom)实时跟随房间；
- *  并夹取进舞台可视范围，保证整张卡片（含底部「修改信息/维护房间信息」按钮）始终可见、不超界。 */
+ *  并夹取进舞台可视范围，保证整张卡片（含底部「编辑本房间」按钮）始终可见、不超界。 */
 const popupPos = computed(() => {
   const { w, h } = popupSize.value;
   const r = stageSize.value;
@@ -2036,7 +2045,6 @@ const roomInfoPairs = computed<{ label: string; value: string }[]>(() => {
     { label: '用途', value: r.usePurpose || '—' },
     { label: '使用面积', value: `${r.useArea > 0 ? r.useArea.toFixed(1) : '—'} ㎡` },
     { label: '建筑面积', value: `${r.buildArea > 0 ? r.buildArea.toFixed(1) : '—'} ㎡` },
-    { label: '业务状态', value: USE_LABELS[r.useStatus] ?? '—' },
     { label: '审图状态', value: INSPECT_LABELS[r.inspectStatus] ?? '—' },
   ];
 });
@@ -2044,9 +2052,9 @@ const roomInfoPairs = computed<{ label: string; value: string }[]>(() => {
 /** 选中房间变化时，同步加载其维护信息到表单 */
 watch(liveRoom, (r) => loadMaint(r), { immediate: true });
 
-/** 展开 / 收起子面板（修改信息、维护房间信息）会改变弹窗高度，重新夹取位置避免超出界面 */
+/** 展开 / 收起「编辑本房间」表单会改变弹窗高度，重新夹取位置避免超出界面 */
 watch(popMode, (m) => {
-  // 进入「修改信息」时，把当前房间字段重新载入表单，避免残留上次未保存的编辑
+  // 展开「编辑本房间」时，把当前房间字段重新载入表单，避免残留上次未保存的编辑
   if (m === 'edit' && liveRoom.value) {
     const r = liveRoom.value;
     editRoom.code = r.code;
@@ -2100,12 +2108,40 @@ function onSelect(room: RoomLike, ev?: MouseEvent): void {
   nextTick(() => fitPopupInStage());
 }
 
+/**
+ * 编辑结构态下「编辑资料」按钮：打开当前选中那一间房的资料表单。
+ * 不能依赖双击 / click —— 编辑态 mousedown 会通过 dragTopBlocks 重排房间 <g> 的 DOM 顺序，
+ * 浏览器在此场景下会吞掉后续 click / dblclick，故用工具栏按钮作为稳定入口。
+ */
+function openSelectedRoomForm(): void {
+  if (!editMode.value) return;
+  const id = selectedIds.value.length === 1 ? selectedIds.value[0] : selectedId.value;
+  const room = displayedRooms.value.find((r) => r.id === id);
+  if (!room) {
+    ElMessage.info('请先点选 1 间房间，再点「编辑资料」');
+    return;
+  }
+  selectedIds.value = [room.id];
+  selectedId.value = room.id;
+  selectedRoom.value = room;
+  popMode.value = 'edit';
+  const stage = stageRef.value ?? mainRef.value;
+  if (!stage) return;
+  const r = stage.getBoundingClientRect();
+  popupAnchor.value = { x: r.width / 2, y: r.height / 2 };
+  popupBase.value = {
+    x: (r.width / 2 - 270) / zoom.value,
+    y: (r.height / 2 - 300) / zoom.value,
+  };
+  nextTick(() => fitPopupInStage());
+}
+
 /** 该房间是否为真实入库房间（存在于 displayedRooms），决定后续是写 store 还是走本地覆盖 */
 function isRealRoom(r: RoomLike | null): boolean {
   return !!r && displayedRooms.value.some((x) => x.id === r.id);
 }
 
-/** 把业务状态赋给指定房间（真实房间写 store / 合成预览房间写本地覆盖），供弹窗「修改信息」与「图例状态选择器」共用 */
+/** 把业务状态赋给指定房间（真实房间写 store / 合成预览房间写本地覆盖），供详情卡状态色块与「图例状态选择器」共用 */
 function applyUseStatusToRoom(room: RoomLike, status: UseStatus): void {
   if (isRealRoom(room)) {
     const f = currentFloor.value;
@@ -2210,7 +2246,8 @@ watch(
   { immediate: true },
 );
 
-function saveEdit(): void {
+/** notify=false 供合并保存调用（由 saveRoomAll 统一给一次提示） */
+function saveEdit(notify = true): void {
   const f = currentFloor.value;
   const r = liveRoom.value;
   if (!r) return;
@@ -2232,7 +2269,22 @@ function saveEdit(): void {
   }
   // 保存后把 selectedRoom 重新指向最新对象，确保读视图立即刷新（避免陈旧引用显示旧面积）
   selectedRoom.value = liveRoom.value;
-  ElMessage.success('已保存房间信息');
+  if (notify) ElMessage.success('已保存房间信息');
+}
+
+/**
+ * 「编辑本房间」一次保存：基础资料 + 维护台账一起写库，保存后回到只读态。
+ * 顺序必须先维护后基础：saveEdit 里 selectedRoom 重新指向会触发 watch(liveRoom) → loadMaint()，
+ * 若后存维护信息，用户刚填的维护字段会被重载成旧值而丢失。
+ */
+function saveRoomAll(): void {
+  const r = liveRoom.value;
+  if (!r) return;
+  const real = isRealRoom(r) && !!currentFloor.value;
+  saveMaint(false);
+  saveEdit(false);
+  popMode.value = null;
+  ElMessage.success(real ? '已保存房间资料' : '已保存基础资料（预览房间，维护信息不入库）');
 }
 
 /** 当前被「隐藏此房间」移除的房间列表（真实模式来自 store；demo 模式来自本地覆盖），用于侧栏恢复。 */
@@ -2356,10 +2408,10 @@ function fromScreen(clientX: number, clientY: number, z = 0): [number, number] {
 }
 
 /** 编辑模式：单击房间——仅选中高亮（蓝框），不弹窗；Shift/Ctrl 多选供合并。
- *  弹窗仅在用户点「修改信息」按钮时打开，避免编辑时误弹卡片挡住画布。 */
+ *  弹窗仅在新增 / 合并后自动打开，或用户点工具栏「编辑资料」主动打开，避免编辑时误弹卡片挡住画布。 */
 /** 编辑模式：mousedown 选中房间——「确保选中」语义：未选则加入（支持多选累积），
  *  已选则保留（避免去抓一个已选中房间拖动时，mousedown 先把它取消、拖完就丢选中）。
- *  弹窗仅在用户点「修改信息」按钮时打开，避免编辑时误弹卡片挡住画布。 */
+ *  弹窗仅在新增 / 合并后自动打开，或用户点工具栏「编辑资料」主动打开，避免编辑时误弹卡片挡住画布。 */
 function onSelectRoom(room: RoomLike, _ev?: MouseEvent): void {
   if (!selectedIds.value.includes(room.id)) {
     selectedIds.value = [...selectedIds.value, room.id];
@@ -2649,10 +2701,10 @@ const GUIDE_HTML = `
 <div style="line-height:1.75;font-size:13px">
   <p style="margin:0 0 8px">这个界面用来查看和标注一栋楼<b>各楼层的房间</b>。所有操作都在<b>画布上方的一排工具栏</b>里，从左到右分 6 区：</p>
   <p style="margin:0 0 6px">① <b>显示方式</b>：切换房间按什么字段上色（使用状态 / 审图状态 / 所属部门 / 房间用途）。<b>只换颜色，不改数据</b>。「审图状态」用于 DXF 导入质检；部门、用途用一组柔和浅色区分，文字统一深色、房间下方墙体改浅灰，不再出现黑底黑边；字段没填数据时画面不会变化。</p>
-  <p style="margin:0 0 6px">② <b>图例</b>：说明每种颜色代表什么。浏览时只读；<b>进入编辑 + 使用状态</b>时，先点色块再点房间即可批量标注状态。</p>
+  <p style="margin:0 0 6px">② <b>图例</b>：说明每种颜色代表什么。浏览时只读；<b>编辑结构 + 使用状态</b>时，先点色块再点房间即可批量标注状态；只改一间房的状态，直接在它的详情卡里点色块。</p>
   <p style="margin:0 0 6px">③ <b>楼层</b>：点 1F / 2F 切换楼层，标题里显示本层房间数与面积。</p>
   <p style="margin:0 0 6px">④ <b>视图工具</b>：源对齐（把图纸转正）、导入图纸、放大 / 缩小 / 复位；画布也支持滚轮缩放、按住拖拽平移。</p>
-  <p style="margin:0 0 6px">⑤ <b>房间编辑</b>：点「进入编辑」后才出现新增 / 合并 / 删除；<b>完成</b>保存、<b>取消·回滚</b>撤销本次全部改动。点房间可看详情并修改单间资料。</p>
+  <p style="margin:0 0 6px">⑤ <b>房间结构</b>：只管「有哪些房间、怎么摆」。点「编辑结构」才出现新增 / 合并 / 删除 / 拖动；<b>完成</b>保存、<b>取消·回滚</b>撤销本次全部改动。<b>改单间房资料不需要进这里</b>：浏览时点房间，在详情卡里点「编辑本房间」，基础资料和维护台账一起填、一次保存；已经进入「编辑结构」时，选中 1 间房再点工具栏「编辑资料」即可。</p>
   <p style="margin:0">⑥ <b>其它</b>：被隐藏的房间在这里恢复；点「?」可随时重看本说明。</p>
 </div>`;
 
@@ -2857,15 +2909,15 @@ function enterEdit(): void {
 
           <span class="fpv-toolbar__sep"></span>
 
-          <!-- ⑤ 房间编辑：进入 / 完成 / 取消 做成明确的模式开关，编辑工具带文字 -->
+          <!-- ⑤ 房间结构：只管「有哪些房间 / 怎么摆 / 批量标注」，改单间资料不必进这里 -->
           <section class="fpv-tgroup fpv-tgroup--edit" :class="{ 'fpv-tgroup--editing': editMode }">
             <span class="fpv-tgroup__label">
-              {{ editMode ? `编辑中 · 已选 ${selectedIds.length} 间` : '房间编辑' }}
-              <em v-if="editMode">完成保存 / 取消回滚</em>
+              {{ editMode ? `结构调整中 · 已选 ${selectedIds.length} 间` : '房间结构' }}
+              <em>{{ editMode ? '完成保存 / 取消回滚' : '增 / 删 / 合并 · 拖动布局' }}</em>
             </span>
             <div class="fpv-tgroup__row">
               <template v-if="!editMode">
-                <el-button type="primary" size="small" @click="enterEdit">进入编辑</el-button>
+                <el-button type="primary" size="small" @click="enterEdit">编辑结构</el-button>
               </template>
               <template v-else>
                 <el-button type="success" size="small" @click="exitEdit(true)">完成</el-button>
@@ -2881,6 +2933,7 @@ function enterEdit(): void {
                 <el-button size="small" :disabled="!canAddRoom" @click="doAddRoom"><el-icon><Plus /></el-icon>新增</el-button>
                 <el-button size="small" :disabled="selectedIds.length < 2" @click="doMerge"><el-icon><Connection /></el-icon>合并</el-button>
                 <el-button size="small" type="danger" plain :disabled="!selectedIds.length" @click="doDelete"><el-icon><Delete /></el-icon>删除</el-button>
+                <el-button size="small" :disabled="selectedIds.length !== 1" title="选中 1 间房后改它的资料" @click="openSelectedRoomForm()">编辑资料</el-button>
               </template>
             </div>
           </section>
@@ -3005,14 +3058,13 @@ function enterEdit(): void {
           </svg>
 
           <!-- 房间详情卡：标题栏即拖拽手柄；内容区独立滚动 + 整体限高，
-               保证「修改信息 / 维护房间信息」展开后也不会撑出画布。 -->
+               保证「编辑本房间」表单展开后也不会撑出画布。 -->
           <div
             v-if="liveRoom && (!editMode || popMode)"
             ref="popupEl"
             class="fpv-pop"
             :class="{
               'fpv-pop--form': popMode !== null,
-              'fpv-pop--maint': popMode === 'maint',
               'fpv-pop--dragging': popDragging,
             }"
             :style="{ left: popupPos.x + 'px', top: popupPos.y + 'px' }"
@@ -3031,7 +3083,30 @@ function enterEdit(): void {
             </div>
 
             <div class="fpv-pop__content">
-              <div v-if="popMode !== 'maint'" class="fpv-pop__body">
+              <!-- 编辑本房间：基础资料 + 维护台账合成一个表单、一次保存（2026-11-15 简化） -->
+              <div v-if="popMode === 'edit'" class="fpv-pop__form fpv-pop__form--all">
+                <div class="fpv-pop__section">基础资料</div>
+                <div class="fpv-edit__row"><label>房间号</label><el-input v-model="editRoom.code" size="small" /></div>
+                <div class="fpv-edit__row"><label>名称</label><el-input v-model="editRoom.name" size="small" /></div>
+                <div class="fpv-edit__row"><label>部门</label><el-input v-model="editRoom.dept" size="small" /></div>
+                <div class="fpv-edit__row"><label>用途</label><el-input v-model="editRoom.usePurpose" size="small" /></div>
+                <div class="fpv-edit__row"><label>使用面积</label><el-input v-model="editRoom.useArea" size="small" type="number" /></div>
+                <div class="fpv-edit__row"><label>建筑面积</label><el-input v-model="editRoom.buildArea" size="small" type="number" /></div>
+
+                <div class="fpv-pop__section">维护台账</div>
+                <div class="fpv-edit__row"><label>责任部门</label><el-input v-model="maintForm.responsibleDept" size="small" /></div>
+                <div class="fpv-edit__row"><label>最近巡检</label><el-input v-model="maintForm.lastInspect" size="small" placeholder="yyyy-mm-dd" /></div>
+                <div class="fpv-edit__row fpv-edit__row--wide"><label>备注</label><el-input v-model="maintForm.note" size="small" type="textarea" :rows="2" /></div>
+
+                <!-- 返回查看由卡片底部统一按钮承担，表单内不再重复放一个 -->
+                <div class="fpv-info__actions">
+                  <el-button type="primary" size="small" @click="saveRoomAll()">保存资料</el-button>
+                  <el-button size="small" type="danger" plain @click="hideRoom">从视图隐藏</el-button>
+                </div>
+              </div>
+
+              <!-- 只读信息：业务状态改成点色块直接切换，不必进编辑表单 -->
+              <div v-else class="fpv-pop__body">
                 <div v-if="roomThumb" class="fpv-pop__img">
                   <svg :viewBox="roomThumb.viewBox" preserveAspectRatio="xMidYMid meet">
                     <polygon :points="roomThumb.points" :fill="roomThumb.fill" :stroke="roomThumb.stroke" stroke-width="2" />
@@ -3040,54 +3115,37 @@ function enterEdit(): void {
                 </div>
                 <div v-else class="fpv-pop__img fpv-pop__img--empty">暂无图形</div>
 
-                <!-- 修改信息：就地编辑，2 列紧凑排布 -->
-                <div v-if="popMode === 'edit'" class="fpv-pop__info fpv-pop__info--edit">
-                  <div class="fpv-edit__row"><label>房间号</label><el-input v-model="editRoom.code" size="small" /></div>
-                  <div class="fpv-edit__row"><label>名称</label><el-input v-model="editRoom.name" size="small" /></div>
-                  <div class="fpv-edit__row"><label>部门</label><el-input v-model="editRoom.dept" size="small" /></div>
-                  <div class="fpv-edit__row"><label>用途</label><el-input v-model="editRoom.usePurpose" size="small" /></div>
-                  <div class="fpv-edit__row"><label>使用面积</label><el-input v-model="editRoom.useArea" size="small" type="number" /></div>
-                  <div class="fpv-edit__row"><label>建筑面积</label><el-input v-model="editRoom.buildArea" size="small" type="number" /></div>
-                  <div class="fpv-info__actions">
-                    <el-button type="primary" size="small" @click="saveEdit">保存</el-button>
-                    <el-button size="small" @click="popMode = null">返回</el-button>
-                  </div>
-                  <div class="fpv-info__actions">
-                    <el-button size="small" @click="setUseStatus('occupied')">使用中</el-button>
-                    <el-button size="small" @click="setUseStatus('noaccess')">无权限</el-button>
-                    <el-button size="small" @click="setUseStatus('vacant')">空置</el-button>
-                    <el-button size="small" text @click="setUseStatus('')">清空</el-button>
-                  </div>
-                  <div class="fpv-info__actions">
-                    <el-button size="small" type="danger" plain @click="hideRoom">隐藏此房间</el-button>
-                  </div>
-                </div>
-
-                <!-- 只读信息展示 -->
-                <div v-else class="fpv-pop__info">
+                <div class="fpv-pop__info">
                   <div v-for="p in roomInfoPairs" :key="p.label" class="fpv-pop__cell">
                     <span>{{ p.label }}</span><b>{{ p.value }}</b>
                   </div>
-                </div>
-              </div>
-
-              <div v-if="popMode === 'maint'" class="fpv-pop__form">
-                <div class="fpv-edit__row"><label>责任部门</label><el-input v-model="maintForm.responsibleDept" size="small" /></div>
-                <div class="fpv-edit__row"><label>最近巡检</label><el-input v-model="maintForm.lastInspect" size="small" placeholder="yyyy-mm-dd" /></div>
-                <div class="fpv-edit__row fpv-edit__row--wide"><label>备注</label><el-input v-model="maintForm.note" size="small" type="textarea" :rows="2" /></div>
-                <div class="fpv-info__actions">
-                  <el-button type="primary" size="small" @click="saveMaint">保存维护信息</el-button>
-                  <el-button size="small" @click="popMode = null">返回</el-button>
+                  <div class="fpv-pop__status">
+                    <div class="fpv-pop__status-hd">
+                      <span class="fpv-pop__status-label">业务状态 · 点色块直接改</span>
+                      <button type="button" class="fpv-pop__status-clear" @click="setUseStatus('')">清空</button>
+                    </div>
+                    <div class="fpv-pop__status-btns">
+                      <button
+                        v-for="s in STATUS_QUICK"
+                        :key="s.value"
+                        type="button"
+                        class="fpv-pop__status-btn"
+                        :class="{ 'is-on': liveRoom?.useStatus === s.value }"
+                        @click="setUseStatus(s.value)"
+                      ><i :style="{ background: USE_COLORS[s.value] }"></i>{{ s.label }}</button>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
 
             <div class="fpv-pop__acts">
-              <el-button size="small" :type="popMode === 'edit' ? 'primary' : 'default'" @click="popMode = popMode === 'edit' ? null : 'edit'">修改信息</el-button>
-              <el-button size="small" :type="popMode === 'maint' ? 'primary' : 'default'" @click="popMode = popMode === 'maint' ? null : 'maint'">维护房间信息</el-button>
+              <el-button size="small" :type="popMode === 'edit' ? 'primary' : 'default'" @click="popMode = popMode === 'edit' ? null : 'edit'">
+                {{ popMode === 'edit' ? '返回查看' : '编辑本房间' }}
+              </el-button>
             </div>
-            <!-- 明确两个入口的分工：单间资料在这里改，批量状态标注用顶部图例 -->
-            <div class="fpv-pop__foot-hint">单间资料在这里改 · 批量状态标注请用顶部「图例」色块</div>
+            <!-- 把三层分工写清楚：单间资料 / 房间结构 / 批量状态，避免用户以为要先点顶部「编辑结构」 -->
+            <div class="fpv-pop__foot-hint">改单间资料用上面按钮 · 增删 / 合并 / 拖动房间用顶部「房间结构」· 批量状态标注用「图例」</div>
           </div>
 
           <p v-if="!roomFills.length" class="fpv-embed-empty">暂无房间数据</p>
@@ -3519,8 +3577,8 @@ function enterEdit(): void {
 }
 
 /* 点击房间弹出的详情卡：
-   标题栏即拖拽手柄；内容区独立滚动 + 整体限高，展开「修改信息 / 维护房间信息」也不会撑出画布。
-   缩略图缩到 92px 并与 8 项信息左右并排，字段改 2 列紧凑排布，整体高度从 514~657px 降到约 230~330px。 */
+   标题栏即拖拽手柄；内容区独立滚动 + 整体限高，展开「编辑本房间」表单也不会撑出画布。
+   缩略图缩到 92px 并与信息左右并排，字段改 2 列紧凑排布，整体高度从 514~657px 降到约 230~330px。 */
 .fpv-pop {
   position: absolute;
   z-index: 30;
@@ -3620,6 +3678,34 @@ function enterEdit(): void {
 .fpv-pop__info--edit .fpv-info__actions,
 .fpv-pop__form .fpv-info__actions { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 6px; margin: 2px 0 0; }
 .fpv-pop__form .fpv-edit__row--wide { grid-column: 1 / -1; }
+
+/* 合并后的单表单：基础资料 / 维护台账两节，一次保存 */
+.fpv-pop__form--all { width: 100%; }
+.fpv-pop__section {
+  grid-column: 1 / -1;
+  font-size: 11px; font-weight: 700; color: #475569; letter-spacing: .3px;
+  padding: 5px 0 4px; border-bottom: 1px solid #e8edf4;
+}
+.fpv-pop__section:not(:first-child) { margin-top: 4px; }
+
+/* 只读卡片里的业务状态快捷切换（点色块直接改这一间） */
+.fpv-pop__status {
+  grid-column: 1 / -1; padding: 5px 6px 6px;
+  background: #f8fafc; border: 1px solid #f1f5f9; border-radius: 6px;
+}
+.fpv-pop__status-hd { display: flex; align-items: center; justify-content: space-between; margin-bottom: 5px; }
+.fpv-pop__status-label { color: #6b7280; font-size: 10.5px; }
+.fpv-pop__status-clear { border: 0; background: none; color: #94a3b8; font-size: 10.5px; cursor: pointer; padding: 0 2px; }
+.fpv-pop__status-clear:hover { color: #2563eb; }
+.fpv-pop__status-btns { display: flex; flex-wrap: wrap; gap: 5px; }
+.fpv-pop__status-btn {
+  display: inline-flex; align-items: center; gap: 4px;
+  height: 24px; padding: 0 8px; font-size: 11px; color: #334155;
+  background: #fff; border: 1px solid #dbe2ea; border-radius: 6px; cursor: pointer;
+}
+.fpv-pop__status-btn i { width: 9px; height: 9px; border-radius: 50%; border: 1px solid rgba(0,0,0,.12); }
+.fpv-pop__status-btn:hover { border-color: #93c5fd; }
+.fpv-pop__status-btn.is-on { border-color: #2563eb; background: #eff6ff; color: #1d4ed8; font-weight: 700; box-shadow: 0 0 0 2px rgba(37,99,235,.1); }
 
 .fpv-pop__acts {
   flex: 0 0 auto;

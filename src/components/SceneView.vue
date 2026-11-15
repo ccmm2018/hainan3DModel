@@ -254,18 +254,24 @@
     -->
 
     <!-- 搜索框 -->
-    <div class="search-box">
+    <div class="search-box" :class="{ 'search-box--error': !!searchError }">
       <input
+        ref="searchInputRef"
         v-model="searchQuery"
         type="text"
         autocomplete="off"
         placeholder="搜索建筑名称，回车定位…"
+        :class="{ 'is-error': !!searchError }"
         @input="onSearchInput"
         @keydown.enter="onSearchEnter"
         @focus="searchFocused = true"
         @blur="searchFocused = false"
       />
-      <ul v-if="searchFocused && filteredObjects.length" class="search-dropdown">
+      <ul
+        v-if="searchFocused && filteredObjects.length"
+        class="search-dropdown"
+        :class="{ 'search-dropdown--below-guide': measureActive }"
+      >
         <li
           v-for="item in filteredObjects"
           :key="item.name"
@@ -275,6 +281,42 @@
           <span class="search-dropdown__coord">{{ item.lngLat[0].toFixed(5) }}, {{ item.lngLat[1].toFixed(5) }}</span>
         </li>
       </ul>
+      <!-- 无结果提示：紧贴搜索框、红色实底常驻，替代原来 3 秒即消失的轻提示。
+           输入过程中给中性提示；回车确认找不到时升级为错误态并播放一次入场动画。
+           测量引导条出现时整块下移（--below-guide），避免与顶部引导条叠在一起。 -->
+      <div
+        v-if="searchError || showNoResult"
+        :key="searchAlertKey"
+        class="search-alert"
+        :class="{
+          'search-alert--error': !!searchError,
+          'search-alert--below-guide': measureActive,
+        }"
+        role="alert"
+      >
+        <span class="search-alert__icon">{{ searchError ? '!' : '?' }}</span>
+        <div class="search-alert__body">
+          <strong>{{ searchError ? `未找到「${searchError}」` : '没有匹配的楼栋' }}</strong>
+          <span>{{ searchError ? '请检查名称或编号后重试，也可直接点下面的楼名定位' : '换个关键词试试，或点下面的楼名直接定位' }}</span>
+          <div v-if="searchSuggestions.length" class="search-alert__suggest">
+            <span>试试：</span>
+            <button
+              v-for="s in searchSuggestions"
+              :key="s.name"
+              type="button"
+              @mousedown.prevent="selectByName(s.name)"
+            >{{ s.label }}</button>
+          </div>
+          <button class="search-alert__reset" type="button" @mousedown.prevent="resetSearch">清空重输</button>
+        </div>
+        <button
+          v-if="searchError"
+          class="search-alert__close"
+          type="button"
+          aria-label="关闭提示"
+          @mousedown.prevent="dismissSearchAlert"
+        >×</button>
+      </div>
     </div>
 
     <!-- 悬停 tooltip：场景模式下楼栋名称已由常驻标签展示，不再重复弹名称；房间状态 / 分配 / 室内模式仍按需显示 -->
@@ -844,6 +886,12 @@ const allocResultType = ref<'success' | 'error' | null>(null);
 
 const searchQuery = ref('');
 const searchFocused = ref(false);
+// 「未找到楼栋」提示状态：searchError 为回车确认后仍未匹配到的关键词。
+// 与一次性 toast 不同，它会一直留在搜索框下方，直到输入变化 / 选中楼栋 / 手动清除。
+const searchError = ref<string | null>(null);
+const searchAlertDismissed = ref(false); // 手动关闭后不再反复弹出中性提示，直到关键词变化
+const searchAlertKey = ref(0); // 每次回车重挂载提示，重新播放一次入场动画
+const searchInputRef = ref<HTMLInputElement | null>(null);
 const objectList = ref<Array<{ name: string; lngLat: [number, number]; object: THREE.Object3D }>>([]);
 
 let scene: MapScene | null = null;
@@ -1154,6 +1202,33 @@ const filteredObjects = computed(() => {
     return a.name.localeCompare(b.name, undefined, { numeric: true });
   });
   return list.slice(0, 10);
+});
+
+/** 聚焦输入但零匹配：即时给反馈，避免下拉列表「凭空消失」让人以为搜索没反应 */
+const showNoResult = computed(() =>
+  !searchError.value &&
+  !searchAlertDismissed.value &&
+  searchFocused.value &&
+  searchQuery.value.trim().length > 0 &&
+  filteredObjects.value.length === 0,
+);
+
+/** 无结果时给 3 个真实存在、可直接点选的楼名（取自当前 GLB 楼栋列表，不使用示例数据） */
+const searchSuggestions = computed(() => {
+  const all = objectList.value.map((o) => ({ name: o.name, label: displayName(o.name) }));
+  const picks: Array<{ name: string; label: string }> = [];
+  const push = (x: { name: string; label: string }) => {
+    if (picks.length < 3 && !picks.some((p) => p.label === x.label)) picks.push(x);
+  };
+  for (const key of ['教学楼', '图书馆', '搏击馆', '食堂', '宿舍楼']) {
+    const hit = all.find((x) => x.label.includes(key));
+    if (hit) push(hit);
+  }
+  for (const x of all) {
+    if (picks.length >= 3) break;
+    if (!/^\d+(?:\.\d+)?$/.test(x.label)) push(x);
+  }
+  return picks;
 });
 
 const selectedProps = computed<BuildingProps>(() => {
@@ -1660,6 +1735,7 @@ async function confirmAllocation(payload: { requestedArea: number; applicant: st
 // 搜索
 // ---------------------------------------------------------------------------
 function selectByName(name: string) {
+  clearSearchError(); // 成功选中楼栋即撤销无结果提示
   if (viewMode.value === 'allocate') exitAllocationMode();
   if (viewMode.value === 'room') exitRoomMode();
   const found = objectList.value.find((o) => o.name === name);
@@ -1703,14 +1779,39 @@ function selectByName(name: string) {
   });
 }
 
+function clearSearchError() {
+  searchError.value = null;
+  searchAlertDismissed.value = false;
+}
+
+/** 手动关闭：连即时中性提示一起压住，否则关掉红色错误态后提示会立刻弹回来 */
+function dismissSearchAlert() {
+  searchError.value = null;
+  searchAlertDismissed.value = true;
+}
+
 function onSearchInput() {
-  // 由 computed 自动过滤
+  // 由 computed 自动过滤；一改动关键词就撤销上一次的错误态 / 关闭状态
+  clearSearchError();
+}
+
+function resetSearch() {
+  searchQuery.value = '';
+  clearSearchError();
+  searchFocused.value = true;
+  searchInputRef.value?.focus();
 }
 
 function onSearchEnter() {
   const q = searchQuery.value.trim();
+  clearSearchError(); // 本次提交重新判定，撤销上一次的错误 / 关闭状态
   if (!filteredObjects.value.length) {
-    if (q) ElMessage.warning(`未找到楼栋「${q}」，请检查名称或编号是否正确`);
+    // 原来只弹一个 3 秒即消失的轻提示，白色底图上很容易被忽略。
+    // 现在改为：搜索框转红色错误态 + 下方红色实底常驻提示（带推荐楼名，可点可关闭）。
+    if (q) {
+      searchError.value = q;
+      searchAlertKey.value += 1;
+    }
     return;
   }
   // 优先精确匹配输入；否则取下拉列表首项（已按精确 / 前缀排序）
@@ -2295,6 +2396,106 @@ onBeforeUnmount(() => {
 }
 .search-box input:focus { border-color: #38bdf8; }
 .search-box input::placeholder { color: #6b7890; }
+/* 未找到楼栋：输入框本身转成红色错误态，白色底图上也一眼可见 */
+.search-box input.is-error,
+.search-box input.is-error:focus {
+  border-color: #fb7185;
+  background: rgba(74, 16, 28, 0.97);
+  color: #fff1f2;
+  box-shadow: 0 0 0 3px rgba(248, 113, 113, 0.24);
+}
+
+/* 搜索无结果提示：紧贴搜索框、实底常驻，替代原来 3 秒即消失的轻提示 */
+.search-alert {
+  position: absolute;
+  z-index: 175; /* 高于测量引导条(165)，两卡同屏时提示不被压住 */
+  top: 44px;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 11px 10px 10px 12px;
+  border: 1px solid #f59e0b;
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.98);
+  box-shadow: 0 14px 36px rgba(2, 6, 23, 0.45);
+  color: #eaf2ff;
+  animation: search-alert-in 0.2s ease-out;
+}
+.search-alert--error {
+  border: 1px solid #fb7185;
+  border-top: 3px solid #fb7185;
+  background: #4a101c;
+  box-shadow: 0 0 0 3px rgba(248, 113, 113, 0.18), 0 16px 40px rgba(2, 6, 23, 0.5);
+  animation: search-alert-in 0.2s ease-out, search-alert-glow 1s ease-out 1;
+}
+/* 测量引导条固定在 y64、高约 82px；两卡同屏时提示/下拉整体下移，留约 18px 间隙 */
+.search-alert--below-guide,
+.search-dropdown--below-guide { top: 148px; }
+.search-alert__icon {
+  flex: 0 0 22px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: #f59e0b;
+  color: #0b1220;
+  font-size: 14px;
+  font-weight: 800;
+  line-height: 22px;
+  text-align: center;
+}
+.search-alert--error .search-alert__icon { background: #fb7185; color: #3b0712; }
+.search-alert__body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.search-alert__body strong { font-size: 13px; font-weight: 700; color: #fff1f2; }
+.search-alert__body > span { font-size: 11.5px; line-height: 1.5; color: #fecaca; }
+.search-alert:not(.search-alert--error) .search-alert__body strong { color: #eaf2ff; }
+.search-alert:not(.search-alert--error) .search-alert__body > span { color: #b6c4da; }
+.search-alert__suggest { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; margin-top: 5px; }
+.search-alert__suggest > span { font-size: 11px; color: #fda4af; }
+.search-alert__suggest button {
+  padding: 3px 8px;
+  border: 1px solid rgba(251, 113, 133, 0.55);
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.55);
+  color: #fff1f2;
+  font-size: 11px;
+  cursor: pointer;
+}
+.search-alert__suggest button:hover { background: #fb7185; border-color: #fb7185; color: #3b0712; }
+.search-alert__reset {
+  align-self: flex-start;
+  margin-top: 6px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #7dd3fc;
+  font-size: 11px;
+  text-decoration: underline;
+  cursor: pointer;
+}
+.search-alert__reset:hover { color: #bae6fd; }
+.search-alert__close {
+  flex: 0 0 20px;
+  width: 20px;
+  height: 20px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #fecaca;
+  font-size: 18px;
+  line-height: 18px;
+  cursor: pointer;
+}
+.search-alert__close:hover { background: rgba(251, 113, 133, 0.25); color: #ffffff; }
+@keyframes search-alert-in {
+  from { opacity: 0; transform: translateY(-7px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes search-alert-glow {
+  from { box-shadow: 0 0 0 3px rgba(248, 113, 113, 0.6), 0 16px 40px rgba(2, 6, 23, 0.5); }
+  to { box-shadow: 0 0 0 3px rgba(248, 113, 113, 0.18), 0 16px 40px rgba(2, 6, 23, 0.5); }
+}
 
 .search-dropdown {
   position: absolute;

@@ -319,6 +319,7 @@ function onStageMouseUp(e?: MouseEvent): void {
 function onStageMouseLeave(): void {
   isDragging.value = false;
 }
+let stageObserver: ResizeObserver | null = null;
 onMounted(() => {
   window.addEventListener('mousemove', onStageMouseMove);
   window.addEventListener('mouseup', onStageMouseUp);
@@ -327,6 +328,10 @@ onMounted(() => {
 onBeforeUnmount(() => {
   window.removeEventListener('mousemove', onStageMouseMove);
   window.removeEventListener('mouseup', onStageMouseUp);
+  // 弹窗拖拽监听挂到 window 上，卸载时一并清理
+  window.removeEventListener('pointermove', onPopDragMove);
+  window.removeEventListener('pointerup', onPopDragEnd);
+  stageObserver?.disconnect();
 });
 
 const svgStyle = computed(() => ({
@@ -1815,16 +1820,20 @@ const popupPos = computed(() => {
 });
 
 /** 把弹窗摆到「锚点向左上展开 + 夹取进舞台」的位置，并写回 popupBase（未变换坐标）。
- *  在弹窗渲染后调用（nextTick）以拿到真实尺寸。 */
-function fitPopupInStage(): void {
-  const main = mainRef.value ?? stageRef.value;
+ *  在弹窗渲染后调用（nextTick）以拿到真实尺寸。
+ *  reposition=false 时只刷新尺寸（切换子面板 / 舞台缩放），保留用户手动拖动后的位置。 */
+function fitPopupInStage(reposition = true): void {
+  // 弹窗是 .fpv-stage 的子元素，夹取基准必须用舞台自身尺寸。
+  // 旧实现用 .fpv-main（含右侧栏，约 1156px 宽），维护面板展开后弹窗会被算到画布外（实测 x=-95）。
+  const stage = stageRef.value ?? mainRef.value;
   const el = popupEl.value;
-  if (!main || !el) return;
-  const r = main.getBoundingClientRect();
+  if (!stage || !el) return;
+  const r = stage.getBoundingClientRect();
   const pr = el.getBoundingClientRect();
   if (pr.width <= 0 || pr.height <= 0) return;
   popupSize.value = { w: pr.width, h: pr.height };
   stageSize.value = { w: r.width, h: r.height };
+  if (!reposition) return;
   const pad = 8;
   const a = popupAnchor.value;
   // 期望：弹窗右下角在点击点左上方 (10,10)，整体向左上展开
@@ -1834,6 +1843,54 @@ function fitPopupInStage(): void {
   sy = Math.min(Math.max(sy, pad), Math.max(pad, r.height - pr.height - pad));
   // 转回「未变换」基准坐标存储，使 popupPos 计算属性可随 pan/zoom 实时跟随
   popupBase.value = { x: (sx - panX.value) / zoom.value, y: (sy - panY.value) / zoom.value };
+}
+
+/** 标题栏拖拽：以「未变换基准坐标」记录位移，仍由 popupPos 统一叠加 pan/zoom 并夹取进舞台，
+ *  所以拖动之后平移 / 缩放 2.5D 图层，弹窗依旧跟随房间一起移动。 */
+const popDragging = ref(false);
+let popDragStart = { cx: 0, cy: 0, sx: 0, sy: 0 };
+
+function onPopDragStart(e: PointerEvent): void {
+  // 关闭按钮不触发拖拽
+  if (e.button !== 0 || (e.target as HTMLElement | null)?.closest('.fpv-pop__x')) return;
+  const stage = stageRef.value ?? mainRef.value;
+  if (!stage || !popupEl.value) return;
+  // 拖弹窗时明确结束画布平移状态：window 上的画布 mousemove 监听否则会同时改 panX/panY，
+  // 让弹窗位移与图层平移互相抵消（表现为「拖不动 / 拖偏」）。
+  isDragging.value = false;
+  dragKind.value = null;
+  const r = stage.getBoundingClientRect();
+  const pr = popupEl.value.getBoundingClientRect();
+  stageSize.value = { w: r.width, h: r.height };
+  popupSize.value = { w: pr.width, h: pr.height };
+  // 以「当前渲染位置」为起点：即使上一次被边界夹取过，反向拖动也不会出现拖不动的死区
+  popDragStart = { cx: e.clientX, cy: e.clientY, sx: popupPos.value.x, sy: popupPos.value.y };
+  popDragging.value = true;
+  window.addEventListener('pointermove', onPopDragMove);
+  window.addEventListener('pointerup', onPopDragEnd);
+  e.preventDefault(); // 避免拖动时选中标题文字
+}
+
+function onPopDragMove(e: PointerEvent): void {
+  if (!popDragging.value) return;
+  const pad = 8;
+  const maxX = Math.max(pad, stageSize.value.w - popupSize.value.w - pad);
+  const maxY = Math.max(pad, stageSize.value.h - popupSize.value.h - pad);
+  const x = Math.min(Math.max(popDragStart.sx + e.clientX - popDragStart.cx, pad), maxX);
+  const y = Math.min(Math.max(popDragStart.sy + e.clientY - popDragStart.cy, pad), maxY);
+  popupBase.value = { x: (x - panX.value) / zoom.value, y: (y - panY.value) / zoom.value };
+}
+
+function onPopDragEnd(): void {
+  popDragging.value = false;
+  window.removeEventListener('pointermove', onPopDragMove);
+  window.removeEventListener('pointerup', onPopDragEnd);
+}
+
+/** 双击标题：回到点击房间旁的默认位置 */
+function resetPopPosition(): void {
+  popDragging.value = false;
+  nextTick(() => fitPopupInStage(true));
 }
 
 /** 选中房间缩略图：用房间自身轮廓生成一张「对应的图片」（无外部图片数据时也能稳定展示） */
@@ -1902,7 +1959,8 @@ watch(popMode, (m) => {
     editRoom.useArea = String(r.useArea);
     editRoom.buildArea = String(r.buildArea);
   }
-  nextTick(fitPopupInStage);
+  // 只刷新尺寸、不重定位：用户手动拖过的位置在切换子面板时保持不变
+  nextTick(() => fitPopupInStage(false));
 });
 
 function onSelect(room: RoomLike, ev?: MouseEvent): void {
@@ -1925,11 +1983,12 @@ function onSelect(room: RoomLike, ev?: MouseEvent): void {
   selectedRoom.value = selectedId.value ? room : null;
   if (!selectedId.value) return;
   popMode.value = null;
-  const stage = mainRef.value ?? stageRef.value;
+  // 弹窗相对 .fpv-stage 定位，锚点也必须以舞台为基准（旧实现用 .fpv-main 会偏出画布）
+  const stage = stageRef.value ?? mainRef.value;
   if (!stage) return;
   const r = stage.getBoundingClientRect();
   if (ev) {
-    // 记录点击点相对 .fpv-main 的坐标作为锚点；弹窗将向左上展开（点击点落在弹窗右下角附近）。
+    // 记录点击点相对 .fpv-stage 的坐标作为锚点；弹窗将向左上展开（点击点落在弹窗右下角附近）。
     popupAnchor.value = { x: ev.clientX - r.left, y: ev.clientY - r.top };
   } else {
     // 由房间列表等无坐标来源触发时，以舞台中心为锚，居中显示
@@ -2281,7 +2340,7 @@ function doAddRoom(): void {
     selectedId.value = last.id;
     popMode.value = 'edit';
     // 弹窗定位到画布中央，便于立刻填写
-    const stage = mainRef.value ?? stageRef.value;
+    const stage = stageRef.value ?? mainRef.value;
     if (stage) {
       const r = stage.getBoundingClientRect();
       popupAnchor.value = { x: r.width / 2, y: r.height / 2 };
@@ -2493,6 +2552,17 @@ function maybeShowGuide(): void {
 }
 watch(visible, (v) => {
   if (v && !props.embedded) maybeShowGuide();
+  // 全屏查看器打开后才挂载 stage；监听其尺寸变化，窗口缩放后重新夹取弹窗位置（不覆盖用户拖动位置）
+  stageObserver?.disconnect();
+  stageObserver = null;
+  if (v && typeof ResizeObserver !== 'undefined') {
+    nextTick(() => {
+      const stage = stageRef.value;
+      if (!stage) return;
+      stageObserver = new ResizeObserver(() => fitPopupInStage(false));
+      stageObserver.observe(stage);
+    });
+  }
 });
 
 /** 框选新增时的草稿矩形（project 输出空间） */
@@ -2687,68 +2757,87 @@ function enterEdit(): void {
             </g>
           </svg>
 
+          <!-- 房间详情卡：标题栏即拖拽手柄；内容区独立滚动 + 整体限高，
+               保证「修改信息 / 维护房间信息」展开后也不会撑出画布。 -->
           <div
             v-if="liveRoom && (!editMode || popMode)"
             ref="popupEl"
             class="fpv-pop"
+            :class="{
+              'fpv-pop--form': popMode !== null,
+              'fpv-pop--maint': popMode === 'maint',
+              'fpv-pop--dragging': popDragging,
+            }"
             :style="{ left: popupPos.x + 'px', top: popupPos.y + 'px' }"
             @mousedown.stop
             @mouseup.stop
           >
-            <div class="fpv-pop__hd">
+            <div
+              class="fpv-pop__hd"
+              title="按住标题可拖动，双击回到房间旁"
+              @pointerdown="onPopDragStart"
+              @dblclick="resetPopPosition"
+            >
+              <span class="fpv-pop__grip" aria-hidden="true"></span>
               <span class="fpv-pop__title">{{ displayTitle }}</span>
               <button class="fpv-pop__x" type="button" @click="closePop">×</button>
             </div>
-            <div v-if="roomThumb" class="fpv-pop__img">
-              <svg :viewBox="roomThumb.viewBox" preserveAspectRatio="xMidYMid meet">
-                <polygon :points="roomThumb.points" :fill="roomThumb.fill" :stroke="darken(roomThumb.fill, 0.45)" stroke-width="2" />
-              </svg>
-              <span class="fpv-pop__img-tag">房间缩略图</span>
-            </div>
-            <div v-else class="fpv-pop__img fpv-pop__img--empty">暂无图形</div>
 
-            <!-- 修改信息：直接在上方信息区就地编辑，不再重复一份表单 -->
-            <div v-if="popMode === 'edit'" class="fpv-pop__info fpv-pop__info--edit">
-              <div class="fpv-edit__row"><label>房间号</label><el-input v-model="editRoom.code" size="small" /></div>
-              <div class="fpv-edit__row"><label>名称</label><el-input v-model="editRoom.name" size="small" /></div>
-              <div class="fpv-edit__row"><label>部门</label><el-input v-model="editRoom.dept" size="small" /></div>
-              <div class="fpv-edit__row"><label>用途</label><el-input v-model="editRoom.usePurpose" size="small" /></div>
-              <div class="fpv-edit__row"><label>使用面积</label><el-input v-model="editRoom.useArea" size="small" type="number" /></div>
-              <div class="fpv-edit__row"><label>建筑面积</label><el-input v-model="editRoom.buildArea" size="small" type="number" /></div>
-              <div class="fpv-info__actions">
-                <el-button type="primary" size="small" @click="saveEdit">保存</el-button>
-                <el-button size="small" @click="popMode = null">返回</el-button>
-              </div>
-              <div class="fpv-info__actions">
-                <el-button size="small" @click="setUseStatus('occupied')">使用中</el-button>
-                <el-button size="small" @click="setUseStatus('noaccess')">无权限</el-button>
-                <el-button size="small" @click="setUseStatus('vacant')">空置</el-button>
-                <el-button size="small" text @click="setUseStatus('')">清空</el-button>
-              </div>
-              <div class="fpv-info__actions">
-                <el-button size="small" type="danger" plain @click="hideRoom">隐藏此房间</el-button>
-              </div>
-            </div>
+            <div class="fpv-pop__content">
+              <div v-if="popMode !== 'maint'" class="fpv-pop__body">
+                <div v-if="roomThumb" class="fpv-pop__img">
+                  <svg :viewBox="roomThumb.viewBox" preserveAspectRatio="xMidYMid meet">
+                    <polygon :points="roomThumb.points" :fill="roomThumb.fill" :stroke="darken(roomThumb.fill, 0.45)" stroke-width="2" />
+                  </svg>
+                  <span class="fpv-pop__img-tag">缩略图</span>
+                </div>
+                <div v-else class="fpv-pop__img fpv-pop__img--empty">暂无图形</div>
 
-            <!-- 只读信息展示 -->
-            <div v-else class="fpv-pop__info">
-              <div v-for="p in roomInfoPairs" :key="p.label" class="fpv-pop__cell">
-                <span>{{ p.label }}</span><b>{{ p.value }}</b>
+                <!-- 修改信息：就地编辑，2 列紧凑排布 -->
+                <div v-if="popMode === 'edit'" class="fpv-pop__info fpv-pop__info--edit">
+                  <div class="fpv-edit__row"><label>房间号</label><el-input v-model="editRoom.code" size="small" /></div>
+                  <div class="fpv-edit__row"><label>名称</label><el-input v-model="editRoom.name" size="small" /></div>
+                  <div class="fpv-edit__row"><label>部门</label><el-input v-model="editRoom.dept" size="small" /></div>
+                  <div class="fpv-edit__row"><label>用途</label><el-input v-model="editRoom.usePurpose" size="small" /></div>
+                  <div class="fpv-edit__row"><label>使用面积</label><el-input v-model="editRoom.useArea" size="small" type="number" /></div>
+                  <div class="fpv-edit__row"><label>建筑面积</label><el-input v-model="editRoom.buildArea" size="small" type="number" /></div>
+                  <div class="fpv-info__actions">
+                    <el-button type="primary" size="small" @click="saveEdit">保存</el-button>
+                    <el-button size="small" @click="popMode = null">返回</el-button>
+                  </div>
+                  <div class="fpv-info__actions">
+                    <el-button size="small" @click="setUseStatus('occupied')">使用中</el-button>
+                    <el-button size="small" @click="setUseStatus('noaccess')">无权限</el-button>
+                    <el-button size="small" @click="setUseStatus('vacant')">空置</el-button>
+                    <el-button size="small" text @click="setUseStatus('')">清空</el-button>
+                  </div>
+                  <div class="fpv-info__actions">
+                    <el-button size="small" type="danger" plain @click="hideRoom">隐藏此房间</el-button>
+                  </div>
+                </div>
+
+                <!-- 只读信息展示 -->
+                <div v-else class="fpv-pop__info">
+                  <div v-for="p in roomInfoPairs" :key="p.label" class="fpv-pop__cell">
+                    <span>{{ p.label }}</span><b>{{ p.value }}</b>
+                  </div>
+                </div>
+              </div>
+
+              <div v-if="popMode === 'maint'" class="fpv-pop__form">
+                <div class="fpv-edit__row"><label>责任部门</label><el-input v-model="maintForm.responsibleDept" size="small" /></div>
+                <div class="fpv-edit__row"><label>最近巡检</label><el-input v-model="maintForm.lastInspect" size="small" placeholder="yyyy-mm-dd" /></div>
+                <div class="fpv-edit__row fpv-edit__row--wide"><label>备注</label><el-input v-model="maintForm.note" size="small" type="textarea" :rows="2" /></div>
+                <div class="fpv-info__actions">
+                  <el-button type="primary" size="small" @click="saveMaint">保存维护信息</el-button>
+                  <el-button size="small" @click="popMode = null">返回</el-button>
+                </div>
               </div>
             </div>
 
             <div class="fpv-pop__acts">
               <el-button size="small" :type="popMode === 'edit' ? 'primary' : 'default'" @click="popMode = popMode === 'edit' ? null : 'edit'">修改信息</el-button>
               <el-button size="small" :type="popMode === 'maint' ? 'primary' : 'default'" @click="popMode = popMode === 'maint' ? null : 'maint'">维护房间信息</el-button>
-            </div>
-            <div v-if="popMode === 'maint'" class="fpv-pop__form">
-              <div class="fpv-edit__row"><label>责任部门</label><el-input v-model="maintForm.responsibleDept" size="small" /></div>
-              <div class="fpv-edit__row"><label>最近巡检</label><el-input v-model="maintForm.lastInspect" size="small" placeholder="yyyy-mm-dd" /></div>
-              <div class="fpv-edit__row"><label>备注</label><el-input v-model="maintForm.note" size="small" type="textarea" :rows="2" /></div>
-              <div class="fpv-info__actions">
-                <el-button type="primary" size="small" @click="saveMaint">保存维护信息</el-button>
-                <el-button size="small" @click="popMode = null">返回</el-button>
-              </div>
             </div>
           </div>
 
@@ -3230,40 +3319,120 @@ function enterEdit(): void {
   pointer-events: none;
 }
 
-/* 点击房间弹出的小卡片（替代原右侧房间信息面板） */
+/* 点击房间弹出的详情卡：
+   标题栏即拖拽手柄；内容区独立滚动 + 整体限高，展开「修改信息 / 维护房间信息」也不会撑出画布。
+   缩略图缩到 92px 并与 8 项信息左右并排，字段改 2 列紧凑排布，整体高度从 514~657px 降到约 230~330px。 */
 .fpv-pop {
   position: absolute;
   z-index: 30;
-  width: 340px;
+  width: 356px;
+  max-width: calc(100% - 16px);
+  max-height: min(560px, calc(100% - 16px));
+  display: flex;
+  flex-direction: column;
   background: #fff;
   border: 1px solid #e5e7eb;
   border-radius: 12px;
   box-shadow: 0 10px 30px rgba(15, 23, 42, .18);
-  padding: 14px 16px;
-  font-size: 15px;
+  font-size: 13px;
   color: #111827;
+  overflow: hidden;
 }
-.fpv-pop__hd { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
-.fpv-pop__title { font-size: 18px; font-weight: 700; color: #111827; }
-.fpv-pop__x { border: 0; background: transparent; font-size: 22px; line-height: 1; color: #9ca3af; cursor: pointer; padding: 0 2px; }
+.fpv-pop--dragging { box-shadow: 0 18px 46px rgba(15, 23, 42, .3); }
+.fpv-pop__hd {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid #eef0f3;
+  background: #f8fafc;
+  cursor: move;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.fpv-pop__grip {
+  flex: 0 0 10px;
+  width: 10px;
+  height: 14px;
+  background-image: radial-gradient(#94a3b8 1.1px, transparent 1.1px);
+  background-size: 5px 5px;
+  opacity: .85;
+}
+.fpv-pop__title {
+  flex: 1;
+  min-width: 0;
+  font-size: 14px;
+  font-weight: 700;
+  color: #111827;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fpv-pop__x { border: 0; background: transparent; font-size: 20px; line-height: 1; color: #9ca3af; cursor: pointer; padding: 0 2px; }
 .fpv-pop__x:hover { color: #374151; }
-.fpv-pop__img { position: relative; width: 100%; height: 168px; margin-bottom: 12px; background: #f8fafc; border: 1px solid #eef0f3; border-radius: 8px; overflow: hidden; }
+.fpv-pop__content {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 10px;
+}
+.fpv-pop__body { display: flex; gap: 10px; align-items: flex-start; }
+.fpv-pop__img {
+  position: relative;
+  flex: 0 0 92px;
+  width: 92px;
+  height: 92px;
+  background: #f8fafc;
+  border: 1px solid #eef0f3;
+  border-radius: 8px;
+  overflow: hidden;
+}
 .fpv-pop__img svg { width: 100%; height: 100%; display: block; }
-.fpv-pop__img-tag { position: absolute; left: 6px; bottom: 4px; font-size: 12px; color: #9ca3af; background: rgba(255,255,255,.75); padding: 0 4px; border-radius: 4px; }
-.fpv-pop__img--empty { display: flex; align-items: center; justify-content: center; color: #9ca3af; font-size: 14px; }
-.fpv-pop__info { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 14px; margin-bottom: 10px; }
-/* 修改信息：就地编辑时改为单列，避免与 2 列网格冲突 */
-.fpv-pop__info--edit { display: flex; flex-direction: column; gap: 8px; }
-.fpv-pop__info--edit .fpv-info__actions { margin-top: 2px; }
-.fpv-pop__cell { display: flex; flex-direction: column; gap: 2px; padding: 6px 8px; background: #f8fafc; border-radius: 6px; }
-.fpv-pop__cell span { color: #6b7280; font-size: 13px; }
-.fpv-pop__cell b { font-weight: 600; color: #111827; font-size: 16px; }
-.fpv-pop__acts { display: flex; gap: 8px; margin-bottom: 6px; }
-.fpv-pop__form { border-top: 1px dashed #eef0f3; padding-top: 10px; margin-top: 6px; }
-/* 弹窗内按钮 / 输入框文字同步放大 */
-.fpv-pop .el-button { font-size: 14px; padding: 8px 14px; }
+.fpv-pop__img-tag { position: absolute; left: 4px; bottom: 3px; font-size: 10px; color: #9ca3af; background: rgba(255,255,255,.8); padding: 0 3px; border-radius: 3px; }
+.fpv-pop__img--empty { display: flex; align-items: center; justify-content: center; color: #9ca3af; font-size: 11px; text-align: center; }
+/* 表单态隐藏缩略图，把整行宽度让给字段 */
+.fpv-pop--form .fpv-pop__img { display: none; }
+
+.fpv-pop__info { flex: 1; min-width: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 5px; }
+.fpv-pop__cell {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  padding: 4px 6px;
+  background: #f8fafc;
+  border: 1px solid #f1f5f9;
+  border-radius: 6px;
+}
+.fpv-pop__cell span { color: #6b7280; font-size: 10.5px; line-height: 1.3; }
+.fpv-pop__cell b { font-weight: 600; color: #111827; font-size: 12px; line-height: 1.35; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.fpv-pop__info--edit,
+.fpv-pop__form { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 8px; }
+/* 覆盖全局 .fpv-edit__row 的 align-items:center，否则改成竖排后标签会飘在列中间 */
+.fpv-pop__info--edit .fpv-edit__row,
+.fpv-pop__form .fpv-edit__row { display: flex; flex-direction: column; align-items: stretch; gap: 2px; min-width: 0; }
+.fpv-pop__info--edit .fpv-edit__row label,
+.fpv-pop__form .fpv-edit__row label { width: auto; font-size: 11px; color: #6b7280; line-height: 1.2; }
+.fpv-pop__info--edit .fpv-edit__row :deep(.el-input),
+.fpv-pop__form .fpv-edit__row :deep(.el-input) { flex: 0 0 auto; width: 100%; }
+.fpv-pop__info--edit .fpv-info__actions,
+.fpv-pop__form .fpv-info__actions { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 6px; margin: 2px 0 0; }
+.fpv-pop__form .fpv-edit__row--wide { grid-column: 1 / -1; }
+
+.fpv-pop__acts {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 8px;
+  padding: 8px 10px;
+  border-top: 1px solid #eef0f3;
+  background: #fff;
+}
+.fpv-pop__acts .el-button { flex: 1; margin: 0; }
+.fpv-pop .el-button { font-size: 12px; padding: 5px 10px; }
 .fpv-pop :deep(.el-input__inner),
-.fpv-pop :deep(.el-textarea__inner) { font-size: 14px; }
-.fpv-pop .fpv-edit__row label { font-size: 14px; width: 64px; }
+.fpv-pop :deep(.el-textarea__inner) { font-size: 12px; }
 .fpv-tools__row--embed { margin-left: 10px; min-width: 160px; }
 </style>

@@ -1013,13 +1013,22 @@ const synthOverrides = reactive<Record<string, Partial<RoomLike>>>({});
 
 // ---- 网格单元定位模型：浏览与编辑共用同一套 6×2 网格，保证「编辑前后画面完全一致」 ----
 const GRID_ROWS = 2;
+/** 6×2 示意网格最多容纳的房间数：超过后 idxToSpan 会越界（没有对应的排带），所有新增 / 拆分前都要校验。 */
+const MAX_GRID_ROOMS = GRID_ROWS * ROOM_COLS;
 
-/** 每个房间在 6×2 网格中占据的单元范围（bi=排 0/1，c=列 0..5）；浏览/编辑/渲染全部以此为准。 */
-const gridPos = reactive<Record<string, { bi0: number; bi1: number; c0: number; c1: number }>>({});
+/** 每个房间在 6×2 网格中占据的单元范围（bi=排 0/1，c=列 0..5）；浏览/编辑/渲染全部以此为准。
+ *  rect 为「拆分出来的子房间」的精确世界坐标矩形 [x0,y0,x1,y1]：有它时优先于网格单元，
+ *  这样单格房间也能被切成 2~4 间，且可对子房间继续拆分。 */
+type GridSpan = {
+  bi0: number; bi1: number; c0: number; c1: number;
+  rect?: [number, number, number, number];
+};
+const gridPos = reactive<Record<string, GridSpan>>({});
 
-function idxToSpan(idx: number): { bi0: number; bi1: number; c0: number; c1: number } {
-  const bi = Math.floor(idx / ROOM_COLS);
-  const c = idx % ROOM_COLS;
+function idxToSpan(idx: number): GridSpan {
+  // 越界兜底：房间数超过 12 时不产生 bi>=2 的无效排（spanToRect 里 bands[2] 会 undefined 崩渲染）
+  const bi = Math.min(GRID_ROWS - 1, Math.floor(idx / ROOM_COLS));
+  const c = Math.min(ROOM_COLS - 1, idx % ROOM_COLS);
   return { bi0: bi, bi1: bi, c0: c, c1: c };
 }
 
@@ -1077,8 +1086,10 @@ function nearestCell(fx: number, fy: number): { bi: number; c: number } | null {
   return { bi: best.bi, c: best.c };
 }
 
-/** 网格单元 → 楼层世界坐标矩形 [x0,y0,x1,y1]（与上/下排 bands 对齐） */
-function spanToRect(s: { bi0: number; bi1: number; c0: number; c1: number }): [number, number, number, number] {
+/** 网格单元 → 楼层世界坐标矩形 [x0,y0,x1,y1]（与上/下排 bands 对齐）。
+ *  拆分出的子房间带 rect，直接返回精确子矩形，不再受 6×2 整数格限制。 */
+function spanToRect(s: GridSpan): [number, number, number, number] {
+  if (s.rect) return s.rect;
   const g = gridGeom.value;
   if (!g) return [0, 0, 0, 0];
   const bands = [
@@ -1148,6 +1159,8 @@ const roomBlocks = computed<RoomBlock[]>(() => {
     // 示意预览）忽略 gridPos、永远按 idxToSpan(idx) 渲染，导致编辑模式下提示「拖动房间可换位置」
     // 而实际拖动毫无效果（applySpan 改了 gridPos，画面却纹丝不动）。
     const span = gridPos[room.id] ?? idxToSpan(idx);
+    // 拆出来的子房间用精确 rect 定位，格子较窄：文字只留房号并缩小，避免糊成一团（完整资料在详情卡里看）
+    const isSub = !!span.rect;
     const [wx0, wy0, wx1, wy1] = spanToRect(span);
     const t0 = P(wx0, wy0, zTop);
     const t1 = P(wx1, wy0, zTop);
@@ -1157,9 +1170,9 @@ const roomBlocks = computed<RoomBlock[]>(() => {
     const cx = (t0[0] + t1[0] + t2[0] + t3[0]) / 4;
     const cy = (t0[1] + t1[1] + t2[1] + t3[1]) / 4;
     const roomHpx = Math.abs(t0[1] - t3[1]);
-    const gap = Math.max(roomHpx * 0.21, 8);
-    const sizeNumber = Math.min(Math.max(gap * 0.95, 10), 16);
-    const sizeOther = Math.min(Math.max(gap * 0.62, 7.5), 11);
+    const gap = Math.max(roomHpx * 0.21, 8) * (isSub ? 0.78 : 1);
+    const sizeNumber = Math.min(Math.max(gap * 0.95, 10), 16) * (isSub ? 0.82 : 1);
+    const sizeOther = Math.min(Math.max(gap * 0.62, 7.5), 11) * (isSub ? 0.82 : 1);
     const top = cy - gap * 1.5;
 
     // 顶面填充色：跟随「着色」模式（业务=使用状态 / 审图=审图状态 / 部门 / 用途），使状态修改即时体现在图层上
@@ -1168,9 +1181,10 @@ const roomBlocks = computed<RoomBlock[]>(() => {
     // 部门 / 用途模式一律浅底深字；其余模式按填充亮度自动取深/白字
     const textColor = isLight(fill) ? '#1b2733' : '#ffffff';
     const number = room.number || room.code || `房${idx + 1}`;
-    const name = cleanName(room.name);
-    const dept = room.dept || '—';
-    const area = `${room.useArea > 0 ? room.useArea.toFixed(2) : '—'}㎡ / ${room.buildArea > 0 ? room.buildArea.toFixed(2) : '—'}㎡`;
+    // 子房间格子窄，只显示房号（如 101-1），完整资料点详情卡查看
+    const name = isSub ? '' : cleanName(room.name);
+    const dept = isSub ? '' : room.dept || '—';
+    const area = isSub ? '' : `${room.useArea > 0 ? room.useArea.toFixed(2) : '—'}㎡ / ${room.buildArea > 0 ? room.buildArea.toFixed(2) : '—'}㎡`;
 
     // 前缘（底部）色带：沿顶面「朝观察者前缘」(t3→t2) 画一条细带。
     // 取前缘中点相对房间中心的内法线方向，向内推 thk 像素，得到一条贴边的细色带（画在顶面之下，仅露出贴边部分）。
@@ -1197,7 +1211,8 @@ const roomBlocks = computed<RoomBlock[]>(() => {
       sidePoints: '',
       topFill: fill,
       sideFill: NORMAL_SIDE,
-      stroke: useStyle?.stroke ?? NORMAL_STROKE,
+      // 拆出的子房彼此同色相邻，描边加深一档才看得出分界（仍保留业务状态色相）
+      stroke: isSub ? darken(useStyle?.stroke ?? NORMAL_STROKE, 0.42) : (useStyle?.stroke ?? NORMAL_STROKE),
       dash: useStyle?.dash,
       selPoints: insetQuadPoints([t0, t1, t2, t3], 1),
       cx,
@@ -1755,7 +1770,10 @@ const roomFills = computed<RoomFill[]>(() => {
     // 顶面填充色：跟随「着色」模式（业务=使用状态 / 审图=审图状态 / 部门 / 用途），使状态修改即时体现在图层上
     const fill = roomFill(room);
     const useStyle = useStrokeStyle(room);
-    const baseLines = buildLabelLines(room, fill).map((ln, i) =>
+    // 拆出的子房立体盒子很窄：只留房号，避免 4 行文字糊成一团
+    const isSubFill = !!gridPos[room.id]?.rect;
+    const labelLines = isSubFill ? buildLabelLines(room, fill).slice(0, 1) : buildLabelLines(room, fill);
+    const baseLines = labelLines.map((ln, i) =>
       i === 0 ? { ...ln, size: sizeNumber } : { ...ln, size: sizeOther },
     );
     const startY = c[1] - ((baseLines.length - 1) * gap) / 2;
@@ -1765,7 +1783,7 @@ const roomFills = computed<RoomFill[]>(() => {
       room,
       points,
       fill,
-      stroke: useStyle?.stroke ?? NORMAL_STROKE,
+      stroke: isSubFill ? darken(useStyle?.stroke ?? NORMAL_STROKE, 0.42) : (useStyle?.stroke ?? NORMAL_STROKE),
       dash: useStyle?.dash,
       dimmed: room.selected === false,
       sides,
@@ -2433,6 +2451,8 @@ function onRoomDown(room: RoomLike, ev: MouseEvent): void {
   if (armedStatus.value !== null) applyUseStatusToRoom(room, armedStatus.value);
   onSelectRoom(room, ev);
   if (activeTool.value !== 'select') return;
+  // 拆分出的子房用精确 rect 定位，拖动会跳回整格；这类房间先只允许选中 / 编辑资料 / 继续拆分
+  if (gridPos[room.id]?.rect) return;
   dragKind.value = 'move';
   dragRoomId.value = room.id;
   dragStartSpan = { ...(gridPos[room.id] ?? idxToSpan(0)) };
@@ -2465,8 +2485,8 @@ function findFreeCell(startBi: number, startC: number): { bi: number; c: number 
   return null;
 }
 
-/** 是否还能在 6×2 网格中新增房间：有空闲格才允许，否则工具栏「新增房间」按钮置灰 */
-const canAddRoom = computed(() => occupiedCells().size < GRID_ROWS * ROOM_COLS);
+/** 是否还能在 6×2 网格中新增房间：有空闲格、且房间总数没超过示意网格上限（拆分也会增加房间数） */
+const canAddRoom = computed(() => displayedRooms.value.length < MAX_GRID_ROOMS && occupiedCells().size < MAX_GRID_ROOMS);
 
 /** 新增房间：在 6×2 网格的第一个空闲格新建一间房，并立即选中+打开信息表单供填写。
  *  相比「框选拖矩形」，按钮方式对普通用户更直观，也不会误触发 SVG 文字选中。 */
@@ -2542,6 +2562,88 @@ function doMerge(): void {
   }
 }
 
+// ---- 拆分房间：选中 1 间 → 选份数(2/3/4)与排列 → 沿较长方向等分成 N 间 ----
+const splitVisible = ref(false);
+const splitTargetId = ref<string | null>(null);
+const splitParts = ref(2);
+const splitLayout = ref<'side' | 'stack'>('side');
+/** 拆分份数上限。拆出的子房用精确 rect 定位、共用原房间的整格占位，并不新增网格格子，
+ *  因此不受 6×2 示意网格 12 格的限制（旧实现按「本层房间数」限制，房间稍多的楼层会永远无法拆分）。 */
+const MAX_SPLIT_PARTS = 4;
+/** 拆分只要求：处于编辑结构态 + 恰好选中 1 间房。多选时先清空选中再单选即可。 */
+const canSplit = computed(() => editMode.value && selectedIds.value.length === 1);
+/** 按钮置灰时把原因写在 hover 提示里，避免「明明选中了却还是灰」的困惑。 */
+const splitHint = computed(() => {
+  if (!editMode.value) return '先点「编辑结构」进入结构调整';
+  if (selectedIds.value.length === 0) return '先点选 1 间房间，再点「拆分」';
+  if (selectedIds.value.length > 1) return `当前已选 ${selectedIds.value.length} 间：拆分每次只处理 1 间，点「清空选中」后重新选 1 间`;
+  return '把选中的这间房等分成 2~4 间';
+});
+/** 清空编辑态多选：累积选中会让「拆分 / 编辑资料」（要求恰好 1 间）一直置灰，给一个显式出口 */
+function clearRoomSelection(): void {
+  selectedIds.value = [];
+  selectedId.value = null;
+  selectedRoom.value = null;
+  closePop();
+}
+const splitTargetName = computed(() => {
+  const r = splitTargetId.value ? displayedRooms.value.find((x) => x.id === splitTargetId.value) : null;
+  if (!r) return '';
+  const n = cleanName(r.name);
+  return n !== '（未命名）' ? n : r.code || '未命名房间';
+});
+
+function doSplit(): void {
+  if (selectedIds.value.length !== 1) {
+    ElMessage.warning('请先点选 1 间房间，再点「拆分」');
+    return;
+  }
+  const id = selectedIds.value[0]!;
+  if (!gridPos[id]) {
+    ElMessage.warning('该房间还没有网格定位，无法拆分');
+    return;
+  }
+  splitTargetId.value = id;
+  splitParts.value = 2;
+  splitLayout.value = 'side';
+  splitVisible.value = true;
+}
+
+/** 执行拆分：世界坐标矩形等分 → store 替换房间实体 → gridPos 给子房精确 rect */
+function confirmSplit(): void {
+  const f = currentFloor.value;
+  const id = splitTargetId.value;
+  if (!f || !id) { splitVisible.value = false; return; }
+  const src = gridPos[id];
+  if (!src) { splitVisible.value = false; ElMessage.warning('原房间已不存在，请重新选择'); return; }
+  const n = splitParts.value;
+  if (n < 2 || n > MAX_SPLIT_PARTS) return; // 防御：只接受 2~4 份，不再受示意网格房间数限制
+  const [x0, y0, x1, y1] = spanToRect(src);
+  const rects: [number, number, number, number][] = [];
+  for (let i = 0; i < n; i++) {
+    rects.push(
+      splitLayout.value === 'side'
+        ? [x0 + ((x1 - x0) * i) / n, y0, x0 + ((x1 - x0) * (i + 1)) / n, y1]
+        : [x0, y0 + ((y1 - y0) * i) / n, x1, y0 + ((y1 - y0) * (i + 1)) / n],
+    );
+  }
+  const ids = store.splitRoom(f.id, id, rects.map(rectToPolygon));
+  splitVisible.value = false;
+  if (!ids.length) { ElMessage.warning('拆分失败，请重新选择房间'); return; }
+  delete gridPos[id];
+  // 子房共用原整数格（隔墙 / 占位判定不受影响），但用精确 rect 渲染，单格也能切成多间；
+  // 以 rect 为基准还能对子房继续拆分。
+  ids.forEach((nid, i) => {
+    gridPos[nid] = { bi0: src.bi0, bi1: src.bi1, c0: src.c0, c1: src.c1, rect: rects[i] };
+  });
+  // 只选中拆出来的第一间：既让「编辑资料 / 拆分」按钮保持可用，也方便对子房继续拆
+  selectedIds.value = ids.slice(0, 1);
+  selectedId.value = ids[0] ?? null;
+  selectedRoom.value = displayedRooms.value.find((r) => r.id === ids[0]) ?? null;
+  closePop();
+  ElMessage.success(`已拆成 ${n} 间，房号自动加 -1…-${n} 后缀，点「编辑资料」可逐间修改`);
+}
+
 /** 删除所选房间：先弹确认框，避免误删（尤其合并 / 多选删除时） */
 async function doDelete(): Promise<void> {
   const f = currentFloor.value;
@@ -2580,6 +2682,8 @@ function exitEdit(commit: boolean): void {
     activeTool.value = 'select';
     selectedIds.value = [];
     draftRect.value = null;
+    // 回到浏览态时收起房间详情卡，否则它会一直浮在画布上挡住刚拆 / 刚合并的房间
+    closePop();
     return;
   }
   // 未点「完成」直接关闭：回滚本次编辑至进入前的快照
@@ -2704,7 +2808,7 @@ const GUIDE_HTML = `
   <p style="margin:0 0 6px">② <b>图例</b>：说明每种颜色代表什么。浏览时只读；<b>编辑结构 + 使用状态</b>时，先点色块再点房间即可批量标注状态；只改一间房的状态，直接在它的详情卡里点色块。</p>
   <p style="margin:0 0 6px">③ <b>楼层</b>：点 1F / 2F 切换楼层，标题里显示本层房间数与面积。</p>
   <p style="margin:0 0 6px">④ <b>视图工具</b>：源对齐（把图纸转正）、导入图纸、放大 / 缩小 / 复位；画布也支持滚轮缩放、按住拖拽平移。</p>
-  <p style="margin:0 0 6px">⑤ <b>房间结构</b>：只管「有哪些房间、怎么摆」。点「编辑结构」才出现新增 / 合并 / 删除 / 拖动；<b>完成</b>保存、<b>取消·回滚</b>撤销本次全部改动。<b>改单间房资料不需要进这里</b>：浏览时点房间，在详情卡里点「编辑本房间」，基础资料和维护台账一起填、一次保存；已经进入「编辑结构」时，选中 1 间房再点工具栏「编辑资料」即可。</p>
+  <p style="margin:0 0 6px">⑤ <b>房间结构</b>：只管「有哪些房间、怎么摆」。点「编辑结构」才出现新增 / 合并 / 拆分 / 删除 / 拖动；<b>恰好选中 1 间</b>再点「拆分」，可把它等分成 2~4 间（房号加 -1/-2 后缀、面积按份数平分，本层房间数不受限制）；点房间是<b>累积多选</b>，多选时拆分 / 编辑资料会置灰，点画布空白处或「清空选中」即可重新单选；<b>完成</b>保存、<b>取消·回滚</b>撤销本次全部改动。<b>改单间房资料不需要进这里</b>：浏览时点房间，在详情卡里点「编辑本房间」，基础资料和维护台账一起填、一次保存；已经进入「编辑结构」时，选中 1 间房再点工具栏「编辑资料」即可。</p>
   <p style="margin:0">⑥ <b>其它</b>：被隐藏的房间在这里恢复；点「?」可随时重看本说明。</p>
 </div>`;
 
@@ -2913,7 +3017,7 @@ function enterEdit(): void {
           <section class="fpv-tgroup fpv-tgroup--edit" :class="{ 'fpv-tgroup--editing': editMode }">
             <span class="fpv-tgroup__label">
               {{ editMode ? `结构调整中 · 已选 ${selectedIds.length} 间` : '房间结构' }}
-              <em>{{ editMode ? '完成保存 / 取消回滚' : '增 / 删 / 合并 · 拖动布局' }}</em>
+              <em>{{ editMode ? '完成保存 / 取消回滚' : '增 / 拆 / 合 / 删 · 拖动布局' }}</em>
             </span>
             <div class="fpv-tgroup__row">
               <template v-if="!editMode">
@@ -2930,8 +3034,11 @@ function enterEdit(): void {
                 >
                   <i :style="{ background: armedColor }"></i>标注中：{{ statusLabelOf(armedStatus) }}<b>×</b>
                 </span>
+                <!-- 多选时放在本组靠前位置：工具栏内容较多会横向滚动，放最右会看不见 -->
+                <el-button v-if="selectedIds.length > 1" size="small" text title="点房间是累积多选，清空后可重新只选 1 间（拆分 / 编辑资料需要）" @click="clearRoomSelection">清空选中</el-button>
                 <el-button size="small" :disabled="!canAddRoom" @click="doAddRoom"><el-icon><Plus /></el-icon>新增</el-button>
                 <el-button size="small" :disabled="selectedIds.length < 2" @click="doMerge"><el-icon><Connection /></el-icon>合并</el-button>
+                <el-button size="small" type="primary" plain :disabled="!canSplit" :title="splitHint" @click="doSplit">拆分</el-button>
                 <el-button size="small" type="danger" plain :disabled="!selectedIds.length" @click="doDelete"><el-icon><Delete /></el-icon>删除</el-button>
                 <el-button size="small" :disabled="selectedIds.length !== 1" title="选中 1 间房后改它的资料" @click="openSelectedRoomForm()">编辑资料</el-button>
               </template>
@@ -3156,6 +3263,43 @@ function enterEdit(): void {
         </div>
       </template>
     </div>
+  </el-dialog>
+
+  <!-- 拆分房间：只在点「拆分」时出现的小面板，份数与排列一次选好，不做多步向导 -->
+  <el-dialog
+    v-if="!embedded"
+    v-model="splitVisible"
+    title="拆分房间"
+    width="380px"
+    append-to-body
+    :close-on-click-modal="false"
+    class="fpv-split-dialog"
+  >
+    <div class="fpv-split">
+      <p class="fpv-split__tip">把 <b>{{ splitTargetName }}</b> 平均拆成多间，原房间会被替换。</p>
+      <div class="fpv-split__row">
+        <span class="fpv-split__label">拆成</span>
+        <el-radio-group v-model="splitParts">
+          <el-radio-button
+            v-for="n in [2, 3, 4]"
+            :key="n"
+            :value="n"
+          >{{ n }} 间</el-radio-button>
+        </el-radio-group>
+      </div>
+      <div class="fpv-split__row">
+        <span class="fpv-split__label">排列</span>
+        <el-radio-group v-model="splitLayout">
+          <el-radio-button value="side">左右并排</el-radio-button>
+          <el-radio-button value="stack">上下叠放</el-radio-button>
+        </el-radio-group>
+      </div>
+      <p class="fpv-split__hint">房号自动加 -1 / -2… 后缀，面积按份数平分，部门、用途、状态沿用原房；拆完可点「编辑资料」逐间修改。</p>
+    </div>
+    <template #footer>
+      <el-button @click="splitVisible = false">取消</el-button>
+      <el-button type="primary" @click="confirmSplit()">确认拆分</el-button>
+    </template>
   </el-dialog>
 
   <!-- 预览嵌入模式：仅渲染 SVG stage（供导入向导「预览确认」步骤使用） -->
@@ -3706,6 +3850,13 @@ function enterEdit(): void {
 .fpv-pop__status-btn i { width: 9px; height: 9px; border-radius: 50%; border: 1px solid rgba(0,0,0,.12); }
 .fpv-pop__status-btn:hover { border-color: #93c5fd; }
 .fpv-pop__status-btn.is-on { border-color: #2563eb; background: #eff6ff; color: #1d4ed8; font-weight: 700; box-shadow: 0 0 0 2px rgba(37,99,235,.1); }
+
+/* 拆分房间小面板（只在点「拆分」时出现） */
+.fpv-split { font-size: 13px; color: #1f2937; }
+.fpv-split__tip { margin: 0 0 14px; line-height: 1.6; }
+.fpv-split__row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.fpv-split__label { flex: 0 0 36px; color: #6b7280; }
+.fpv-split__hint { margin: 12px 0 0; padding: 8px 10px; background: #f8fafc; border-radius: 6px; color: #64748b; font-size: 12px; line-height: 1.6; }
 
 .fpv-pop__acts {
   flex: 0 0 auto;

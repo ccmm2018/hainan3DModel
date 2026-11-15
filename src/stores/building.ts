@@ -468,6 +468,52 @@ export const useBuildingStore = defineStore('building', () => {
   }
 
   /**
+   * 把一个房间拆成多个（楼层编辑：选中 1 间 → 选份数与排列方向）。
+   * outlines 由组件按网格子矩形算好后传入，这里只负责替换房间实体与持久化。
+   *  - 面积按份数平分（原房已填面积优先，未填则回退轮廓几何面积），避免拆完每间仍显示整间面积；
+   *  - 房号 / 名称加 -1 / -2… 后缀避免重号，用户可在「编辑资料」里逐间改；
+   *  - 部门 / 用途 / 业务状态 / 审图状态继承原房（物理分割通常仍归同一部门）；
+   *  - 维护台账（责任部门 / 巡检 / 备注）不复制，拆出的房间需重新指定，避免一份台账被复制成多份。
+   */
+  function splitRoom(fid: string, roomId: string, outlines: Pt[][]): string[] {
+    const list = rooms.value[fid];
+    const src = list?.find((r) => r.id === roomId);
+    if (!list || !src || outlines.length < 2) return [];
+    const n = outlines.length;
+    const base = src.code || src.number || '新房间';
+    const stamp = Date.now();
+    const parts: Room[] = outlines.map((outline, i) => {
+      const area = polygonArea(outline);
+      const suffix = `-${i + 1}`;
+      const code = `${base}${suffix}`;
+      return {
+        id: `${fid}-s${stamp}-${i}`,
+        floorId: fid,
+        code,
+        number: code,
+        name: src.name ? `${src.name}${suffix}` : '',
+        dept: src.dept,
+        usePurpose: src.usePurpose,
+        useArea: src.useArea > 0 ? src.useArea / n : area,
+        buildArea: src.buildArea > 0 ? src.buildArea / n : area,
+        outline,
+        centroid: polygonCentroid(outline),
+        inspectStatus: src.inspectStatus,
+        useStatus: src.useStatus,
+        selected: true,
+      };
+    });
+    rooms.value[fid] = list.filter((r) => r.id !== roomId).concat(parts);
+    const f = Object.values(floors.value).find((x) => x.id === fid);
+    if (f) {
+      f.roomCount = rooms.value[fid].length;
+      void persistence.saveFloor(f, rooms.value[fid]).catch(() => undefined);
+    }
+    void persistence.saveRooms(fid, rooms.value[fid]).catch(() => undefined);
+    return parts.map((p) => p.id);
+  }
+
+  /**
    * 启动恢复：把持久化读出的楼层 / 房间 / 楼栋指纹合并进内存态。
    * 调用时机在「播种样例数据」之后，故持久化数据会覆盖样例中的同名项。
    */
@@ -526,6 +572,7 @@ export const useBuildingStore = defineStore('building', () => {
     deleteRooms,
     updateRoomGeometry,
     mergeRooms,
+    splitRoom,
     applyPersisted,
     matchByFingerprint,
   };

@@ -1146,8 +1146,10 @@ const filteredObjects = computed(() => {
       if (n.startsWith(q)) return 1;
       return 2;
     };
-    const ra = rank(a.name);
-    const rb = rank(b.name);
+    // 节点号与显示名都参与排序，直接用楼名搜索时精确命中项才会排第一
+    const rankOf = (o: { name: string }) => Math.min(rank(o.name), rank(displayName(o.name)));
+    const ra = rankOf(a);
+    const rb = rankOf(b);
     if (ra !== rb) return ra - rb;
     return a.name.localeCompare(b.name, undefined, { numeric: true });
   });
@@ -1662,7 +1664,10 @@ function selectByName(name: string) {
   if (viewMode.value === 'room') exitRoomMode();
   const found = objectList.value.find((o) => o.name === name);
   if (!found) return;
-  searchQuery.value = name;
+  // 回填真实楼名而不是 GLB 数字节点名（如 20 → 搏击馆）。
+  // 下拉列表 / 常驻标签 / 属性面板用的都是 displayName，输入框必须保持一致，
+  // 否则搜「搏击馆」定位成功后框里会莫名其妙变成「20」。
+  searchQuery.value = displayName(name);
   searchFocused.value = false;
   const wp = new THREE.Vector3();
   found.object.getWorldPosition(wp);
@@ -1705,12 +1710,15 @@ function onSearchInput() {
 function onSearchEnter() {
   const q = searchQuery.value.trim();
   if (!filteredObjects.value.length) {
-    if (q) ElMessage.warning(`未找到楼栋「${q}」，请检查编号是否正确`);
+    if (q) ElMessage.warning(`未找到楼栋「${q}」，请检查名称或编号是否正确`);
     return;
   }
   // 优先精确匹配输入；否则取下拉列表首项（已按精确 / 前缀排序）
   const lower = q.toLowerCase();
-  const exact = filteredObjects.value.find((o) => o.name.toLowerCase() === lower);
+  // 精确匹配同时认「节点号」和「真实楼名」：框里回填楼名后再按回车不会选错楼
+  const exact = filteredObjects.value.find(
+    (o) => o.name.toLowerCase() === lower || displayName(o.name).toLowerCase() === lower,
+  );
   selectByName((exact ?? filteredObjects.value[0]).name);
 }
 

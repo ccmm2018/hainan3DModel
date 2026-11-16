@@ -348,29 +348,13 @@
       <div class="property-panel__head">
         <span class="dot"></span>
         <strong>{{ selectedProps.name }}</strong>
+        <span class="property-panel__badge">{{ categoryLabel(selectedProps.category) }}</span>
         <button class="property-panel__locate" title="定位到该建筑" @click="flyToSelected">
           <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2">
             <circle cx="12" cy="12" r="7"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/>
           </svg>
         </button>
         <button class="property-panel__close" aria-label="关闭" @click="closePanel">×</button>
-      </div>
-
-      <!-- 楼宇图片横幅（无图片时用建筑剪影占位，叠加类别徽标） -->
-      <div class="property-panel__image">
-        <img
-          v-if="selectedProps.image && !imageError"
-          :src="selectedProps.image"
-          :alt="selectedProps.name"
-          @error="imageError = true"
-        />
-        <div v-else class="property-panel__image-placeholder">
-          <svg viewBox="0 0 48 48" width="52" height="52" fill="none" stroke="currentColor" stroke-width="1.4">
-            <path d="M8 42h32M13 42V16l11-7 11 7v26M20 42V30h8v12"/>
-            <path d="M19 22h2M27 22h2M19 27h2M27 27h2"/>
-          </svg>
-        </div>
-        <span class="property-panel__badge">{{ categoryLabel(selectedProps.category) }}</span>
       </div>
 
       <!-- 基本属性：图标 + 标签 + 数值，两列网格 -->
@@ -1255,7 +1239,6 @@ function toBusinessBuildingName(nodeName?: string): string {
   if (!nodeName) return '';
   const displayed = displayName(nodeName); // '教学楼 (18)' / '图书馆' / '18'
   // 只认「带业务字段」的记录：registerBuildings 会把数字节点登记成 {name:'0'} 空记录，
-
   // 若仅按 key 存在判断会命中空记录而错失真正的中文楼栋数据。
   const hasBiz = (name: string): boolean => {
     const p = buildingData.value[name];
@@ -2643,7 +2626,18 @@ onBeforeUnmount(() => {
   background: #1a8f5a; box-shadow: 0 0 0 4px rgba(26, 143, 90, 0.13);
   flex-shrink: 0;
 }
-.property-panel__head strong { flex: 1; font-size: 16px; font-weight: 700; letter-spacing: .2px; }
+.property-panel__head strong {
+  min-width: 0; max-width: 170px; font-size: 16px; font-weight: 700; letter-spacing: .2px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+/* 类别小标签：内联在标题行，替代原先占高 108px 的图片横幅 */
+.property-panel__badge {
+  flex-shrink: 0;
+  padding: 2px 8px; border-radius: 5px;
+  background: #eaf3fb; color: #1b6fa8;
+  font-size: 10.5px; font-weight: 700; letter-spacing: .3px;
+  white-space: nowrap;
+}
 .property-panel__close {
   width: 26px; height: 26px; border: 0; border-radius: 6px;
   color: #8a97ad; background: transparent; font-size: 20px; line-height: 1; cursor: pointer;
@@ -2652,33 +2646,9 @@ onBeforeUnmount(() => {
 .property-panel .property-panel__close { color: #7c8798; }
 .property-panel .property-panel__close:hover { color: #c0392b; background: #f2e9e9; }
 
-/* 楼宇图片横幅 */
-.property-panel__image {
-  position: relative;
-  height: 108px;
-  background: linear-gradient(135deg, #1b4e72 0%, #2a6d97 55%, #3b8ab0 100%);
-  overflow: hidden;
-}
-.property-panel__image::after {
-  content: ''; position: absolute; inset: 0;
-  background: radial-gradient(120% 90% at 85% 0%, rgba(255,255,255,.14), transparent 60%);
-  pointer-events: none;
-}
-.property-panel__image img { width: 100%; height: 100%; object-fit: cover; display: block; }
-.property-panel__image-placeholder {
-  display: flex; align-items: center; justify-content: center;
-  width: 100%; height: 100%; color: rgba(255,255,255,.5);
-}
-.property-panel__badge {
-  position: absolute; left: 14px; bottom: 11px; z-index: 1;
-  padding: 3px 10px; border-radius: 20px;
-  background: rgba(255,255,255,.92); color: #1b4e72;
-  font-size: 11px; font-weight: 700; letter-spacing: .5px;
-  box-shadow: 0 2px 6px rgba(0,0,0,.12);
-}
-
 /* 分区标题 */
 .property-panel__section { padding: 13px 15px 3px; }
+.property-panel__head + .property-panel__section { padding-top: 14px; }
 .property-panel__section + .property-panel__section { padding-top: 6px; }
 .property-panel__section-title {
   display: flex; align-items: baseline; gap: 6px;
@@ -2735,6 +2705,7 @@ onBeforeUnmount(() => {
   display: inline-flex; align-items: center; justify-content: center;
   width: 26px; height: 26px; border: 0; border-radius: 6px;
   color: #0b6fb8; background: transparent; cursor: pointer;
+  margin-left: auto;
 }
 .property-panel__locate:hover { background: rgba(11, 111, 184, 0.1); }
 

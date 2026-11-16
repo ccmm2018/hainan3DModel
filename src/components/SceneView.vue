@@ -356,7 +356,7 @@
         <button class="property-panel__close" aria-label="关闭" @click="closePanel">×</button>
       </div>
 
-      <!-- 楼宇图片（无图片时显示占位） -->
+      <!-- 楼宇图片横幅（无图片时用建筑剪影占位，叠加类别徽标） -->
       <div class="property-panel__image">
         <img
           v-if="selectedProps.image && !imageError"
@@ -365,44 +365,57 @@
           @error="imageError = true"
         />
         <div v-else class="property-panel__image-placeholder">
-          <svg viewBox="0 0 24 24" width="40" height="40" fill="none" stroke="currentColor" stroke-width="1.2">
-            <path d="M3 21h18M5 21V7l7-4 7 4v14M9 21v-6h6v6"/>
-            <path d="M9 10h.01M15 10h.01M9 13h.01M15 13h.01"/>
+          <svg viewBox="0 0 48 48" width="52" height="52" fill="none" stroke="currentColor" stroke-width="1.4">
+            <path d="M8 42h32M13 42V16l11-7 11 7v26M20 42V30h8v12"/>
+            <path d="M19 22h2M27 22h2M19 27h2M27 27h2"/>
           </svg>
-          <span>{{ selectedProps.name }}</span>
+        </div>
+        <span class="property-panel__badge">{{ categoryLabel(selectedProps.category) }}</span>
+      </div>
+
+      <!-- 基本属性：图标 + 标签 + 数值，两列网格 -->
+      <div class="property-panel__section">
+        <div class="property-panel__section-title">基本信息</div>
+        <div class="pp-facts">
+          <div class="pp-fact">
+            <span class="pp-fact__ico pp-fact__ico--campus">校</span>
+            <span class="pp-fact__body"><label>所在校区</label><b>{{ selectedProps.campus ?? '—' }}</b></span>
+          </div>
+          <div class="pp-fact">
+            <span class="pp-fact__ico pp-fact__ico--dept">部</span>
+            <span class="pp-fact__body"><label>管理部门</label><b>{{ selectedProps.managementDept ?? selectedProps.department ?? '—' }}</b></span>
+          </div>
+          <div class="pp-fact">
+            <span class="pp-fact__ico pp-fact__ico--floor">层</span>
+            <span class="pp-fact__body"><label>总层数</label><b>{{ selectedProps.totalFloors != null ? `${selectedProps.totalFloors} 层` : '—' }}</b></span>
+          </div>
+          <div class="pp-fact">
+            <span class="pp-fact__ico pp-fact__ico--room">间</span>
+            <span class="pp-fact__body"><label>房间数</label><b>{{ selectedProps.roomCount != null ? `${selectedProps.roomCount} 间` : '—' }}</b></span>
+          </div>
         </div>
       </div>
 
-      <dl>
-        <div>
-          <dt>所在校区</dt>
-          <dd>{{ selectedProps.campus ?? '—' }}</dd>
+      <!-- 面积：两个大数字卡片 -->
+      <div class="property-panel__section">
+        <div class="property-panel__section-title">面积概况 <small>单位 ㎡</small></div>
+        <div class="pp-area">
+          <div class="pp-area__card">
+            <label>建筑面积</label>
+            <b>{{ selectedProps.buildingArea != null ? selectedProps.buildingArea.toLocaleString() : '—' }}</b>
+            <span>㎡</span>
+          </div>
+          <div class="pp-area__card pp-area__card--use">
+            <label>使用面积</label>
+            <b>{{ selectedProps.usableArea != null ? selectedProps.usableArea.toLocaleString() : '—' }}</b>
+            <span>㎡</span>
+          </div>
         </div>
-        <div>
-          <dt>管理部门</dt>
-          <dd>{{ selectedProps.managementDept ?? selectedProps.department ?? '—' }}</dd>
-        </div>
-        <div>
-          <dt>总层数</dt>
-          <dd>{{ selectedProps.totalFloors != null ? `${selectedProps.totalFloors} 层` : '—' }}</dd>
-        </div>
-        <div>
-          <dt>房间数</dt>
-          <dd>{{ selectedProps.roomCount != null ? `${selectedProps.roomCount} 间` : '—' }}</dd>
-        </div>
-        <div>
-          <dt>建筑面积</dt>
-          <dd>{{ selectedProps.buildingArea != null ? `${selectedProps.buildingArea.toLocaleString()} ㎡` : '—' }}</dd>
-        </div>
-        <div>
-          <dt>使用面积</dt>
-          <dd>{{ selectedProps.usableArea != null ? `${selectedProps.usableArea.toLocaleString()} ㎡` : '—' }}</dd>
-        </div>
-      </dl>
+      </div>
 
       <div class="property-panel__actions">
         <button class="property-panel__btn" @click="openBuildingDetail">楼宇详情</button>
-        <button class="property-panel__btn property-panel__btn--primary" @click="openRoomManagement">房间管理</button>
+        <button class="property-panel__btn" @click="openRoomManagement">房间管理</button>
         <button class="property-panel__btn property-panel__btn--primary" @click="openIndoorPlan">查看室内图纸</button>
       </div>
     </div>
@@ -1231,12 +1244,53 @@ const searchSuggestions = computed(() => {
   return picks;
 });
 
+/**
+ * 模型节点名 → 业务楼栋名（buildings.geojson 里的 6 个中文名）。
+ * 点模型时 selectedKey 是数字节点名（如 "0"/"18"），而六项业务属性挂在中文名下，
+ * 直接 buildingData[selectedKey] 必然落空、弹窗六个字段全是「—」。
+ * 这里按「别名表 → 类别归并」把节点名映射到业务楼栋名，让点击任意一栋都能对上数据。
+ * geojson 未录入的楼（模拟法庭/办公楼等）返回原 key，保持显示「—」而不误挂别栋数据。
+ */
+function toBusinessBuildingName(nodeName?: string): string {
+  if (!nodeName) return '';
+  const displayed = displayName(nodeName); // '教学楼 (18)' / '图书馆' / '18'
+  // 只认「带业务字段」的记录：registerBuildings 会把数字节点登记成 {name:'0'} 空记录，
+
+  // 若仅按 key 存在判断会命中空记录而错失真正的中文楼栋数据。
+  const hasBiz = (name: string): boolean => {
+    const p = buildingData.value[name];
+    return !!p && (p.campus != null || p.managementDept != null || p.totalFloors != null ||
+      p.buildingArea != null || p.usableArea != null || p.roomCount != null);
+  };
+  // ① 直接命中带业务字段的名字（点的是中文名时）
+  if (hasBiz(nodeName)) return nodeName;
+  if (hasBiz(displayed)) return displayed;
+  // ② 去掉「 (节点号)」后缀后命中，如 '教学楼 (18)' → '教学楼'
+  const noSuffix = displayed.replace(/\s*\(\d+\)\s*$/, '').trim();
+  if (hasBiz(noSuffix)) return noSuffix;
+  // ③ 类别归并到 geojson 的楼栋名（别名不含编号，按关键字兜底）
+  const RULES: Array<[RegExp, string]> = [
+    [/教学楼/, '教学楼'],
+    [/图书/, '图书馆'],
+    [/食堂/, '食堂'],
+    [/宿舍|学生公寓/, '学生公寓'],
+    [/体育馆|游泳|射击|搏击|警体|训练馆/, '警体综合训练馆'],
+    [/实验|实训/, '实验楼'],
+  ];
+  for (const [re, target] of RULES) {
+    if (re.test(displayed) && hasBiz(target)) return target;
+  }
+  return nodeName;
+}
+
 const selectedProps = computed<BuildingProps>(() => {
   if (!selected.value) return { name: '' };
-  const base = buildingData.value[selectedKey.value];
+  // 业务字段按归并楼栋名取（教学楼(18) → '教学楼'），命中 geojson 六项真实数据
+  const bizName = toBusinessBuildingName(selectedKey.value);
+  const base = buildingData.value[bizName] ?? buildingData.value[selectedKey.value];
   const height = base?.height ?? estimateHeight(selected.value.target);
-  // 总层数 / 房间数：优先取属性数据，缺失时从房间数据回推
-  const rooms = roomsOf(selectedKey.value);
+  // 总层数 / 房间数：优先取属性数据，缺失时从房间数据回推（房间也按归并名查，口径一致）
+  const rooms = roomsOf(bizName);
   const totalFloors = base?.totalFloors ?? (rooms.length ? Math.max(...rooms.map((r) => r.floor)) : undefined);
   const roomCount = base?.roomCount ?? (rooms.length ? rooms.length : undefined);
   return { ...(base ?? {}), name: displayName(selected.value.name), height, totalFloors, roomCount };
@@ -2568,127 +2622,138 @@ onBeforeUnmount(() => {
 .property-panel {
   position: absolute;
   z-index: 130;
-  width: 300px;
+  width: 322px;
   max-width: calc(100% - 24px);
-  border: 1px solid #d8dee8;
-  border-radius: 8px;
-  background: #f6f8fb;
-  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.18);
+  border: 1px solid #e2e8f1;
+  border-radius: 12px;
+  background: #ffffff;
+  box-shadow: 0 16px 48px rgba(23, 43, 77, 0.22), 0 2px 8px rgba(23, 43, 77, 0.08);
   overflow: hidden;
 }
 .property-panel__head {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 12px 14px;
-  border-bottom: 1px solid #e1e6ee;
-  color: #1f2a3a;
+  gap: 9px;
+  padding: 13px 15px;
+  color: #16233a;
+  border-bottom: 1px solid #eef1f6;
 }
-.property-panel__head strong { flex: 1; font-size: 15px; font-weight: 600; }
+.property-panel__head .dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: #1a8f5a; box-shadow: 0 0 0 4px rgba(26, 143, 90, 0.13);
+  flex-shrink: 0;
+}
+.property-panel__head strong { flex: 1; font-size: 16px; font-weight: 700; letter-spacing: .2px; }
 .property-panel__close {
-  width: 24px;
-  height: 24px;
-  border: 0;
-  border-radius: 4px;
-  color: #8a97ad;
-  background: transparent;
-  font-size: 18px;
-  cursor: pointer;
+  width: 26px; height: 26px; border: 0; border-radius: 6px;
+  color: #8a97ad; background: transparent; font-size: 20px; line-height: 1; cursor: pointer;
 }
-.property-panel__close:hover { color: #f87171; background: #22314a; }
-/* 浅色面板内的关闭按钮（深色，保证在浅底上可见） */
-.property-panel .property-panel__close { color: #5a6678; }
-.property-panel .property-panel__close:hover { color: #c0392b; background: #e9edf3; }
+.property-panel__close:hover { color: #c0392b; background: #eef1f6; }
+.property-panel .property-panel__close { color: #7c8798; }
+.property-panel .property-panel__close:hover { color: #c0392b; background: #f2e9e9; }
 
-.property-panel dl { margin: 0; padding: 6px 14px 12px; }
-.property-panel dl div {
-  display: flex;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 6px 0;
-  font-size: 13px;
-  border-bottom: 1px dashed #e6eaf0;
-}
-.property-panel dl div:last-child { border-bottom: 0; }
-.property-panel dt { color: #5a6678; }
-.property-panel dd {
-  margin: 0;
-  color: #1f2a3a;
-  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
-  text-align: right;
-}
-.property-panel__desc {
-  margin: 0;
-  padding: 0 14px 14px;
-  color: #3a4456;
-  font-size: 12px;
-  line-height: 1.7;
-}
-.property-panel__locate {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 24px;
-  border: 0;
-  border-radius: 4px;
-  color: #0b6fb8;
-  background: transparent;
-  cursor: pointer;
-}
-.property-panel__locate:hover { background: rgba(11, 111, 184, 0.12); }
-
-/* 楼宇图片 */
+/* 楼宇图片横幅 */
 .property-panel__image {
   position: relative;
-  height: 140px;
-  border-bottom: 1px solid #e1e6ee;
-  background: #eef1f5;
+  height: 108px;
+  background: linear-gradient(135deg, #1b4e72 0%, #2a6d97 55%, #3b8ab0 100%);
   overflow: hidden;
 }
-.property-panel__image img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  display: block;
+.property-panel__image::after {
+  content: ''; position: absolute; inset: 0;
+  background: radial-gradient(120% 90% at 85% 0%, rgba(255,255,255,.14), transparent 60%);
+  pointer-events: none;
 }
+.property-panel__image img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .property-panel__image-placeholder {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  width: 100%;
-  height: 100%;
-  color: #8a93a3;
-  background: linear-gradient(135deg, #f0f3f7 0%, #e6eaf0 100%);
+  display: flex; align-items: center; justify-content: center;
+  width: 100%; height: 100%; color: rgba(255,255,255,.5);
 }
-.property-panel__image-placeholder span { font-size: 13px; color: #9aa3b2; }
+.property-panel__badge {
+  position: absolute; left: 14px; bottom: 11px; z-index: 1;
+  padding: 3px 10px; border-radius: 20px;
+  background: rgba(255,255,255,.92); color: #1b4e72;
+  font-size: 11px; font-weight: 700; letter-spacing: .5px;
+  box-shadow: 0 2px 6px rgba(0,0,0,.12);
+}
+
+/* 分区标题 */
+.property-panel__section { padding: 13px 15px 3px; }
+.property-panel__section + .property-panel__section { padding-top: 6px; }
+.property-panel__section-title {
+  display: flex; align-items: baseline; gap: 6px;
+  font-size: 11px; font-weight: 700; color: #8492a6;
+  letter-spacing: 1px; margin-bottom: 10px;
+}
+.property-panel__section-title::before {
+  content: ''; width: 3px; height: 11px; border-radius: 2px;
+  background: #1a8f5a; margin-right: 2px;
+}
+.property-panel__section-title small { font-size: 10px; font-weight: 500; color: #aab4c2; letter-spacing: 0; }
+
+/* 基本属性：两列网格 */
+.pp-facts { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.pp-fact {
+  display: flex; align-items: center; gap: 9px;
+  padding: 9px 10px; border-radius: 8px;
+  background: #f6f8fb; border: 1px solid #eef2f7;
+}
+.pp-fact__ico {
+  width: 28px; height: 28px; border-radius: 8px; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 12px; font-weight: 700; color: #fff;
+}
+.pp-fact__ico--campus { background: #4a7fc1; }
+.pp-fact__ico--dept   { background: #8a6bb5; }
+.pp-fact__ico--floor  { background: #d98b3a; }
+.pp-fact__ico--room   { background: #2f9e78; }
+.pp-fact__body { display: flex; flex-direction: column; min-width: 0; }
+.pp-fact__body label { font-size: 10.5px; color: #8b96a8; line-height: 1.5; }
+.pp-fact__body b {
+  font-size: 13px; color: #1f2a3a; font-weight: 700; line-height: 1.4;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* 面积大数字卡片 */
+.pp-area { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.pp-area__card {
+  position: relative; padding: 11px 12px; border-radius: 8px;
+  background: linear-gradient(140deg, #eef4fb, #e4eef9);
+  border: 1px solid #d9e7f5;
+}
+.pp-area__card--use { background: linear-gradient(140deg, #eaf7f1, #ddf0e6); border-color: #cfe9dc; }
+.pp-area__card label { display: block; font-size: 10.5px; color: #6c7b90; margin-bottom: 3px; }
+.pp-area__card b { font-size: 21px; font-weight: 800; color: #1b4e72; letter-spacing: -.5px; }
+.pp-area__card--use b { color: #1a7a52; }
+.pp-area__card span { font-size: 11px; color: #7c8a9c; margin-left: 3px; }
+
+.property-panel__desc {
+  margin: 0; padding: 4px 15px 12px;
+  color: #3a4456; font-size: 12px; line-height: 1.7;
+}
+.property-panel__locate {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 26px; height: 26px; border: 0; border-radius: 6px;
+  color: #0b6fb8; background: transparent; cursor: pointer;
+}
+.property-panel__locate:hover { background: rgba(11, 111, 184, 0.1); }
 
 .property-panel__actions {
-  display: flex;
-  gap: 8px;
-  padding: 12px 14px 14px;
-  border-top: 1px solid #e1e6ee;
+  display: flex; gap: 7px;
+  padding: 13px 15px 15px; border-top: 1px solid #eef1f6; margin-top: 8px;
 }
 .property-panel__btn {
-  flex: 1;
-  height: 32px;
-  border: 1px solid #c3ccda;
-  border-radius: 6px;
-  color: #2a3445;
-  background: rgba(0, 0, 0, 0.03);
-  font-size: 12.5px;
-  cursor: pointer;
-  white-space: nowrap;
+  flex: 1; height: 34px; border: 1px solid #d5dde8; border-radius: 7px;
+  color: #46536a; background: #fff; font-size: 12.5px; font-weight: 600;
+  cursor: pointer; white-space: nowrap; transition: all .15s;
 }
-.property-panel__btn:hover { border-color: #0b6fb8; color: #0b4f8a; background: rgba(11, 111, 184, 0.08); }
+.property-panel__btn:hover { border-color: #0b6fb8; color: #0b4f8a; background: #f0f7fc; }
 .property-panel__btn--primary {
-  border-color: #0b6fb8;
-  color: #0b4f8a;
-  background: rgba(11, 111, 184, 0.12);
+  border-color: #0b6fb8; color: #fff;
+  background: linear-gradient(180deg, #1a86cf, #0b6fb8);
+  box-shadow: 0 2px 6px rgba(11, 111, 184, .28);
 }
-.property-panel__btn--primary:hover { background: rgba(11, 111, 184, 0.2); }
+.property-panel__btn--primary:hover { background: linear-gradient(180deg, #0b6fb8, #095a99); color: #fff; }
 
 /* 楼宇详情弹窗 */
 .detail-modal {

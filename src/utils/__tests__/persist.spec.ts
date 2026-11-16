@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { reactive } from 'vue';
 import type { BuildingFingerprint, Floor, Room } from '../../types/cad';
 import {
   createPersistence,
@@ -75,6 +76,13 @@ function makeRoom(floorId: string): Room {
 
 function makeBlob(id: string): DxfBlob {
   return { id, name: `${id}.dxf`, bytes: new Uint8Array([1, 2, 3, 4]).buffer, savedAt: Date.now() };
+}
+
+/** 模拟 IndexedDB 的结构化克隆：Vue/Pinia 的 reactive Proxy 会直接抛 DataCloneError */
+class StructuredCloneBackend extends MemBackend {
+  async put(s: string, k: string, v: unknown): Promise<void> {
+    return super.put(s, k, structuredClone(v));
+  }
 }
 
 function makeFp(): BuildingFingerprint {
@@ -160,5 +168,44 @@ describe('persist (Persistence service)', () => {
 
     const state = await p.loadAll();
     expect(state.floors.map((f) => f.id)).toEqual(['B1-F1']);
+  });
+
+  // ---- 2026-11-15 回归：编辑结构（新增/拆分/合并/删除）后刷新数据全丢 ----
+  it('回归：reactive 房间 / 楼层（Proxy）也能落盘，不再被结构化克隆拒绝', async () => {
+    const p = createPersistence(new StructuredCloneBackend());
+    const fid = 'B1-F1';
+    const rooms = reactive([makeRoom(fid)]) as Room[];
+    const floor = reactive(makeFloor(fid, 'B1')) as Floor;
+
+    await expect(p.saveRooms(fid, rooms)).resolves.toBeUndefined();
+    await expect(p.saveFloor(floor, rooms)).resolves.toBeUndefined();
+
+    const state = await p.loadAll();
+    expect(state.roomsByFloor[fid]).toHaveLength(1);
+    expect(state.roomsByFloor[fid][0].code).toBe('101');
+    expect(state.floors[0].id).toBe(fid);
+  });
+
+  it('回归：编辑后 saveFloor 不带 blob 时保留 DXF 原文件引用', async () => {
+    const mem = new MemBackend();
+    const p = createPersistence(mem);
+    const fid = 'B1-F1';
+    await p.saveFloor(makeFloor(fid, 'B1'), [makeRoom(fid)], makeBlob(fid));
+    // 编辑房间时 store 会再调一次 saveFloor（不带 blob）
+    await p.saveFloor(makeFloor(fid, 'B1'), [makeRoom(fid)]);
+
+    const rec = await mem.get<PersistedFloorRecord>('floors', fid);
+    expect(rec?.dxfBlobId).toBe(fid);
+    expect(await p.getBlob(fid)).toBeDefined();
+  });
+
+  it('回归：一次性清理只删无 DXF 原文件的演示记录，真实导入数据保留', async () => {
+    const p = createPersistence(new MemBackend());
+    await p.saveFloor(makeFloor('教学楼-F1', '教学楼'), [makeRoom('教学楼-F1')], makeBlob('教学楼-F1'));
+    await p.saveFloor(makeFloor('教学楼-F2', '教学楼'), [makeRoom('教学楼-F2')]);
+
+    await p.clearBuilding('教学楼', true);
+    const state = await p.loadAll();
+    expect(state.floors.map((f) => f.id)).toEqual(['教学楼-F1']);
   });
 });

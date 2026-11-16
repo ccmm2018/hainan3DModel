@@ -19,13 +19,14 @@ app.mount('#app');
 async function boot(): Promise<void> {
   const store = useBuildingStore();
   // 一次性清理：历史上演示种子曾把测试楼栋（教学楼 / node_jiaoxueA / node_shixun / node_tushuguan）
-  // 写入 IndexedDB，导致「未上传 DXF 却仍显示楼层与色块」。仅清理一次（localStorage 标记），
-  // 之后用户若真实导入这些楼栋，数据会正常保留、不会被再次清除。
+  // 写入 IndexedDB，导致「未上传 DXF 却仍显示楼层与色块」。
+  // 只清「没有 DXF 原文件」的记录：真实导入（DxfImport 会带 dxfBytes → dxfBlobId）必须保留，
+  // 否则一旦 localStorage 标记丢失（换浏览器 / 清理站点数据），刷新就会把用户数据整栋删光。
   const DEMO_CLEARED_KEY = 'hnjcxy-demo-cleared';
   try {
     if (!localStorage.getItem(DEMO_CLEARED_KEY)) {
       for (const b of ['教学楼', 'node_jiaoxueA', 'node_shixun', 'node_tushuguan']) {
-        await persistence.clearBuilding(b).catch(() => undefined);
+        await persistence.clearBuilding(b, true).catch(() => undefined);
       }
       localStorage.setItem(DEMO_CLEARED_KEY, '1');
     }

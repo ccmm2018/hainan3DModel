@@ -31,9 +31,10 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } 
 import { ElMessage, ElMessageBox } from 'element-plus';
 import { CircleCloseFilled, WarningFilled, Plus, Delete, Connection, Refresh, Upload } from '@element-plus/icons-vue';
 import { useBuildingStore } from '../stores/building';
+import { persistence } from '../utils/persist';
 import { isRoomFieldComplete } from '../utils/roomFields';
 import { cleanName } from '../utils/roomName';
-import type { Floor, InspectStatus, ParsedRoom, Room, UseStatus } from '../types/cad';
+import type { Floor, InspectStatus, ParsedRoom, Room, RoomGridSpan, UseStatus } from '../types/cad';
 import FpvTip from './FpvTip.vue';
 
 const props = withDefaults(
@@ -1024,6 +1025,11 @@ type GridSpan = {
   rect?: [number, number, number, number];
 };
 const gridPos = reactive<Record<string, GridSpan>>({});
+// 布局持久化的模块级状态必须在这里声明：initGridPos 会被 immediate watch 在 setup 阶段同步调用，
+// 放在后面的话会踩到 const/let 的暂时性死区（TDZ）。
+let legacyMigrated = false;
+let gridPersistTimer: number | null = null;
+const pendingGridFids = new Set<string>();
 
 function idxToSpan(idx: number): GridSpan {
   // 越界兜底：房间数超过 12 时不产生 bi>=2 的无效排（spanToRect 里 bands[2] 会 undefined 崩渲染）
@@ -1111,13 +1117,116 @@ function rectToPolygon(r: [number, number, number, number]): [number, number][] 
     [x0, y1],
   ];
 }
-/** 按真实房间出现顺序铺入 6×2 网格；已存在（如编辑后）的单元定位保留 */
+/**
+ * 兼容旧数据：本次修复之前拆出的子房没有 gridSpan，但 splitRoom 当时已把「子矩形」写进
+ * outline（四点轴对齐矩形）。据此还原精确 rect，并按中心吸附到所属整格，
+ * 让用户在旧数据上刷新也能立刻看到「一格内并排 N 间」，而不是必须重新拆一次。
+ * 只认房号带 -N 后缀 + 四点轴对齐矩形 + 明显小于整格，普通 DXF 房间不会被误判。
+ */
+function legacySplitSpan(r: RoomLike): GridSpan | null {
+  if (!/-\d+$/.test((r.code || '').trim())) return null;
+  const outline = (r as Room).outline;
+  if (!Array.isArray(outline) || outline.length !== 4) return null;
+  const xs = outline.map((p) => p[0]);
+  const ys = outline.map((p) => p[1]);
+  const x0 = Math.min(...xs), x1 = Math.max(...xs);
+  const y0 = Math.min(...ys), y1 = Math.max(...ys);
+  if (!(x1 > x0 && y1 > y0)) return null;
+  const eps = 1e-6;
+  const axisAligned = outline.every(
+    (p) =>
+      (Math.abs(p[0] - x0) < eps || Math.abs(p[0] - x1) < eps) &&
+      (Math.abs(p[1] - y0) < eps || Math.abs(p[1] - y1) < eps),
+  );
+  if (!axisAligned) return null;
+  const cell = nearestCell((x0 + x1) / 2, (y0 + y1) / 2);
+  if (!cell) return null;
+  const full = spanToRect({ bi0: cell.bi, bi1: cell.bi, c0: cell.c, c1: cell.c });
+  const fw = Math.abs(full[2] - full[0]), fh = Math.abs(full[3] - full[1]);
+  if (fw < eps || fh < eps) return null;
+  if (x1 - x0 >= fw * 0.98 && y1 - y0 >= fh * 0.98) return null; // 本来就是整格
+  return { bi0: cell.bi, bi1: cell.bi, c0: cell.c, c1: cell.c, rect: [x0, y0, x1, y1] };
+}
+
+/** 单间房的网格定位：优先用随房间持久化的 gridSpan，其次迁移旧拆分房，最后才按顺序铺默认格。
+ *  拆分出的子房带精确 rect，刷新 / 进入编辑 / 回滚后都必须据此还原，
+ *  否则房间数据都在、画面却被打回「整格平铺」，看起来就像拆分没保存。 */
+function spanFromRoom(r: RoomLike, idx: number): GridSpan {
+  const saved = (r as Room).gridSpan as RoomGridSpan | undefined;
+  if (saved) {
+    return {
+      bi0: saved.bi0, bi1: saved.bi1, c0: saved.c0, c1: saved.c1,
+      ...(saved.rect ? { rect: [...saved.rect] as [number, number, number, number] } : {}),
+    };
+  }
+  const legacy = legacySplitSpan(r);
+  if (legacy) {
+    // 迁移一次：写回房间实体，后面刷新 / 重建网格都直接走 gridSpan
+    (r as Room).gridSpan = {
+      bi0: legacy.bi0, bi1: legacy.bi1, c0: legacy.c0, c1: legacy.c1,
+      ...(legacy.rect ? { rect: [...legacy.rect] as [number, number, number, number] } : {}),
+    };
+    legacyMigrated = true;
+    return legacy;
+  }
+  return idxToSpan(idx);
+}
+
+/** 按真实房间出现顺序铺入 6×2 网格；已存在的内存定位优先 */
 function initGridPos(): void {
-  const rooms = displayedRooms.value;
-  rooms.forEach((r, i) => {
-    if (!gridPos[r.id]) gridPos[r.id] = idxToSpan(i);
+  displayedRooms.value.forEach((r, i) => {
+    if (!gridPos[r.id]) gridPos[r.id] = spanFromRoom(r, i);
   });
   syncDemoGridPos();
+  if (legacyMigrated) {
+    legacyMigrated = false;
+    scheduleGridPersist(); // 把迁移结果落盘，避免每次打开都重算
+  }
+}
+
+/**
+ * 把当前层的网格定位写进房间实体并落盘（布局持久化）。
+ * 房间实体本来就随 store 的结构操作写 IndexedDB，这里只是补上「布局」这一个字段，
+ * 不新增存储表 / 不改 DB 版本；刷新后 boot→applyPersisted 读回房间，initGridPos 再据此还原画面。
+ */
+function persistGridLayout(fidOverride?: string): Promise<void> {
+  const fid = fidOverride ?? currentFloor.value?.id;
+  if (!fid) return Promise.resolve();
+  const list = store.roomsOfFloor(fid);
+  for (const r of list) {
+    const g = gridPos[r.id];
+    const room = r as Room;
+    if (g) {
+      room.gridSpan = {
+        bi0: g.bi0, bi1: g.bi1, c0: g.c0, c1: g.c1,
+        ...(g.rect ? { rect: [...g.rect] as [number, number, number, number] } : {}),
+      };
+    } else if (room.gridSpan) {
+      delete room.gridSpan; // 房间被删除 / 回滚时清掉陈旧定位
+    }
+  }
+  return persistence.saveRooms(fid, list);
+}
+
+/**
+ * 结构操作后写盘：立即写一次，250ms 后再兜底写一次。
+ * store 内的 splitRoom / mergeRooms / addRoom 等用 fire-and-forget 写盘且不带本次布局，
+ * 兜底那一笔保证磁盘上最终是「带 gridSpan」的版本，覆盖所有操作路径（含不点「完成」直接刷新）。
+ */
+function scheduleGridPersist(): void {
+  const fid = currentFloor.value?.id;
+  if (!fid) return;
+  pendingGridFids.add(fid);
+  void persistGridLayout(fid).catch((e) => console.warn('[persist] 房间布局保存失败', e));
+  if (gridPersistTimer !== null) window.clearTimeout(gridPersistTimer);
+  gridPersistTimer = window.setTimeout(() => {
+    gridPersistTimer = null;
+    // 兜底写按 fid 记录，切换楼层 / 弹窗关闭后也能写到正确的那一层
+    for (const id of pendingGridFids) {
+      void persistGridLayout(id).catch((e) => console.warn('[persist] 房间布局兜底保存失败', e));
+    }
+    pendingGridFids.clear();
+  }, 250);
 }
 
 /** 演示房间（楼层无入库房间时的示意预览）也纳入网格定位：保证编辑模式下拖动演示房间同样生效；
@@ -2378,6 +2487,7 @@ function commitSpan(id: string): void {
   const s = gridPos[id];
   if (!f || !s) return;
   store.updateRoomGeometry(f.id, id, rectToPolygon(spanToRect(s)));
+  scheduleGridPersist(); // 拖动后的格子位置也要持久化，刷新不能跳回原位
 }
 const draftRect = ref<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
 /** 内部渲染 <svg> 的引用：用 getScreenCTM 把屏幕坐标精确反算回楼层坐标（含 viewBox 缩放与图层平移/缩放） */
@@ -2505,6 +2615,7 @@ function doAddRoom(): void {
     const last = rooms[rooms.length - 1];
     if (!last) return;
     gridPos[last.id] = { bi0: free.bi, bi1: free.bi, c0: free.c, c1: free.c };
+    scheduleGridPersist();
     selectedIds.value = [last.id];
     selectedRoom.value = last;
     selectedId.value = last.id;
@@ -2545,7 +2656,10 @@ function doMerge(): void {
       c1 = Math.max(c1, s.c1);
     }
     nextTick(() => {
-      if (gridPos[id]) gridPos[id] = { bi0, bi1, c0, c1 };
+      if (gridPos[id]) {
+        gridPos[id] = { bi0, bi1, c0, c1 };
+        scheduleGridPersist();
+      }
     });
     selectedIds.value = [id];
     selectedRoom.value = displayedRooms.value.find((r) => r.id === id) ?? null;
@@ -2636,6 +2750,7 @@ function confirmSplit(): void {
   ids.forEach((nid, i) => {
     gridPos[nid] = { bi0: src.bi0, bi1: src.bi1, c0: src.c0, c1: src.c1, rect: rects[i] };
   });
+  scheduleGridPersist(); // 子矩形的布局随房间一起落盘，刷新后仍是「一格内并排 N 间」
   // 只选中拆出来的第一间：既让「编辑资料 / 拆分」按钮保持可用，也方便对子房继续拆
   selectedIds.value = ids.slice(0, 1);
   selectedId.value = ids[0] ?? null;
@@ -2665,19 +2780,34 @@ async function doDelete(): Promise<void> {
   store.deleteRooms(f.id, [...selectedIds.value]);
   // 同步清理被删房间的网格定位，避免「新增房间」按钮误判网格仍满而一直置灰
   for (const id of selectedIds.value) delete gridPos[id];
+  scheduleGridPersist();
   selectedIds.value = [];
   selectedRoom.value = null;
   selectedId.value = null;
   closePop();
 }
 
-/** 退出编辑模式 */
-function exitEdit(commit: boolean): void {
+/** 退出编辑模式。「完成」= 明确等待一次落盘并给出反馈，避免「界面改了但刷新就丢」 */
+async function exitEdit(commit: boolean): Promise<void> {
   if (commit) {
-    // 完成：保留本次编辑（新增/删除/合并/移动均已即时写入 store），清空临时状态
+    const fid = editFid;
+    // 先退出编辑态并作废回滚快照：await 写盘期间若弹窗被关闭，兜底逻辑不会误把改动回滚
     editSnapshot = null;
-    editFid = null;
     editMode.value = false;
+    // 各结构操作本身已即时写盘；这里再 await 一次，保证点「完成」后立刻刷新也不会丢
+    if (fid) {
+      try {
+        await persistence.saveRooms(fid, store.roomsOfFloor(fid));
+        // 最后再写一次带布局的房间数据：确保「完成」后立刻刷新也保留拆分子矩形 / 拖动位置
+        await persistGridLayout(fid);
+        ElMessage.success('已保存到本地，刷新页面后仍会保留');
+      } catch (e) {
+        console.warn('[persist] 完成保存失败', e);
+        ElMessage.warning('保存到本地失败，请暂勿刷新页面');
+      }
+    }
+    // 完成：保留本次编辑（新增/删除/合并/移动均已即时写入 store），清空临时状态
+    editFid = null;
     armedStatus.value = null; // 退出编辑态清空状态选择器
     activeTool.value = 'select';
     selectedIds.value = [];
@@ -2698,6 +2828,7 @@ function cancelEdit(): void {
   editSnapshot = null;
   editFid = null;
   rebuildGrid();
+  scheduleGridPersist(); // 回滚后的布局也要写盘，避免磁盘残留已撤销的拆分
   editMode.value = false;
   armedStatus.value = null; // 取消编辑清空状态选择器
   activeTool.value = 'select';
@@ -2708,11 +2839,13 @@ function cancelEdit(): void {
   closePop();
 }
 
-/** 重建网格定位：清空 gridPos 并按当前 displayedRooms 顺序铺回 6×2（进入编辑 / 取消回滚后调用） */
+/** 重建网格定位（进入编辑 / 取消回滚后调用）：清空内存态，再按房间持久化的 gridSpan 还原，
+ *  没有 gridSpan 的房间才按出现顺序铺默认格。早期版本一律 idxToSpan(i)，
+ *  会把拆出的子矩形抹平 → 「一进编辑结构，拆分效果就消失」。 */
 function rebuildGrid(): void {
   for (const k of Object.keys(gridPos)) delete gridPos[k];
   displayedRooms.value.forEach((r, i) => {
-    gridPos[r.id] = idxToSpan(i);
+    gridPos[r.id] = spanFromRoom(r, i);
   });
   syncDemoGridPos();
 }
@@ -2743,9 +2876,8 @@ function confirmCloseIfNeeded(close: () => void): void {
     return;
   }
   if (!isEditDirty()) {
-    // 无实际改动：等价于完成，直接收尾并关闭
-    exitEdit(true);
-    close();
+    // 无实际改动：等价于完成，等落盘收尾后再关闭
+    void exitEdit(true).then(close);
     return;
   }
   ElMessageBox.confirm('有未保存的修改，是否保存？', '离开编辑', {
@@ -2757,9 +2889,8 @@ function confirmCloseIfNeeded(close: () => void): void {
     showClose: false,
   })
     .then(() => {
-      // 保存并退出：编辑已即时写入 store，仅清理临时态
-      exitEdit(true);
-      close();
+      // 保存并退出：等「完成」把最后一次写盘 await 完再关闭
+      void exitEdit(true).then(close);
     })
     .catch((action: string) => {
       if (action === 'cancel') {
@@ -2808,7 +2939,7 @@ const GUIDE_HTML = `
   <p style="margin:0 0 6px">② <b>图例</b>：说明每种颜色代表什么。浏览时只读；<b>编辑结构 + 使用状态</b>时，先点色块再点房间即可批量标注状态；只改一间房的状态，直接在它的详情卡里点色块。</p>
   <p style="margin:0 0 6px">③ <b>楼层</b>：点 1F / 2F 切换楼层，标题里显示本层房间数与面积。</p>
   <p style="margin:0 0 6px">④ <b>视图工具</b>：源对齐（把图纸转正）、导入图纸、放大 / 缩小 / 复位；画布也支持滚轮缩放、按住拖拽平移。</p>
-  <p style="margin:0 0 6px">⑤ <b>房间结构</b>：只管「有哪些房间、怎么摆」。点「编辑结构」才出现新增 / 合并 / 拆分 / 删除 / 拖动；<b>恰好选中 1 间</b>再点「拆分」，可把它等分成 2~4 间（房号加 -1/-2 后缀、面积按份数平分，本层房间数不受限制）；点房间是<b>累积多选</b>，多选时拆分 / 编辑资料会置灰，点画布空白处或「清空选中」即可重新单选；<b>完成</b>保存、<b>取消·回滚</b>撤销本次全部改动。<b>改单间房资料不需要进这里</b>：浏览时点房间，在详情卡里点「编辑本房间」，基础资料和维护台账一起填、一次保存；已经进入「编辑结构」时，选中 1 间房再点工具栏「编辑资料」即可。</p>
+  <p style="margin:0 0 6px">⑤ <b>房间结构</b>：只管「有哪些房间、怎么摆」。点「编辑结构」才出现新增 / 合并 / 拆分 / 删除 / 拖动；<b>恰好选中 1 间</b>再点「拆分」，可把它等分成 2~4 间（房号加 -1/-2 后缀、面积按份数平分，本层房间数不受限制）；点房间是<b>累积多选</b>，多选时拆分 / 编辑资料会置灰，点画布空白处或「清空选中」即可重新单选；<b>完成</b>保存、<b>取消·回滚</b>撤销本次全部改动；拆出的子房排布与拖动位置也会一起保存，刷新页面后仍保持。<b>改单间房资料不需要进这里</b>：浏览时点房间，在详情卡里点「编辑本房间」，基础资料和维护台账一起填、一次保存；已经进入「编辑结构」时，选中 1 间房再点工具栏「编辑资料」即可。</p>
   <p style="margin:0">⑥ <b>其它</b>：被隐藏的房间在这里恢复；点「?」可随时重看本说明。</p>
 </div>`;
 

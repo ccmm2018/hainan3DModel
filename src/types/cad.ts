@@ -122,6 +122,21 @@ export interface RoomMaintenance {
   note?: string;
 }
 
+/**
+ * 房间在 6×2 示意网格中的定位。
+ * 结构编辑（拆分 / 合并 / 新增 / 拖动）后随房间实体一起持久化，
+ * 否则刷新页面时房间数量、编号、面积都在，但布局会被重新铺回整格，
+ * 看起来就像「拆分没保存」。
+ * rect 为拆分出来的子房间的精确矩形 [x0,y0,x1,y1]，有它时优先于整数格。
+ */
+export interface RoomGridSpan {
+  bi0: number;
+  bi1: number;
+  c0: number;
+  c1: number;
+  rect?: [number, number, number, number];
+}
+
 /** 单个房间（新增） */
 export interface Room {
   /** `${floorId}-${index}` */
@@ -156,6 +171,8 @@ export interface Room {
   selected?: boolean;
   /** 维护信息（巡检 / 责任等） */
   maintenance?: RoomMaintenance;
+  /** 示意网格定位（结构编辑后写入，刷新后据此恢复拆分子房 / 拖动位置） */
+  gridSpan?: RoomGridSpan;
 }
 
 // ---------------------------------------------------------------------------

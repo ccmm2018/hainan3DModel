@@ -89,16 +89,16 @@ describe('FloorPlan2D 房间编辑/隐藏/重新显示', () => {
     await roomEls[0].trigger('click');
     await nextTick();
 
-    // 打开“修改信息”
-    const editBtn = wrapper.findAll('button').find((b) => b.text().includes('修改信息'));
+    // 打开“编辑本房间”
+    const editBtn = wrapper.findAll('button').find((b) => b.text().includes('编辑本房间'));
     expect(editBtn).toBeTruthy();
     await editBtn!.trigger('click');
     await nextTick();
 
-    // 新 UX：就地编辑，不应再出现独立的「修改信息」表单块（避免与上方信息重复）
-    expect(wrapper.find('.fpv-pop__form').exists()).toBe(false);
-    expect(wrapper.find('.fpv-pop__info--edit').exists()).toBe(true);
-    // 就地编辑区应直接包含 名称 输入框（绑定 editRoom.name）
+    // 新 UX：基础资料 / 维护台账合并为一个表单，一次保存（不再有两个入口 / 两个保存按钮）
+    expect(wrapper.find('.fpv-pop__form--all').exists()).toBe(true);
+    expect(wrapper.find('.fpv-pop__section').exists()).toBe(true);
+    // 合并表单第一项仍是房间号、第二项是名称（绑定 editRoom.name）
     const editNameInput = wrapper.findAll('input.el-input-stub')[1];
     expect(editNameInput.exists()).toBe(true);
 
@@ -125,8 +125,13 @@ describe('FloorPlan2D 房间编辑/隐藏/重新显示', () => {
     expect(updated).toBeTruthy();
 
     // ---- 隐藏 + 恢复 链路 ----
+    // 「从视图隐藏」在「编辑本房间」表单内；保存后会自动回到只读态，需先重新展开表单
+    const reopenEdit = wrapper.findAll('button').find((b) => b.text().includes('编辑本房间'));
+    expect(reopenEdit).toBeTruthy();
+    await reopenEdit!.trigger('click');
+    await nextTick();
     const beforeHide = wrapper.findAll('.fpv-room').length;
-    const hideBtn = wrapper.findAll('button').find((b) => b.text().includes('隐藏此房间'));
+    const hideBtn = wrapper.findAll('button').find((b) => b.text().includes('从视图隐藏'));
     expect(hideBtn).toBeTruthy();
     await hideBtn!.trigger('click');
     await nextTick();
@@ -163,7 +168,7 @@ describe('FloorPlan2D 房间编辑/隐藏/重新显示', () => {
     await roomEls[0].trigger('click');
     await nextTick();
 
-    const editBtn = wrapper.findAll('button').find((b) => b.text().includes('修改信息'));
+    const editBtn = wrapper.findAll('button').find((b) => b.text().includes('编辑本房间'));
     expect(editBtn).toBeTruthy();
     await editBtn!.trigger('click');
     await nextTick();
@@ -181,8 +186,12 @@ describe('FloorPlan2D 房间编辑/隐藏/重新显示', () => {
     console.log('DEMO TITLE_AFTER=', titleAfter);
     expect(titleAfter).toContain('测试会议室B');
 
-    // 隐藏该房间
-    const hideBtn = wrapper.findAll('button').find((b) => b.text().includes('隐藏此房间'));
+    // 隐藏该房间：保存后表单自动收起，先重新展开「编辑本房间」
+    const reopenEdit = wrapper.findAll('button').find((b) => b.text().includes('编辑本房间'));
+    expect(reopenEdit).toBeTruthy();
+    await reopenEdit!.trigger('click');
+    await nextTick();
+    const hideBtn = wrapper.findAll('button').find((b) => b.text().includes('从视图隐藏'));
     expect(hideBtn).toBeTruthy();
     await hideBtn!.trigger('click');
     await nextTick();
@@ -238,8 +247,8 @@ describe('FloorPlan2D 房间编辑/隐藏/重新显示', () => {
     expect(title0).toContain('面试');
     expect(nameCell0).toContain('未命名');
 
-    // 打开修改信息 → 在“名称”输入框写新名称 → 保存
-    const editBtn = wrapper.findAll('button').find((b) => b.text().includes('修改信息'));
+    // 打开编辑本房间 → 在“名称”输入框写新名称 → 保存
+    const editBtn = wrapper.findAll('button').find((b) => b.text().includes('编辑本房间'));
     await editBtn!.trigger('click');
     await nextTick();
     const nameInput = wrapper.findAll('input.el-input-stub')[1];
@@ -250,11 +259,7 @@ describe('FloorPlan2D 房间编辑/隐藏/重新显示', () => {
     await nextTick();
     await nextTick();
 
-    // 保存后：先收起编辑态，只读信息格才会渲染
-    const editBtn2 = wrapper.findAll('button').find((b) => b.text().includes('修改信息'));
-    await editBtn2!.trigger('click');
-    await nextTick();
-    await nextTick();
+    // 新 UI：点击「保存资料」后自动回到只读态，无需再点一次按钮收起表单
     const title1 = wrapper.find('.fpv-pop__title').text();
     const nameCell1 = findCell(wrapper, '名称');
     console.log('USER title1=', title1, 'nameCell1=', nameCell1);
@@ -330,8 +335,8 @@ describe('FloorPlan2D 房间编辑/隐藏/重新显示', () => {
     console.log('ISSUE2 title0=', title0);
     expect(title0).toContain('未命名');
 
-    // 打开修改信息 → 名称输入框写入纯数字「101」→ 保存
-    const editBtn = wrapper.findAll('button').find((b) => b.text().includes('修改信息'));
+    // 打开编辑本房间 → 名称输入框写入纯数字「101」→ 保存
+    const editBtn = wrapper.findAll('button').find((b) => b.text().includes('编辑本房间'));
     await editBtn!.trigger('click');
     await nextTick();
     const nameInput = wrapper.findAll('input.el-input-stub')[1];
@@ -342,11 +347,7 @@ describe('FloorPlan2D 房间编辑/隐藏/重新显示', () => {
     await nextTick();
     await nextTick();
 
-    // 保存后：先收起编辑态，只读信息格才会渲染
-    const editBtn2 = wrapper.findAll('button').find((b) => b.text().includes('修改信息'));
-    await editBtn2!.trigger('click');
-    await nextTick();
-    await nextTick();
+    // 新 UI：点击「保存资料」后自动回到只读态，无需再点一次按钮收起表单
     // 标题必须显示「101」，且不再显示未命名
     const title1 = wrapper.find('.fpv-pop__title').text();
     const nameCell1 = findCell(wrapper, '名称');

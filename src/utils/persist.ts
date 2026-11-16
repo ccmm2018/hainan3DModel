@@ -60,6 +60,28 @@ export interface KvBackend {
   getAll<T>(store: string): Promise<{ key: string; value: T }[]>;
 }
 
+/**
+ * 把 Vue / Pinia 的响应式 Proxy 转成可被 IndexedDB 结构化克隆的普通对象。
+ *
+ * 关键背景：store 里的 rooms / floor 都是 reactive 代理，IDBObjectStore.put 使用结构化克隆，
+ * 遇到 Proxy 会直接抛 `DataCloneError`（"could not be cloned"）。而 store 内所有写盘调用都是
+ * fire-and-forget + catch 吞错，表现为「界面上新增/拆分/合并/删除都成功，刷新后全没了」。
+ * 统一在这一层剥离代理，所有调用方无需改动；ArrayBuffer / TypedArray / Blob / Date 原样保留，
+ * 否则 DXF 原文件（ArrayBuffer）会被破坏。
+ */
+function toCloneable(value: unknown): unknown {
+  if (value === null || typeof value !== 'object') return value;
+  if (value instanceof ArrayBuffer || ArrayBuffer.isView(value)) return value;
+  if (typeof Blob !== 'undefined' && value instanceof Blob) return value;
+  if (value instanceof Date) return value;
+  if (Array.isArray(value)) return value.map(toCloneable);
+  const out: Record<string, unknown> = {};
+  for (const k of Object.keys(value as object)) {
+    out[k] = toCloneable((value as Record<string, unknown>)[k]);
+  }
+  return out;
+}
+
 /** IndexedDB 后端实现（默认） */
 class IdbBackend implements KvBackend {
   private dbPromise: Promise<IDBDatabase> | null = null;
@@ -94,7 +116,11 @@ class IdbBackend implements KvBackend {
     await new Promise<void>((resolve, reject) => {
       const r = os.put(value, key);
       r.onsuccess = () => resolve();
-      r.onerror = () => reject(r.error);
+      r.onerror = () => {
+        // 上层多为 fire-and-forget，这里必须留痕，避免再次出现「静默不落盘」
+        console.warn('[persist] 写入失败', s, key, r.error);
+        reject(r.error);
+      };
     });
   }
 
@@ -148,7 +174,8 @@ export interface Persistence {
    * 主要用于清理历史上由「演示种子」写入的测试楼栋，使其在未上传真实 DXF 前
    * 与其它楼栋一致地显示为「暂无室内图纸」空态。
    */
-  clearBuilding(buildingName: string): Promise<void>;
+  /** onlyWithoutBlob=true 时只清「没有 DXF 原文件」的历史演示记录，用户真实导入的数据一律保留 */
+  clearBuilding(buildingName: string, onlyWithoutBlob?: boolean): Promise<void>;
   /** 取回 DXF 原文件（用于重新下载 / 再导入） */
   getBlob(blobId: string): Promise<DxfBlob | undefined>;
   /** 启动恢复：读出全部已持久化数据 */
@@ -164,24 +191,33 @@ export function createPersistence(backend: KvBackend): Persistence {
     return `${buildingName}-F${floorNo}`;
   }
 
+  /** 所有写入统一先剥离响应式 Proxy：换后端（HTTP / 内存）同样安全，单测也能覆盖 */
+  const put = (s: string, k: string, v: unknown): Promise<void> =>
+    backend.put(s, k, toCloneable(v));
+
   return {
     async saveFloor(floor, rooms, blob) {
       let dxfBlobId: string | undefined;
       if (blob) {
-        await backend.put(STORE_BLOBS, blob.id, blob);
+        await put(STORE_BLOBS, blob.id, blob);
         dxfBlobId = blob.id;
+      } else {
+        // 编辑房间时也会用 saveFloor 更新 roomCount / status；不带 blob 时必须沿用原有引用，
+        // 否则会把真实导入图纸的 dxfBlobId 抹掉（DXF 原文件变孤儿，且会被演示数据清理误判）。
+        const prev = await backend.get<PersistedFloorRecord>(STORE_FLOORS, floor.id);
+        dxfBlobId = prev?.dxfBlobId;
       }
-      await backend.put(STORE_ROOMS, floor.id, rooms);
+      await put(STORE_ROOMS, floor.id, rooms);
       const rec: PersistedFloorRecord = {
         schemaVersion: PERSIST_SCHEMA_VERSION,
         floor,
         dxfBlobId,
       };
-      await backend.put(STORE_FLOORS, floor.id, rec);
+      await put(STORE_FLOORS, floor.id, rec);
     },
 
     async saveRooms(floorId, rooms) {
-      await backend.put(STORE_ROOMS, floorId, rooms);
+      await put(STORE_ROOMS, floorId, rooms);
     },
 
     async removeFloor(buildingName, floorNo, version = 1) {
@@ -193,19 +229,23 @@ export function createPersistence(backend: KvBackend): Persistence {
     },
 
     async saveFingerprint(buildingName, fp) {
-      await backend.put(STORE_FP, buildingName, fp);
+      await put(STORE_FP, buildingName, fp);
     },
 
-    async clearBuilding(buildingName) {
+    async clearBuilding(buildingName, onlyWithoutBlob = false) {
       const recs = await backend.getAll<PersistedFloorRecord>(STORE_FLOORS);
+      let removed = 0;
       for (const { key, value } of recs) {
-        if (value?.floor?.buildingName === buildingName) {
-          if (value.dxfBlobId) await backend.delete(STORE_BLOBS, value.dxfBlobId);
-          await backend.delete(STORE_FLOORS, key);
-          await backend.delete(STORE_ROOMS, key);
-        }
+        if (value?.floor?.buildingName !== buildingName) continue;
+        // 真实导入的楼层都带 dxfBlobId（DxfImport 会传 dxfBytes），绝不能被一次性清理误删
+        if (onlyWithoutBlob && value.dxfBlobId) continue;
+        if (value.dxfBlobId) await backend.delete(STORE_BLOBS, value.dxfBlobId);
+        await backend.delete(STORE_FLOORS, key);
+        await backend.delete(STORE_ROOMS, key);
+        removed++;
       }
-      await backend.delete(STORE_FP, buildingName);
+      // 只清演示数据时不要动指纹：真实楼栋的匹配指纹可能已经写回
+      if (!onlyWithoutBlob || removed > 0) await backend.delete(STORE_FP, buildingName);
     },
 
     async getBlob(blobId) {

@@ -35,6 +35,17 @@ import { matchBuildings, type Fingerprint, type MatchResult } from '../utils/mat
 import { polygonArea, polygonCentroid, transformPolygon, mergeRectOutlines, type Pt } from '../utils/geometry';
 import { persistence, type LoadedState } from '../utils/persist';
 
+/**
+ * 落盘失败不再静默吞掉：历史上所有写盘都是 `.catch(reportPersistError)`，
+ * 结果 IndexedDB 报 DataCloneError 时界面仍显示「已新增 / 已拆分」，刷新后全部丢失且无任何线索。
+ */
+function reportPersistError(e: unknown): void {
+  // 单测 / SSR 环境本就没有 IndexedDB，属于预期情况，保持静默；其它真实写入错误必须留痕
+  const msg = e instanceof Error ? e.message : String(e);
+  if (/IndexedDB 不可用/.test(msg)) return;
+  console.warn('[persist] 楼层/房间保存失败：', e);
+}
+
 function floorKey(buildingName: string, floorNo: number, version = 1): string {
   return version > 1 ? `${buildingName}#${floorNo}#${version}` : `${buildingName}#${floorNo}`;
 }
@@ -259,7 +270,7 @@ export const useBuildingStore = defineStore('building', () => {
       payload.dxfBytes
         ? { id: fid, name: fileName ?? `${fid}.dxf`, bytes: payload.dxfBytes, savedAt: Date.now() }
         : undefined;
-    void persistence.saveFloor(floor, roomList, blob).catch(() => undefined);
+    void persistence.saveFloor(floor, roomList, blob).catch(reportPersistError);
 
     return fid;
   }
@@ -269,7 +280,7 @@ export const useBuildingStore = defineStore('building', () => {
     const fid = floorId(buildingName, floorNo, version);
     delete floors.value[key];
     delete rooms.value[fid];
-    void persistence.removeFloor(buildingName, floorNo, version).catch(() => undefined);
+    void persistence.removeFloor(buildingName, floorNo, version).catch(reportPersistError);
   }
 
   function setRoomUseStatus(fid: string, roomId: string, useStatus: Room['useStatus']): void {
@@ -279,7 +290,7 @@ export const useBuildingStore = defineStore('building', () => {
     if (!room) return;
     room.useStatus = useStatus;
     rooms.value[fid] = [...list];
-    void persistence.saveRooms(fid, list).catch(() => undefined);
+    void persistence.saveRooms(fid, list).catch(reportPersistError);
   }
 
   function setRoomSelected(fid: string, roomId: string, selected: boolean): void {
@@ -289,7 +300,7 @@ export const useBuildingStore = defineStore('building', () => {
     if (!room) return;
     room.selected = selected;
     rooms.value[fid] = [...list];
-    void persistence.saveRooms(fid, list).catch(() => undefined);
+    void persistence.saveRooms(fid, list).catch(reportPersistError);
   }
 
   /**
@@ -319,7 +330,7 @@ export const useBuildingStore = defineStore('building', () => {
         room.inspectStatus = 'normal';
       }
     }
-    void persistence.saveRooms(fid, list).catch(() => undefined);
+    void persistence.saveRooms(fid, list).catch(reportPersistError);
 
     // partial 楼层：检查是否仍有待补填 / 待复核房间，已全部补全则升级为 parsed
     const f = Object.values(floors.value).find((x) => x.id === fid);
@@ -335,7 +346,7 @@ export const useBuildingStore = defineStore('building', () => {
       if (!stillPartial) {
         f.status = 'parsed';
         f.errorReason = undefined;
-        void persistence.saveFloor(f, list).catch(() => undefined);
+        void persistence.saveFloor(f, list).catch(reportPersistError);
       }
     }
   }
@@ -371,9 +382,9 @@ export const useBuildingStore = defineStore('building', () => {
     const f = Object.values(floors.value).find((x) => x.id === fid);
     if (f) {
       f.roomCount = rooms.value[fid].length;
-      void persistence.saveFloor(f, rooms.value[fid]).catch(() => undefined);
+      void persistence.saveFloor(f, rooms.value[fid]).catch(reportPersistError);
     }
-    void persistence.saveRooms(fid, rooms.value[fid]).catch(() => undefined);
+    void persistence.saveRooms(fid, rooms.value[fid]).catch(reportPersistError);
     return newRoom.id;
   }
 
@@ -386,9 +397,9 @@ export const useBuildingStore = defineStore('building', () => {
     const f = Object.values(floors.value).find((x) => x.id === fid);
     if (f) {
       f.roomCount = list.length;
-      void persistence.saveFloor(f, list).catch(() => undefined);
+      void persistence.saveFloor(f, list).catch(reportPersistError);
     }
-    void persistence.saveRooms(fid, list).catch(() => undefined);
+    void persistence.saveRooms(fid, list).catch(reportPersistError);
   }
 
   /** 删除若干房间（楼层编辑：勾选后删除）。 */
@@ -400,9 +411,9 @@ export const useBuildingStore = defineStore('building', () => {
     const f = Object.values(floors.value).find((x) => x.id === fid);
     if (f) {
       f.roomCount = rooms.value[fid].length;
-      void persistence.saveFloor(f, rooms.value[fid]).catch(() => undefined);
+      void persistence.saveFloor(f, rooms.value[fid]).catch(reportPersistError);
     }
-    void persistence.saveRooms(fid, rooms.value[fid]).catch(() => undefined);
+    void persistence.saveRooms(fid, rooms.value[fid]).catch(reportPersistError);
   }
 
   /**
@@ -420,7 +431,7 @@ export const useBuildingStore = defineStore('building', () => {
     if (!room.useArea || room.useArea <= 0) room.useArea = area;
     if (!room.buildArea || room.buildArea <= 0) room.buildArea = area;
     rooms.value[fid] = [...list];
-    void persistence.saveRooms(fid, list).catch(() => undefined);
+    void persistence.saveRooms(fid, list).catch(reportPersistError);
   }
 
   /**
@@ -461,9 +472,9 @@ export const useBuildingStore = defineStore('building', () => {
     const f = Object.values(floors.value).find((x) => x.id === fid);
     if (f) {
       f.roomCount = rooms.value[fid].length;
-      void persistence.saveFloor(f, rooms.value[fid]).catch(() => undefined);
+      void persistence.saveFloor(f, rooms.value[fid]).catch(reportPersistError);
     }
-    void persistence.saveRooms(fid, rooms.value[fid]).catch(() => undefined);
+    void persistence.saveRooms(fid, rooms.value[fid]).catch(reportPersistError);
     return merged.id;
   }
 
@@ -507,9 +518,9 @@ export const useBuildingStore = defineStore('building', () => {
     const f = Object.values(floors.value).find((x) => x.id === fid);
     if (f) {
       f.roomCount = rooms.value[fid].length;
-      void persistence.saveFloor(f, rooms.value[fid]).catch(() => undefined);
+      void persistence.saveFloor(f, rooms.value[fid]).catch(reportPersistError);
     }
-    void persistence.saveRooms(fid, rooms.value[fid]).catch(() => undefined);
+    void persistence.saveRooms(fid, rooms.value[fid]).catch(reportPersistError);
     return parts.map((p) => p.id);
   }
 

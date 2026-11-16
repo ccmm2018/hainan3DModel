@@ -1030,6 +1030,9 @@ const gridPos = reactive<Record<string, GridSpan>>({});
 let legacyMigrated = false;
 let gridPersistTimer: number | null = null;
 const pendingGridFids = new Set<string>();
+// 编辑结构态标志。提前到这里声明：immediate watch 会在 setup 阶段同步触发 initGridPos→autoRepairOverlap，
+// 后者要读它来决定是否跳过自愈；若留在文件后半段声明会踩 TDZ（Cannot access before initialization）。
+const editMode = ref(false);
 
 function idxToSpan(idx: number): GridSpan {
   // 越界兜底：房间数超过 12 时不产生 bi>=2 的无效排（spanToRect 里 bands[2] 会 undefined 崩渲染）
@@ -1172,15 +1175,77 @@ function spanFromRoom(r: RoomLike, idx: number): GridSpan {
   return idxToSpan(idx);
 }
 
+/**
+ * 布局自愈：检测「多个不同逻辑房间重叠在同一格」的错乱布局并自动重排。
+ * 典型场景：历史拆分 / 合并操作把子房的 gridSpan.rect 写成了同一个坐标，
+ * 14 间房里有 6 间挤在第一格重叠、下面空出 3 格 —— 画面与标题（按 store 全量统计）对不上。
+ * 数据（房号 / 面积 / 部门等）一律不动，只重排 gridPos 并落盘。
+ * 规则：房号形如 xxx-N 的拆分子房与 base=xxx 归为一组（共用一格、格内 rect 均分），
+ *       其余每间各自一组；逻辑组按房间出现顺序铺进 6×2。
+ * 返回是否做了修复（调用方据此落盘）。同一组内的子房同格属正常，不判为重叠。
+ */
+function autoRepairOverlap(rooms: RoomLike[]): boolean {
+  // 编辑结构态下，gridPos 完全由拆分 / 合并 / 新增 / 拖动等操作自己精确维护：
+  // 合并的中间态里新房尚未落位、正落在越界默认格，会被本函数误判为「历史坏布局」而全量重排，
+  // 于是画面上房间错位 / 空出格子，但 store 数据一样没动 —— 表现为「合并后少一间、多一空格」。
+  // 历史坏数据的自愈只需在浏览态（打开图纸加载数据时）跑一次并落盘即可。
+  if (editMode.value) return false;
+  if (!gridGeom.value || rooms.length < 2) return false;
+  // 1) 按逻辑组归类，保持房间出现顺序稳定
+  const groups: RoomLike[][] = [];
+  const groupOf = new Map<string, RoomLike[]>();
+  for (const r of rooms) {
+    const code = (r.code || r.number || '').trim();
+    const m = /^(.*)-\d+$/.exec(code);
+    const base = m ? m[1]! : code;
+    const key = base ? `base:${base}` : `id:${r.id}`;
+    let grp = groupOf.get(key);
+    if (!grp) { grp = []; groupOf.set(key, grp); groups.push(grp); }
+    grp.push(r);
+  }
+  // 2) 检测跨组重叠：不同逻辑组的成员落在同一 (bi0,c0)
+  const cellOwner = new Map<string, number>();
+  let overlap = false;
+  groups.forEach((grp, gi) => {
+    for (const r of grp) {
+      const s = gridPos[r.id];
+      if (!s) continue;
+      const key = `${s.bi0}:${s.c0}`;
+      const owner = cellOwner.get(key);
+      if (owner !== undefined && owner !== gi) overlap = true;
+      else cellOwner.set(key, gi);
+    }
+  });
+  if (!overlap) return false;
+  // 3) 逻辑组按序铺进 6×2；组内多间用 rect 左右均分（与 confirmSplit 同一套 spanToRect 坐标）
+  groups.forEach((grp, gi) => {
+    const span = idxToSpan(gi);
+    if (grp.length === 1) {
+      gridPos[grp[0]!.id] = span;
+    } else {
+      const [x0, y0, x1, y1] = spanToRect(span);
+      const n = grp.length;
+      grp.forEach((r, i) => {
+        gridPos[r.id] = {
+          ...span,
+          rect: [x0 + ((x1 - x0) * i) / n, y0, x0 + ((x1 - x0) * (i + 1)) / n, y1],
+        };
+      });
+    }
+  });
+  return true;
+}
+
 /** 按真实房间出现顺序铺入 6×2 网格；已存在的内存定位优先 */
 function initGridPos(): void {
   displayedRooms.value.forEach((r, i) => {
     if (!gridPos[r.id]) gridPos[r.id] = spanFromRoom(r, i);
   });
   syncDemoGridPos();
-  if (legacyMigrated) {
+  const repaired = autoRepairOverlap(displayedRooms.value);
+  if (repaired || legacyMigrated) {
     legacyMigrated = false;
-    scheduleGridPersist(); // 把迁移结果落盘，避免每次打开都重算
+    scheduleGridPersist(); // 布局自愈 / 迁移结果落盘，刷新后保持正确
   }
 }
 
@@ -2442,7 +2507,7 @@ function showAllRooms(): void {
 
 // ---- 楼层编辑模式：房间 增 / 删 / 改 / 查（合并 / 移动 / 缩放 / 新增） ----
 // 仅在 store 模式（非嵌入预览）可用；编辑的是真实入库房间（roomFills），合成网格在编辑模式下隐藏。
-const editMode = ref(false);
+// editMode 已在文件前部（布局持久化状态旁）声明，避免 immediate watch 的 TDZ。
 /**
  * 编辑态「图例即状态选择器」：当前已选中的待赋值业务状态。
  * 选中后点房间即把该状态赋给它（逐个房间快速标注）；再点同一状态可取消。null = 未选（普通编辑）。
@@ -2643,24 +2708,26 @@ function doMerge(): void {
     ElMessage.warning('请先点选 2 个及以上房间（点一下选中、再点另一个可多选）后再合并');
     return;
   }
-  const id = store.mergeRooms(f.id, [...selectedIds.value]);
+  // 合并后新房间占据所选房间网格单元的外包范围。必须在改 store 之前先算好：
+  // mergeRooms 会同步替换数组、触发 watch(displayedRooms)→initGridPos，若新房此刻无定位，
+  // 就会被 idxToSpan 兜底铺到默认格（越界的末格），画面上表现为「房间跑位 / 多出空格」。
+  let bi0 = GRID_ROWS - 1, bi1 = 0, c0 = ROOM_COLS - 1, c1 = 0;
+  for (const sid of selectedIds.value) {
+    const s = gridPos[sid];
+    if (!s) continue;
+    bi0 = Math.min(bi0, s.bi0);
+    bi1 = Math.max(bi1, s.bi1);
+    c0 = Math.min(c0, s.c0);
+    c1 = Math.max(c1, s.c1);
+  }
+  const mergedIds = [...selectedIds.value];
+  const id = store.mergeRooms(f.id, mergedIds);
   if (id) {
-    // 合并后新房间占据所选房间网格单元的外包范围
-    let bi0 = GRID_ROWS - 1, bi1 = 0, c0 = ROOM_COLS - 1, c1 = 0;
-    for (const sid of selectedIds.value) {
-      const s = gridPos[sid];
-      if (!s) continue;
-      bi0 = Math.min(bi0, s.bi0);
-      bi1 = Math.max(bi1, s.bi1);
-      c0 = Math.min(c0, s.c0);
-      c1 = Math.max(c1, s.c1);
-    }
-    nextTick(() => {
-      if (gridPos[id]) {
-        gridPos[id] = { bi0, bi1, c0, c1 };
-        scheduleGridPersist();
-      }
-    });
+    // 先删被合并房间的旧定位，再给新房预置外包范围——两者都在改 store 后同步执行，
+    // 保证随后的 initGridPos / 渲染看到的新房定位是正确的，而非默认兜底格。
+    for (const sid of mergedIds) delete gridPos[sid];
+    gridPos[id] = { bi0, bi1, c0, c1 };
+    scheduleGridPersist();
     selectedIds.value = [id];
     selectedRoom.value = displayedRooms.value.find((r) => r.id === id) ?? null;
     selectedId.value = id;

@@ -406,9 +406,10 @@
 
     <!-- 楼宇详情弹窗 -->
     <div v-if="detailOpen && selectedProps.name" class="detail-modal" @click.self="detailOpen = false">
-      <div class="detail-modal__card">
-        <div class="detail-modal__head">
+      <div class="detail-modal__card" :style="{ transform: `translate(${detailPos.x}px, ${detailPos.y}px)` }">
+        <div class="detail-modal__head" @mousedown="onDetailDragStart" title="按住头部可拖动窗口">
           <strong>{{ selectedProps.name }} · 楼宇详情</strong>
+          <span class="detail-modal__drag-hint">拖动</span>
           <button class="property-panel__close" aria-label="关闭" @click="detailOpen = false">×</button>
         </div>
 
@@ -756,6 +757,31 @@ const selectedRoom = ref<Room | null>(null);
 const isIndoorView = ref(false);
 const exportOpen = ref(false);
 const detailOpen = ref(false);
+
+// ---- 楼宇详情弹窗拖拽（仅拖动头部，整卡位移）----
+const detailPos = reactive({ x: 0, y: 0 }); // 相对居中位置的偏移量（px）
+let detailDrag: { startX: number; startY: number; originX: number; originY: number } | null = null;
+function detailDragReset(): void {
+  detailPos.x = 0;
+  detailPos.y = 0;
+}
+function onDetailDragStart(e: MouseEvent): void {
+  // 忽略关闭按钮等交互元素
+  if ((e.target as HTMLElement)?.closest('button')) return;
+  detailDrag = { startX: e.clientX, startY: e.clientY, originX: detailPos.x, originY: detailPos.y };
+  window.addEventListener('mousemove', onDetailDragMove);
+  window.addEventListener('mouseup', onDetailDragEnd);
+}
+function onDetailDragMove(e: MouseEvent): void {
+  if (!detailDrag) return;
+  detailPos.x = detailDrag.originX + (e.clientX - detailDrag.startX);
+  detailPos.y = detailDrag.originY + (e.clientY - detailDrag.startY);
+}
+function onDetailDragEnd(): void {
+  detailDrag = null;
+  window.removeEventListener('mousemove', onDetailDragMove);
+  window.removeEventListener('mouseup', onDetailDragEnd);
+}
 
 // 模型校准（微调对齐）状态
 const calibrateMode = ref(false);
@@ -1408,6 +1434,8 @@ function flyToSelected() {
 
 function openBuildingDetail() {
   detailTab.value = '基础信息'; // 默认展示「基础信息」
+  roomMgmtOpen.value = false; // 与房间管理抽屉互斥，避免两个大面板同时铺满屏幕
+  detailDragReset(); // 每次打开恢复初始居中位置
   detailOpen.value = true;
 }
 
@@ -1443,6 +1471,7 @@ const roomMgmtByFloor = computed<{ floor: number; rooms: Room[] }[]>(() => {
 });
 
 function openRoomManagement() {
+  detailOpen.value = false; // 与楼宇详情弹窗互斥
   roomMgmtOpen.value = true;
 }
 
@@ -2056,6 +2085,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', handleEscKey);
+  onDetailDragEnd(); // 清理详情弹窗拖拽的全局监听
   unobserveContainer();
   scene?.destroy();
   scene = null;
@@ -2747,6 +2777,7 @@ onBeforeUnmount(() => {
   border-radius: 10px;
   background: rgba(20, 27, 43, 0.98);
   box-shadow: 0 24px 70px rgba(0, 0, 0, 0.5);
+  will-change: transform;
 }
 .detail-modal__head {
   display: flex;
@@ -2755,8 +2786,20 @@ onBeforeUnmount(() => {
   padding: 14px 16px;
   border-bottom: 1px solid #24324a;
   color: #eaf2ff;
+  cursor: move;
+  user-select: none;
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  background: rgba(20, 27, 43, 0.98);
 }
+.detail-modal__head:active { cursor: grabbing; }
 .detail-modal__head strong { flex: 1; font-size: 15px; font-weight: 600; }
+.detail-modal__drag-hint {
+  font-size: 10px; color: #7c8ba3; font-weight: 400;
+  letter-spacing: .5px; padding: 2px 7px;
+  border: 1px dashed #3a4a66; border-radius: 4px;
+}
 .detail-modal__image {
   height: 200px;
   border-bottom: 1px solid #24324a;

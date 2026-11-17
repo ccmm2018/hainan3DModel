@@ -39,11 +39,13 @@
       v-if="modelStats || buildingOverview.modelBuildings"
       class="stats-trigger"
       type="button"
-      title="打开校区数据统计"
+      title="打开校区数据统计（楼栋数按模型上的全部建筑统计）"
       @click="statsDialogOpen = true"
     >
       <span class="stats-trigger__dot"></span>
       <strong>统计概览</strong>
+      <!-- s489: 楼栋数回到模型口径 modelBuildings（36 栋全部可点击建筑）。
+           统计弹窗也以这 36 栋为唯一主体（全部主校区），首页与弹窗数字天然一致。 -->
       <span class="stats-trigger__brief">{{ buildingOverview.modelBuildings }} 栋 · {{ buildingOverview.roomTotal }} 间房</span>
       <span class="stats-trigger__arrow">↗</span>
     </button>

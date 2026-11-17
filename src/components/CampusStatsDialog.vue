@@ -35,7 +35,12 @@
           <div class="csd-overview">
             <!-- 左：类别饼图 -->
             <section class="csd-card csd-card--chart">
-              <h4>楼栋类别分布 <small>按建筑面积</small></h4>
+              <h4>楼栋类别分布 <small>按楼栋数量</small></h4>
+              <!-- s489: 统计主体 = 模型上的全部可点击楼栋（36 栋），全部归主校区。
+                   每栋楼算 1，按 5 大类聚合；不因是否录入业务档案而增删。 -->
+              <p class="csd-scope-note">
+                共 <b>{{ allBuildings.length }}</b> 栋楼 · 按楼栋数量统计
+              </p>
               <div class="csd-chart-row">
                 <svg class="csd-pie" viewBox="0 0 200 200" role="img" aria-label="楼栋类别占比饼图">
                   <g v-for="(s, i) in pieSlices" :key="s.key">
@@ -213,8 +218,9 @@
 import { computed, reactive, ref, watch } from 'vue';
 import {
   BUILDING_CATEGORIES, CAMPUS_ORDER, OTHER_CATEGORY, resolveBizCategory,
+  buildModelBuildingStats,
 } from '../data/buildingData';
-import type { BuildingDataMap, BuildingProps } from '../data/buildingData';
+import type { BuildingDataMap, BuildingProps, ModelBuildingStat } from '../data/buildingData';
 import type { Room, RoomDataMap, RoomStatus } from '../data/roomData';
 import { ROOM_STATUS_CONFIG } from '../data/roomData';
 
@@ -223,6 +229,8 @@ const props = defineProps<{
   rooms: RoomDataMap;
   modelBuildings: number;
   businessReady: boolean;
+  /** 模型上的全部可点击楼栋清单（统计主体）。不传时回退到场景配置生成，保证统计主体始终=模型楼栋。 */
+  modelBuildingList?: ModelBuildingStat[];
 }>();
 defineEmits<{ (e: 'close'): void }>();
 
@@ -242,12 +250,51 @@ function categoryColor(c: string): string {
   return meta?.color ?? OTHER_CATEGORY.color;
 }
 
-// 只取带业务字段的真实楼栋（排除 registerBuildings 登记的空记录）
+import { DEFAULT_SCENE_CONFIG } from '../config/mapConfig';
+
+// s489：统计主体 = 模型上的全部可点击楼栋（36 栋），与录入了多少条业务档案无关。
+// 由场景配置的白名单 + 别名生成；外部也可显式传入。每栋楼统一归属「主校区」——
+// 其他校区是日后额外新增的楼，不从当前这 36 栋里拆分。
+const modelBuildings = computed<ModelBuildingStat[]>(() =>
+  props.modelBuildingList?.length
+    ? props.modelBuildingList
+    : buildModelBuildingStats(
+        DEFAULT_SCENE_CONFIG.buildingNodeNames,
+        DEFAULT_SCENE_CONFIG.buildingNameAliases,
+      ),
+);
+
+// 带业务字段的档案，仅用于给统计主体「补充」面积/层数/房间等明细；
+// 凡是模型楼栋清单里没有的键，都不会进入统计主体。
+const bizByBaseName = computed<BuildingDataMap>(() => {
+  const out: BuildingDataMap = {};
+  for (const p of Object.values(props.buildings)) {
+    out[p.name] = p;
+  }
+  return out;
+});
+
+/** 楼栋显示名 → 归并后的业务档案键（"教学楼 (0)" → "教学楼"），用于挂接面积/房间等明细 */
+function bizKeyOf(name: string): string {
+  return name.replace(/\s*[（(]\s*\d+\s*[)）]\s*$/, '').trim();
+}
+
+/**
+ * 统计主体清单：每栋模型楼对应一条， campus 恒为「主校区」。
+ * 业务档案里有的字段（层数/面积/房间/部门）作为明细挂上去，没有则留空——
+ * 但绝不会因为「没录档案」就把这栋楼从统计里剔除。
+ */
 const allBuildings = computed<BuildingProps[]>(() =>
-  Object.values(props.buildings).filter(
-    (p) => (p.category ?? 'building') === 'building' &&
-      (p.totalFloors != null || p.buildingArea != null || p.roomCount != null || p.usableArea != null),
-  ),
+  modelBuildings.value.map((m) => {
+    const biz = bizByBaseName.value[bizKeyOf(m.name)] ?? bizByBaseName.value[m.name];
+    return {
+      ...(biz ?? {}),
+      name: m.name,
+      campus: m.campus,
+      bizCategory: m.categoryId,
+      category: 'building',
+    } as BuildingProps;
+  }),
 );
 
 function roomsOfBuilding(name: string): Room[] {
@@ -287,15 +334,36 @@ const campusBuildings = computed<BuildingProps[]>(() =>
   allBuildings.value.filter((b) => !campus.value || campus.value === '全部' || String(b.campus) === campus.value),
 );
 
+// 全局房间清单（按业务档案归档，天然去重）。36 栋模型楼里多栋共用同一份档案
+// （如 5 栋教学楼共用「教学楼」的 48 间房），所以面积/房间类 KPI 绝不能按 36 栋逐栋累加，
+// 否则会把同一批房间重复计 5 遍（曾出现「604 间房 / 空置 222」这种离谱数字）。
+const allRoomList = computed<Room[]>(() => Object.values(props.rooms).flat());
+
+// 去重的业务档案（带业务字段的楼，通常 6 栋），面积/使用面积 KPI 用它汇总，
+// 而不是用挂了同一档案的 36 栋模型楼——后者会把面积重复累加成天文数字。
+const uniqueBizBuildings = computed<BuildingProps[]>(() => {
+  const seen = new Set<string>();
+  const out: BuildingProps[] = [];
+  for (const p of Object.values(props.buildings)) {
+    if ((p.category ?? 'building') !== 'building') continue;
+    if (p.totalFloors == null && p.buildingArea == null && p.roomCount == null && p.usableArea == null) continue;
+    if (seen.has(p.name)) continue;
+    seen.add(p.name);
+    out.push(p);
+  }
+  return out;
+});
+
 // ---- 总览聚合 ----
 const overview = computed(() => {
-  const list = campusBuildings.value;
-  const roomList = list.flatMap((b) => roomsOfBuilding(b.name));
+  const list = campusBuildings.value;          // 36 栋模型楼 → 栋数 / 类别 / 汇总表
+  const bizList = uniqueBizBuildings.value;    // 去重档案 → 面积 KPI
+  const roomList = allRoomList.value;          // 去重房间 → 房间 KPI
   return {
     buildings: list.length,
-    buildingArea: list.reduce((s, b) => s + (Number(b.buildingArea) || 0), 0),
-    usableArea: list.reduce((s, b) => s + (Number(b.usableArea) || 0), 0),
-    rooms: roomList.reduce((s) => s + 1, 0),
+    buildingArea: bizList.reduce((s, b) => s + (Number(b.buildingArea) || 0), 0),
+    usableArea: bizList.reduce((s, b) => s + (Number(b.usableArea) || 0), 0),
+    rooms: roomList.length,
     // 空置房间数：与下方「房间状态」条里的「空置」口径一致，反映可分配房源
     vacantRooms: roomList.filter((r) => r.status === 'vacant').length,
     buildingList: list.map((b) => ({
@@ -315,7 +383,7 @@ const usageRate = computed(() => {
   return o.buildingArea > 0 ? Math.round((o.usableArea / o.buildingArea) * 100) : 0;
 });
 
-// 按类别聚合（用于饼图）
+// 按类别聚合（用于饼图）。统计口径是「楼栋数量」——每栋楼算 1，不依赖是否录入面积。
 const categoryStats = computed(() => {
   const map = new Map<string, { key: string; label: string; count: number; area: number; color: string; order: number }>();
   for (const b of campusBuildings.value) {
@@ -329,14 +397,14 @@ const categoryStats = computed(() => {
   return [...map.values()].sort((a, b) => a.order - b.order || b.area - a.area);
 });
 
-// 纯 SVG 饼图（按 area 划分，可点击扇区）
+// 纯 SVG 饼图（按楼栋数量 count 划分扇区，可点击）——36 栋楼每栋都计入，与是否录入面积无关。
 const pieSlices = computed(() => {
-  const slices = categoryStats.value.filter((s) => s.area > 0);
-  const total = slices.reduce((s, x) => s + x.area, 0);
+  const slices = categoryStats.value.filter((s) => s.count > 0);
+  const total = slices.reduce((s, x) => s + x.count, 0);
   if (!total) return [];
   let start = -Math.PI / 2;
   return slices.map((s) => {
-    const angle = (s.area / total) * Math.PI * 2;
+    const angle = (s.count / total) * Math.PI * 2;
     const end = start + angle;
     const x1 = 100 + 78 * Math.cos(start), y1 = 100 + 78 * Math.sin(start);
     const x2 = 100 + 78 * Math.cos(end), y2 = 100 + 78 * Math.sin(end);
@@ -347,9 +415,9 @@ const pieSlices = computed(() => {
   });
 });
 
-// 房间状态占比
+// 房间状态占比（用全局去重房间，避免 36 栋共用档案导致重复累加）
 const statusBar = computed(() => {
-  const list = campusBuildings.value.flatMap((b) => roomsOfBuilding(b.name));
+  const list = allRoomList.value;
   const order: RoomStatus[] = ['occupied', 'vacant', 'noaccess'];
   const counts: Record<string, number> = { occupied: 0, vacant: 0, noaccess: 0 };
   for (const r of list) counts[r.status] = (counts[r.status] ?? 0) + 1;
@@ -485,6 +553,9 @@ function statusColor(s: RoomStatus): string { return ROOM_STATUS_CONFIG[s]?.deep
 }
 .csd-card h4 { margin: 0 0 12px; font-size: 13px; font-weight: 700; color: #1f2a3a; }
 .csd-card h4 small { font-size: 10.5px; font-weight: 400; color: #9aa5b5; margin-left: 6px; }
+/* s488: 口径说明——全校业务楼栋数 / 当前校区楼栋数，与首页统计按钮同源 */
+.csd-scope-note { margin: -4px 0 10px; font-size: 11px; color: #6b7688; }
+.csd-scope-note b { color: #2563eb; font-weight: 700; }
 .csd-overview { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
 .csd-chart-row { display: flex; align-items: center; gap: 10px; }
 .csd-pie { width: 168px; height: 168px; flex-shrink: 0; }

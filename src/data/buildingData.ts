@@ -98,6 +98,46 @@ export function resolveBizCategory(
   return OTHER_CATEGORY;
 }
 
+/**
+ * 模型楼栋统计条目：统计弹窗的唯一主体。
+ * 来源不是 GeoJSON 的业务档案，而是场景配置里的「可点击节点名单 + 显示名别名」，
+ * 因为模型上有多少栋楼是可点击白名单决定的（36 栋），与录入了多少条业务数据无关。
+ */
+export interface ModelBuildingStat {
+  /** GLB 节点名（数字或英文） */
+  node: string;
+  /** 界面显示名 */
+  name: string;
+  /** 业务分类 id（teaching/lab/library/sports/life） */
+  categoryId: string;
+  /** 业务分类展示名 */
+  category: string;
+  /** 所属校区：当前模型上的楼全部归主校区；其他校区是日后额外新增的楼，不从这里拆分 */
+  campus: string;
+}
+
+/**
+ * 由场景配置生成「模型全部可点击楼栋」的统计清单。
+ * 每栋楼的类别用 resolveBizCategory 按显示名解析，校区统一为主校区。
+ */
+export function buildModelBuildingStats(
+  nodeNames: string[],
+  aliases: Record<string, string>,
+  campus = '主校区',
+): ModelBuildingStat[] {
+  return nodeNames.map((node) => {
+    const name = aliases[node] ?? node;
+    const meta = resolveBizCategory({ name });
+    return {
+      node,
+      name,
+      categoryId: meta.id,
+      category: meta.label,
+      campus,
+    };
+  });
+}
+
 /** name → props 映射表 */
 export type BuildingDataMap = Record<string, BuildingProps>;
 

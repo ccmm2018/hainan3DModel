@@ -1,0 +1,109 @@
+// @vitest-environment jsdom
+import { describe, it, expect } from 'vitest';
+import { mount } from '@vue/test-utils';
+import { nextTick } from 'vue';
+import CampusStatsDialog from '../CampusStatsDialog.vue';
+import { SAMPLE_BUILDING_DATA, BUILDING_CATEGORIES, resolveBizCategory } from '../../data/buildingData';
+import { SAMPLE_ROOM_DATA } from '../../data/roomData';
+
+describe('CampusStatsDialog：统一数据源 + 箭头下钻', () => {
+  function mountDialog() {
+    return mount(CampusStatsDialog, {
+      props: {
+        buildings: SAMPLE_BUILDING_DATA,
+        rooms: SAMPLE_ROOM_DATA,
+        modelBuildings: 26,
+        businessReady: true,
+      },
+    });
+  }
+
+  it('楼栋类别来自基础数据 bizCategory，与数据层解析一致', () => {
+    // 数据层权威解析：教学楼=teaching，图书馆=library，警体训练馆=sports
+    expect(resolveBizCategory(SAMPLE_BUILDING_DATA['教学楼']).id).toBe('teaching');
+    expect(resolveBizCategory(SAMPLE_BUILDING_DATA['实验楼']).id).toBe('lab');
+    expect(resolveBizCategory(SAMPLE_BUILDING_DATA['警体综合训练馆']).id).toBe('sports');
+    // 类别字典覆盖示例里用到的所有分类
+    const ids = new Set(BUILDING_CATEGORIES.map((c) => c.id));
+    expect(ids.has('teaching')).toBe(true);
+    expect(ids.has('life')).toBe(true);
+  });
+
+  it('校区从基础数据 campus 字段聚合，可按 CAMPUS_ORDER 排序', async () => {
+    const w = mountDialog();
+    await nextTick();
+    const options = w.findAll('.csd-campus option').map((o) => o.text());
+    // 主校区 / 东校区 / 西校区 三校区都由楼栋数据派生，未写死
+    expect(options).toContain('主校区');
+    expect(options).toContain('东校区');
+    expect(options).toContain('西校区');
+    expect(options[0]).toBe('主校区');
+  });
+
+  it('校区概况显示「空置房间」而非无意义的「房间总数」，与房间状态条口径一致', async () => {
+    const w = mountDialog();
+    await nextTick();
+    const text = w.text();
+    expect(text).toContain('空置房间');
+    expect(text).not.toContain('房间总数');
+    // 空置数来自 status==='vacant'，与下方状态条「空置」的数字一致
+    const kpiCards = w.findAll('.csd-kpi');
+    const vacantCard = kpiCards.find((c) => c.text().includes('空置房间'));
+    expect(vacantCard).toBeDefined();
+    const vacantNum = Number(vacantCard!.find('b').text().replace(/\D/g, ''));
+    const statusVacant = w.findAll('.csd-status__legend span').find((s) => s.text().includes('空置'));
+    expect(statusVacant).toBeDefined();
+    expect(vacantNum).toBe(Number(statusVacant!.text().replace(/\D/g, '')));
+  });
+
+  it('点楼栋汇总的箭头后切到「数据详情」并进入该楼栋楼层列表（回归 bug：原来不切 Tab 像摆设）', async () => {
+    const w = mountDialog();
+    await nextTick();
+    // 初始在总览 Tab
+    expect(w.find('.csd-tab.active').text()).toBe('校区总览');
+    const summaryRows = w.findAll('.csd-card--table .csd-table tbody tr');
+    expect(summaryRows.length).toBeGreaterThan(0);
+    // 点第一行（楼栋汇总）的箭头单元格
+    await summaryRows[0].find('.csd-td-arrow').trigger('click');
+    await nextTick();
+    // 必须切到数据详情 Tab
+    expect(w.find('.csd-tab.active').text()).toBe('数据详情');
+    // 面包屑出现「校区总览 › 类别 › 楼栋」，说明父类→子类链路建立
+    const crumb = w.find('.csd-crumb').text();
+    expect(crumb).toContain('校区总览');
+    expect(crumb).toContain('教学楼');
+    // 出现楼层列表（楼层表头）
+    expect(w.text()).toContain('楼层');
+  });
+
+  it('饼图口径说明同时给出「全校业务楼栋数」和「当前校区楼栋数」（回归：首页36栋 vs 弹窗3栋对不上）', async () => {
+    const w = mountDialog();
+    await nextTick();
+    const note = w.find('.csd-scope-note');
+    expect(note.exists()).toBe(true);
+    const txt = note.text();
+    // 全校业务楼栋数 = SAMPLE_BUILDING_DATA 里带业务字段的楼栋数（与首页统计按钮同源）
+    const bizCount = Object.values(SAMPLE_BUILDING_DATA).filter(
+      (p: any) => p && (p.totalFloors != null || p.buildingArea != null || p.roomCount != null || p.usableArea != null),
+    ).length;
+    expect(txt).toContain('全校业务楼栋');
+    expect(txt).toContain(`全校业务楼栋 ${bizCount} 栋`);
+    // 当前默认校区（主校区）的楼栋数也要体现，且是全校数的子集
+    const nums = txt.match(/\d+/g)?.map(Number) ?? [];
+    expect(nums.length).toBeGreaterThanOrEqual(2);
+    expect(nums[0]).toBe(bizCount);
+    expect(nums[1]).toBeLessThanOrEqual(bizCount);
+  });
+
+  it('楼栋汇总表带「校区」「类别」列，三处口径来自同一 bizCategory', async () => {
+    const w = mountDialog();
+    await nextTick();
+    const headers = w.findAll('.csd-card--table .csd-table th').map((h) => h.text());
+    expect(headers).toContain('校区');
+    expect(headers).toContain('类别');
+    // 类别标签文案与字典 label 一致
+    const cat = w.find('.csd-cat').text();
+    const labels = new Set([...BUILDING_CATEGORIES.map((c) => c.label), '其他']);
+    expect(labels.has(cat)).toBe(true);
+  });
+});

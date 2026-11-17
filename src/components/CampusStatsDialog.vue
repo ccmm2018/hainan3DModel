@@ -24,7 +24,7 @@
           :key="t.key"
           class="csd-tab"
           :class="{ active: tab === t.key }"
-          @click="tab = t.key"
+          @click="onTabChange(t.key)"
         >{{ t.label }}</button>
       </div>
 
@@ -476,6 +476,13 @@ const drillHint = computed(() => {
 function resetDrill() { drill.category = ''; drill.building = ''; drill.floor = 0; }
 function onCampusChange() { resetDrill(); tab.value = 'overview'; }
 function backToOverview() { resetDrill(); tab.value = 'overview'; }
+// s490: 点 Tab 切换时也重置下钻链路。之前 @click="tab=t.key" 只换 Tab 不清 drill，
+// 导致「点饼图教学科研类 → 切回校区总览 → 点食堂(3)(生活服务类)」时
+// drill.category 残留教学科研类，面包屑标题与表格类别对不上。
+function onTabChange(key: TabKey) {
+  tab.value = key;
+  if (key === 'overview') resetDrill();
+}
 function clearBelow(level: 'category' | 'building') {
   if (level === 'category') { drill.building = ''; drill.floor = 0; }
   else { drill.floor = 0; }
@@ -488,7 +495,10 @@ function drillCategory(key: string) {
 function drillBuilding(name: string) {
   const b = campusBuildings.value.find((x) => x.name === name);
   drill.building = name;
-  if (!drill.category) drill.category = b ? categoryOf(b) : '';
+  // s490: 始终按「当前点击的楼栋」重算类别，不用 if(!category) 保留旧值——
+  // 否则从饼图下钻某类后再点别的楼，面包屑会显示上一次的类别。
+  // 已有 category 时若该楼确实属于此类，重算结果相同，无副作用。
+  drill.category = b ? categoryOf(b) : '';
   drill.floor = 0;
   // 从「校区总览」的楼栋汇总表点进来时必须切到详情 Tab，
   // 否则只改了下钻状态、界面留在总览，看起来像箭头没反应。

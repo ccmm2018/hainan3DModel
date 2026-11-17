@@ -124,4 +124,32 @@ describe('CampusStatsDialog：36栋模型楼为主体 + 统一校区 + 箭头下
     const labels = new Set([...BUILDING_CATEGORIES.map((c) => c.label), '其他']);
     expect(labels.has(cat)).toBe(true);
   });
+
+  // s490 回归：下钻面包屑标题类别必须与「楼栋汇总」表格里该行的类别一致。
+  it('下钻面包屑类别 = 所点楼栋在汇总表里的类别（不残留上次饼图点选的类别）', async () => {
+    const w = mountDialog();
+    await nextTick();
+    // 先点饼图「教学科研类」，制造一个残留的 drill.category
+    const legend = w.findAll('.csd-legend__btn').find((b) => b.text().includes('教学科研类'));
+    expect(legend).toBeTruthy();
+    await legend!.trigger('click');
+    await nextTick();
+    // 切回「校区总览」Tab（修复前这里只换 Tab 不清 drill）
+    const overviewTab = w.findAll('.csd-tab').find((t) => t.text().includes('校区总览'));
+    await overviewTab!.trigger('click');
+    await nextTick();
+    // 在汇总表里找一行「生活服务类」楼栋，读取它的表格类别与楼名
+    const lifeRow = w.findAll('.csd-card--table tbody tr')
+      .find((r) => r.findAll('td')[2]?.text().trim() === '生活服务类');
+    expect(lifeRow).toBeTruthy();
+    const rowName = lifeRow!.findAll('td')[0].text().trim();
+    const rowCat = lifeRow!.findAll('td')[2].text().trim();
+    await lifeRow!.trigger('click');
+    await nextTick();
+    // 面包屑标题类别 = 表格该行类别，且包含楼名
+    const crumb = w.find('.csd-crumb').text();
+    expect(crumb).toContain(rowCat);
+    expect(crumb).not.toContain('教学科研类');
+    expect(crumb).toContain(rowName);
+  });
 });

@@ -267,6 +267,23 @@ export const DEFAULT_SCENE_CONFIG: SceneConfig = {
     '3': '食堂 (3)', '4': '食堂 (4)', '7': '食堂 (7)',
     // 功能实训 / 办公楼
     '6': '功能实训', '5': '办公楼',
+    // s487: 后补建的 10 个独立楼栋节点。别名必须【精确等于】buildingData 的 6 栋中文键，
+    // 因为 resolveBuildingName() 只在 names.includes(alias) 时才返回别名——这样 selectedKey
+    // 才会归并到真实楼栋，属性/楼层图/房间三项查找全部打通，和点数字主楼行为一致。
+    // 归属依据：节点语义 + GLB 世界坐标最近主楼（见 bake 诊断）：
+    //   19Front→教学楼19；20Front→搏击馆/21Front→射击馆；Gym_Arc→体育馆；
+    //   Dorm_New/Dorm_NBoxSW→宿舍8；C0_New/NewBox_O1_SW→教学楼。
+    // 模拟法庭(17Front)不在 geojson 的 6 栋内，与其他未录入楼栋一致显示「—」，不误挂别栋。
+    'NewBld_17_Front': '模拟法庭',
+    'NewBld_19_Front': '教学楼',
+    'NewBld_20_Front': '警体综合训练馆',
+    'NewBld_21_Front': '警体综合训练馆',
+    'B_Gym_Arc_01': '警体综合训练馆',
+    'B_Gym_Arc_02': '警体综合训练馆',
+    'B_Dorm_New_01': '学生公寓',
+    'NewBld_Dorm_NBoxSW': '学生公寓',
+    'B_C0_New_01': '教学楼',
+    'NewBox_O1_SW': '教学楼',
   },
   // 性能优先：关闭周边 3D 楼块（building）。它们是高德底图平移/缩放时逐帧重绘的最重图层，
   // 弱机拖拽/缩放 CPU 80%+ 的首要来源。仅保留 bg(地面轮廓) + road(路网)。需要周边立体感时可加回 'building'。
@@ -286,5 +303,14 @@ export const DEFAULT_SCENE_CONFIG: SceneConfig = {
     patterns: ['parapet', 'entrance_door', 'pergola', 'empty', 'camtarget', 'profile'],
   },
   // 可点击 / 可选中的建筑节点白名单（点击只显示这些节点的数字编号，其余不可点击）
-  buildingNodeNames: Array.from({ length: 26 }, (_, i) => String(i)),
+  // s487: 数字 0–25 主楼 + 10 个后补建的独立顶层节点。
+  // 这些「临时加的楼」在 GLB 里是独立顶层节点、名字为英文字符串，之前不在白名单 →
+  // raycast 命中后 owningBuildingOf 找不到白名单祖先被直接丢弃，表现为「点不到」。
+  // 加入白名单即可点击/高亮/出标签；业务属性由 SceneView.toBusinessBuildingName 归并到现有 6 栋。
+  buildingNodeNames: [
+    ...Array.from({ length: 26 }, (_, i) => String(i)),
+    'NewBld_17_Front', 'NewBld_19_Front', 'NewBld_20_Front', 'NewBld_21_Front',
+    'B_Gym_Arc_01', 'B_Gym_Arc_02', 'B_Dorm_New_01', 'B_C0_New_01',
+    'NewBox_O1_SW', 'NewBld_Dorm_NBoxSW',
+  ],
 };

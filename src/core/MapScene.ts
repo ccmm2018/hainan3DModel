@@ -1046,6 +1046,31 @@ export class MapScene {
           if (this.fixMatMapIfBlack(pair)) materialFixed++;
         });
         if (this.disposed) return;
+
+        // ---- 各向异性过滤：斜视角清晰度（近零成本的纯画质提升）----
+        // GLTFLoader 给模型贴图的默认 anisotropy = 1（各方向同样采样）。本场景是俯视角看校园，
+        // 地面 / 道路 / 屋顶这类大面积水平贴图是「斜着」映入相机的：各向同性采样会把斜向细节
+        // 压扁、糊成一片——这正是「web 端模型发糊」的主因（模型本身贴图分辨率是够的）。
+        // 开到硬件上限（封顶 8）后，沿斜向多采样，斜视清晰度大幅提升；只改采样方式，
+        // 不增贴图体积 / 显存 / 加载耗时，也不改变模型颜色。three 上传时会再次 clamp 到设备支持上限，
+        // 老旧设备（无 EXT_texture_filter_anisotropic，getMaxAnisotropy=1）自动退化、无副作用。
+        // 注：仅对仍启用 mipmap 的贴图有效——NPOT 降级为 LinearFilter 的贴图设了也无意义。
+        const maxAniso = this.renderer?.capabilities?.getMaxAnisotropy?.() ?? 1;
+        const anisoLevel = Math.min(8, maxAniso);
+        let anisoCount = 0;
+        if (anisoLevel > 1) {
+          for (const tex of textures) {
+            const mf = tex.minFilter;
+            const hasMipmap = mf === THREE.LinearMipmapLinearFilter || mf === THREE.LinearMipmapNearestFilter
+              || mf === THREE.NearestMipmapLinearFilter || mf === THREE.NearestMipmapNearestFilter;
+            if (hasMipmap && (tex.anisotropy ?? 1) < anisoLevel) {
+              tex.anisotropy = anisoLevel;
+              tex.needsUpdate = true;
+              anisoCount++;
+            }
+          }
+        }
+
         // 所有贴图处理完成后再挂入场景：避免在「让出帧」期间 AMap 提前渲染、把全分辨率贴图先上传一遍 GPU
         // （那样低配机器仍会先承受一次 450MB 上传峰值）。挂入后 AMap 第一次渲染拿到的就是已降级的贴图。
         this.scene!.add(this.modelRoot);
@@ -1058,7 +1083,8 @@ export class MapScene {
         console.info(
           `[MapScene] GLB 加载完成：isWebGL2=${caps?.isWebGL2 ?? '?'}，MAX_TEXTURE_SIZE=${caps?.maxTextureSize ?? '?'}，` +
             `低配=${this.lowEnd}，阴影=${shadowState}，`
-            + `超限缩放=${clampedCount} 张，NPOT 材质降级=${npotFixed} 张，黑图替换=${materialFixed} 张，低配贴图降级=${textureReduced} 张`,
+            + `超限缩放=${clampedCount} 张，NPOT 材质降级=${npotFixed} 张，黑图替换=${materialFixed} 张，低配贴图降级=${textureReduced} 张，`
+            + `各向异性=${anisoLevel}x（${anisoCount} 张贴图）`,
         );
 
         this.callbacks.onModelStage?.('准备渲染');
@@ -1680,14 +1706,14 @@ export class MapScene {
    */
   private clampTextureToMaxSize(tex: THREE.Texture): boolean {
     const hwMax = this.renderer?.capabilities?.maxTextureSize ?? 4096;
-    // s471: GLB now ships a handful of 2048px facade atlases for the largest
-    // buildings (sharper). A 2048x2048 RGBA texture costs 16MB of VRAM; on a
-    // low-end integrated GPU 8+ of those plus ~60 x 1024 can overflow shared
-    // memory and cause the stutter / failed load the user reported. Cap them
-    // at 1024 in lowEnd mode (reuse the existing canvas downscale path below);
-    // capable machines keep the full resolution. 1024 is still well above the
-    // old "<=256" low-end path that made every facade look washed out.
-    const maxSize = this.lowEnd ? Math.min(hwMax, 1024) : hwMax;
+    // s486: 解除 s471 的「lowEnd 一律封顶 1024」。s471 时只有 8 张 2048，担忧低端集显显存溢出；
+    // 但 s485 起 2048 立面增到 29 张，用户实测低配机上这行把 29 张全部压回 1024
+    // （日志「超限缩放=29 张」），把升分辨率带来的清晰度全部抹掉——这正是「低端机仍模糊」的根因。
+    // 现改为按设备真实硬件上限自适应：现代设备 hwMax>=16384，2048 完全放得下，保留满分辨率；
+    // 只有 hwMax<2048 的极老 GPU 才由硬件上限自动兜底降级。
+    // 显存保护仍由其它低配手段承担：关阴影 / 像素比 1 / 离屏 RT 合成 / 阴影缓存；
+    // 纯软件光栅(SwiftShader)另有 reduceTextureForLowEnd 二次降质兜底，故这里不再一刀切。
+    const maxSize = hwMax;
     if (typeof document === 'undefined') return false; // 非浏览器环境（如测试）跳过
     const img = tex.image as { width?: number; height?: number } | undefined;
     if (!img || !img.width || !img.height) return false;

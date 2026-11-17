@@ -4,7 +4,13 @@
   "features": [
     {
       "type": "Feature",
-      "geometry": { "type": "Point", "coordinates": [110.280328, 19.75491] },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.280328,
+          19.75491
+        ]
+      },
       "properties": {
         "name": "教学楼",
         "height": 24,
@@ -17,17 +23,24 @@
         "usableArea": 10240,
         "image": "",
         "category": "building",
+        "bizCategory": "teaching",
         "description": "本科教学主楼，含多媒体教室与智慧教室。"
       }
     },
     {
       "type": "Feature",
-      "geometry": { "type": "Point", "coordinates": [110.2804, 19.755] },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.2804,
+          19.755
+        ]
+      },
       "properties": {
         "name": "实验楼",
         "height": 20,
         "department": "实验实训中心",
-        "campus": "主校区",
+        "campus": "东校区",
         "managementDept": "实验实训中心",
         "totalFloors": 5,
         "roomCount": 40,
@@ -35,12 +48,19 @@
         "usableArea": 7680,
         "image": "",
         "category": "building",
+        "bizCategory": "lab",
         "description": "承担刑技、网络、电子数据等实验实训教学。"
       }
     },
     {
       "type": "Feature",
-      "geometry": { "type": "Point", "coordinates": [110.2802, 19.7548] },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.2802,
+          19.7548
+        ]
+      },
       "properties": {
         "name": "图书馆",
         "height": 18,
@@ -53,12 +73,19 @@
         "usableArea": 6880,
         "image": "",
         "category": "building",
+        "bizCategory": "library",
         "description": "馆藏纸质图书 51.7 万册，电子图书 42 万册。"
       }
     },
     {
       "type": "Feature",
-      "geometry": { "type": "Point", "coordinates": [110.2805, 19.7547] },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.2805,
+          19.7547
+        ]
+      },
       "properties": {
         "name": "警体综合训练馆",
         "height": 16,
@@ -71,17 +98,24 @@
         "usableArea": 12000,
         "image": "",
         "category": "building",
+        "bizCategory": "sports",
         "description": "含射击馆、搏击馆、泅渡馆、模拟街区等训练场馆。"
       }
     },
     {
       "type": "Feature",
-      "geometry": { "type": "Point", "coordinates": [110.2801, 19.7551] },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.2801,
+          19.7551
+        ]
+      },
       "properties": {
         "name": "学生公寓",
         "height": 15,
         "department": "后勤保障",
-        "campus": "主校区",
+        "campus": "西校区",
         "managementDept": "学生工作处",
         "totalFloors": 5,
         "roomCount": 40,
@@ -89,17 +123,24 @@
         "usableArea": 5760,
         "image": "",
         "category": "building",
+        "bizCategory": "life",
         "description": "4 人一间，独立卫浴，配备空调与热水。"
       }
     },
     {
       "type": "Feature",
-      "geometry": { "type": "Point", "coordinates": [110.2806, 19.7552] },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          110.2806,
+          19.7552
+        ]
+      },
       "properties": {
         "name": "食堂",
         "height": 10,
         "department": "后勤保障",
-        "campus": "主校区",
+        "campus": "西校区",
         "managementDept": "后勤保障处",
         "totalFloors": 2,
         "roomCount": 16,
@@ -107,6 +148,7 @@
         "usableArea": 2560,
         "image": "",
         "category": "building",
+        "bizCategory": "life",
         "description": "学生食堂，提供多样化餐饮服务。"
       }
     }

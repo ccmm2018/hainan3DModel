@@ -37,12 +37,65 @@ export interface BuildingProps {
   usableArea?: number;
   /** 楼宇图片 URL（相对 public 或绝对地址） */
   image?: string;
-  /** 类型：building / road / water / other */
+  /** 类型：building / road / water / other（对象类型，与业务分类 bizCategory 不同） */
   category?: 'building' | 'road' | 'water' | 'other';
+  /**
+   * 业务分类 ID（统计口径，如 teaching / lab / library ...）。
+   * 与 BUILDING_CATEGORIES 的 id 对应；未显式声明时按楼名兜底归类。
+   * 这是「楼栋类别」的唯一数据来源——统计弹窗的饼图 / 校区概况 / 楼栋汇总
+   * 全部由它派生，不再在组件里各写一套正则。
+   */
+  bizCategory?: string;
   /** 备注描述 */
   description?: string;
   /** 任意附加属性 */
   [key: string]: unknown;
+}
+
+/** 楼栋业务分类元数据（统计口径唯一来源） */
+export interface BuildingCategoryMeta {
+  id: string;
+  label: string;
+  color: string;
+  order: number;
+  /** 楼名兜底匹配规则（数据未显式写 bizCategory 时用） */
+  match: RegExp;
+}
+
+/**
+ * 楼栋业务分类字典。改类别只改这里，饼图 / 汇总 / 详情自动一致。
+ * 顺序即图例与下钻列表的默认顺序。
+ */
+export const BUILDING_CATEGORIES: BuildingCategoryMeta[] = [
+  { id: 'teaching', label: '教学科研类', color: '#2f6fb0', order: 1, match: /教学|科研|办公楼/ },
+  { id: 'lab', label: '实验实训类', color: '#7a5fc0', order: 2, match: /实验|实训/ },
+  { id: 'library', label: '图书文化类', color: '#3a9b8e', order: 3, match: /图书/ },
+  {
+    id: 'sports', label: '体育训练类', color: '#d98b2b', order: 4,
+    match: /体育|训练馆|游泳|射击|搏击|琴剑|模拟街区|模拟法庭/,
+  },
+  { id: 'life', label: '生活服务类', color: '#c0507a', order: 5, match: /公寓|宿舍|食堂|生活/ },
+];
+export const OTHER_CATEGORY: BuildingCategoryMeta = {
+  id: 'other', label: '其他', color: '#8894a6', order: 99, match: /$^/,
+};
+
+/** 校区展示顺序（未在基础数据 campus 字段出现过的校区自动追加到末尾） */
+export const CAMPUS_ORDER: string[] = ['主校区', '东校区', '西校区'];
+
+/** 解析楼栋业务分类：优先数据显式字段，兜底楼名规则 */
+export function resolveBizCategory(
+  b: Pick<BuildingProps, 'name' | 'bizCategory'>,
+): BuildingCategoryMeta {
+  if (b.bizCategory) {
+    const hit = [...BUILDING_CATEGORIES, OTHER_CATEGORY].find(
+      (c) => c.id === b.bizCategory || c.label === b.bizCategory,
+    );
+    if (hit) return hit;
+  }
+  const name = b.name ?? '';
+  for (const c of BUILDING_CATEGORIES) if (c.match.test(name)) return c;
+  return OTHER_CATEGORY;
 }
 
 /** name → props 映射表 */
@@ -72,6 +125,7 @@ export function loadBuildingDataFromGeoJSON(geoJson: any): BuildingDataMap {
       usableArea: p.usableArea ?? p.usable_area,
       image: p.image ?? p.img ?? p.photo,
       category: p.category ?? (p.building ? 'building' : p.highway ? 'road' : 'other'),
+      bizCategory: p.bizCategory ?? p.biz_category ?? p.categoryName ?? p.category_name,
       description: p.description ?? p.amenity,
       ...p,
     };
@@ -134,19 +188,21 @@ export const SAMPLE_BUILDING_DATA: BuildingDataMap = {
     buildingArea: 12800,
     usableArea: 10240,
     category: 'building',
+    bizCategory: 'teaching',
     description: '本科教学主楼，含多媒体教室与智慧教室。',
   },
   实验楼: {
     name: '实验楼',
     height: 20,
     department: '实验实训中心',
-    campus: '主校区',
+    campus: '东校区',
     managementDept: '实验实训中心',
     totalFloors: 5,
     roomCount: 40,
     buildingArea: 9600,
     usableArea: 7680,
     category: 'building',
+    bizCategory: 'lab',
     description: '承担刑技、网络、电子数据等实验实训教学。',
   },
   图书馆: {
@@ -160,6 +216,7 @@ export const SAMPLE_BUILDING_DATA: BuildingDataMap = {
     buildingArea: 8600,
     usableArea: 6880,
     category: 'building',
+    bizCategory: 'library',
     description: '馆藏纸质图书 51.7 万册，电子图书 42 万册。',
   },
   警体综合训练馆: {
@@ -173,32 +230,35 @@ export const SAMPLE_BUILDING_DATA: BuildingDataMap = {
     buildingArea: 15000,
     usableArea: 12000,
     category: 'building',
+    bizCategory: 'sports',
     description: '含射击馆、搏击馆、泅渡馆、模拟街区等训练场馆。',
   },
   学生公寓: {
     name: '学生公寓',
     height: 15,
     department: '后勤保障',
-    campus: '主校区',
+    campus: '西校区',
     managementDept: '学生工作处',
     totalFloors: 5,
     roomCount: 40,
     buildingArea: 7200,
     usableArea: 5760,
     category: 'building',
+    bizCategory: 'life',
     description: '4 人一间，独立卫浴，配备空调与热水。',
   },
   食堂: {
     name: '食堂',
     height: 10,
     department: '后勤保障',
-    campus: '主校区',
+    campus: '西校区',
     managementDept: '后勤保障处',
     totalFloors: 2,
     roomCount: 16,
     buildingArea: 3200,
     usableArea: 2560,
     category: 'building',
+    bizCategory: 'life',
     description: '学生食堂，提供多样化餐饮服务。',
   },
 
@@ -214,6 +274,7 @@ export const SAMPLE_BUILDING_DATA: BuildingDataMap = {
     buildingArea: 1296,
     usableArea: 1100,
     category: 'building',
+    bizCategory: 'teaching',
     description: '教学楼A栋（演示）：2 层图纸、各 12 间房、字段完整、带楼栋指纹。',
     // —— 楼栋指纹字段：通过 BuildingProps 索引签名挂载，不修改接口定义 [约束9] ——
     // 以下值与 seedMockFloorPlans 注入的图纸一致；运行时被刷新覆盖。
@@ -238,6 +299,7 @@ export const SAMPLE_BUILDING_DATA: BuildingDataMap = {
     buildingArea: 960,
     usableArea: 820,
     category: 'building',
+    bizCategory: 'lab',
     description: '实训楼（演示）：1 层局部坐标图纸（mm），用于演示 AnchorPicker 手工配准流程。',
   },
   node_tushuguan: {
@@ -251,6 +313,7 @@ export const SAMPLE_BUILDING_DATA: BuildingDataMap = {
     buildingArea: 8600,
     usableArea: 6880,
     category: 'building',
+    bizCategory: 'library',
     description: '图书馆（演示）：尚未导入任何室内图纸，用于演示「暂无室内图纸」空状态。',
   },
 };

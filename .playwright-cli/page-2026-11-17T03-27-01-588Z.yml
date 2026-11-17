@@ -1,0 +1,50 @@
+- generic [ref=e3]:
+  - generic [ref=e4]:
+    - iframe [ref=e5]
+    - generic [ref=e9]: © 2026 AutoNavi
+    - generic:
+      - generic: 教学楼 (0)
+      - generic: 教学楼 (1)
+      - generic: 教学楼 (2)
+      - generic: 食堂 (3)
+      - generic: 办公楼
+      - generic: 食堂 (7)
+      - generic: 宿舍楼 (8)
+      - generic: 宿舍楼 (9)
+      - generic: 宿舍楼 (10)
+      - generic: 琴剑楼
+      - generic: 图书馆
+      - generic: 游泳馆
+      - generic: 体育馆 (14)
+      - generic: 体育馆 (15)
+      - generic: 宿舍楼 (16)
+      - generic: 模拟法庭
+      - generic: 教学楼 (18)
+      - generic: 教学楼 (19)
+      - generic: 搏击馆
+      - generic: 射击馆
+      - generic: 模拟街区 (22)
+      - generic: 模拟街区 (23)
+      - generic: 模拟街区 (24)
+      - generic: 模拟街区 (25)
+  - generic: 海南警察学院 · 3D 可视化场景
+  - button "统计概览 26 栋 · 190 间房 ↗" [ref=e10] [cursor=pointer]:
+    - strong [ref=e12]: 统计概览
+    - generic [ref=e13]: 26 栋 · 190 间房
+    - generic [ref=e14]: ↗
+  - generic [ref=e15]:
+    - generic [ref=e16]:
+      - generic [ref=e17]: 视图
+      - button "三维" [ref=e18] [cursor=pointer]
+    - generic [ref=e19]:
+      - generic [ref=e20]: 量算
+      - button "测距" [ref=e21] [cursor=pointer]
+      - button "测面" [ref=e22] [cursor=pointer]
+      - button "清除" [ref=e23] [cursor=pointer]
+    - button "打印 / 导出" [ref=e24] [cursor=pointer]
+    - button "校准" [ref=e25] [cursor=pointer]
+  - generic [ref=e26]:
+    - button "2.5D（待开发）" [disabled] [ref=e27]
+    - button "室内（待开发）" [disabled] [ref=e28]
+  - textbox "搜索建筑名称，回车定位…" [ref=e30]
+  - generic: 点击模型拾取建筑 · 楼栋名称常驻显示 · 输入搜索定位

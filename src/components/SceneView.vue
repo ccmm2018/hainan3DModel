@@ -34,84 +34,28 @@
       海南警察学院 · 3D 可视化场景
     </div>
 
-    <!-- 校园建筑概览：面向使用者的业务数据（楼栋 / 楼层 / 房间 / 面积）。
-         数值由 buildingData、roomData、objectList 实时聚合，不写死；
-         模型楼栋数（GLB 节点）与已录入业务楼栋数分开标注，避免把局部面积当成全校数据。
-         技术参数（顶点 / 三角面 / 材质等）默认隐藏在底部「技术参数（开发用）」折叠区。 -->
-    <div
+    <!-- 统计概览触发按钮：点击后在弹窗中校区下钻（总览 → 详情 → 楼栋 → 楼层 → 房间） -->
+    <button
       v-if="modelStats || buildingOverview.modelBuildings"
-      class="model-stats"
-      :class="{ 'model-stats--collapsed': !statsExpanded }"
+      class="stats-trigger"
+      type="button"
+      title="打开校区数据统计"
+      @click="statsDialogOpen = true"
     >
-      <button
-        class="model-stats__head"
-        type="button"
-        :aria-expanded="statsExpanded"
-        :title="statsExpanded ? '收起建筑概览' : '展开建筑概览'"
-        @click="statsExpanded = !statsExpanded"
-      >
-        <span class="model-stats__dot"></span>
-        <strong>校园建筑概览</strong>
-        <span class="model-stats__brief">{{ buildingOverview.modelBuildings }} 栋 · {{ buildingOverview.roomTotal }} 间房</span>
-        <span class="model-stats__caret">{{ statsExpanded ? '−' : '+' }}</span>
-      </button>
-      <div v-if="statsExpanded" class="model-stats__content">
-        <div v-if="!businessReady" class="model-stats__warn">业务数据未加载 · 当前为内置示例，数值仅供参考</div>
-        <div class="model-stats__grid">
-          <div class="model-stats__cell"><span>模型楼栋</span><b>{{ buildingOverview.modelBuildings }} 栋</b></div>
-          <div class="model-stats__cell"><span>业务楼栋（已录）</span><b>{{ buildingOverview.recordedBuildings }} 栋</b></div>
-          <div class="model-stats__cell"><span>建筑总面积</span><b>{{ fmtArea(buildingOverview.buildingArea) }}</b></div>
-          <div class="model-stats__cell"><span>使用面积</span><b>{{ fmtArea(buildingOverview.usableArea) }}</b></div>
-          <div class="model-stats__cell"><span>楼层总数（已录）</span><b>{{ buildingOverview.totalFloors }} 层</b></div>
-          <div class="model-stats__cell"><span>房间总数</span><b>{{ buildingOverview.roomTotal }} 间</b></div>
-        </div>
-        <div class="model-stats__section">
-          <div class="model-stats__section-title">楼层分布 <small>各层房间数</small></div>
-          <div class="model-stats__bars">
-            <div v-for="f in buildingOverview.floors" :key="f.floor" class="model-stats__bar">
-              <b>{{ f.count }}</b>
-              <i :style="{ height: Math.max(5, Math.round(f.count / buildingOverview.maxFloorCount * 24)) + 'px' }"></i>
-              <span>{{ f.floor }}F</span>
-            </div>
-          </div>
-        </div>
-        <div class="model-stats__section">
-          <div class="model-stats__section-title">房间状态</div>
-          <div class="model-stats__legend">
-            <span v-for="s in buildingOverview.status" :key="s.key" class="model-stats__legend-item">
-              <i :style="{ background: s.color }"></i>{{ s.label }} <b>{{ s.count }}</b>
-            </span>
-          </div>
-        </div>
-        <div class="model-stats__foot">
-          <span>{{ businessReady ? '数据源：buildings / rooms.geojson' : '数据源：内置示例' }}（{{ buildingOverview.recordedBuildings }} 栋已录入）</span>
-        </div>
-        <div class="model-stats__actions">
-          <button class="model-stats__more" type="button" @click="detailsOpen = !detailsOpen">
-            {{ detailsOpen ? '收起' : '查看' }}楼栋明细（{{ buildingOverview.recordedBuildings }}）
-          </button>
-          <button class="model-stats__tech-toggle" type="button" @click="techOpen = !techOpen">
-            技术参数 {{ techOpen ? '−' : '+' }}
-          </button>
-        </div>
-        <div v-if="detailsOpen" class="model-stats__list">
-          <div v-for="d in buildingOverview.details" :key="d.name" class="model-stats__row">
-            <strong>{{ d.name }}</strong>
-            <span>{{ d.floors != null ? `${d.floors} 层` : '—' }} · {{ fmtArea(d.area) }} · {{ d.rooms }} 间</span>
-          </div>
-          <div class="model-stats__types">模型楼栋构成：{{ buildingOverview.typesText }}</div>
-        </div>
-        <div v-if="techOpen && modelStats" class="model-stats__tech">
-          <span>网格 {{ fmtCount(modelStats.meshes) }}</span>
-          <span>三角面 {{ fmtCount(modelStats.triangles) }}</span>
-          <span>顶点 {{ fmtCount(modelStats.vertices) }}</span>
-          <span>材质 / 贴图 {{ modelStats.materials }} / {{ modelStats.textures }}</span>
-          <span>体积 {{ fmtMB(modelStats.bytes) }}</span>
-          <span>加载 {{ fmtSec(modelStats.loadMs) }}</span>
-          <span v-if="modelStats.version">v{{ modelStats.version }}</span>
-        </div>
-      </div>
-    </div>
+      <span class="stats-trigger__dot"></span>
+      <strong>统计概览</strong>
+      <span class="stats-trigger__brief">{{ buildingOverview.modelBuildings }} 栋 · {{ buildingOverview.roomTotal }} 间房</span>
+      <span class="stats-trigger__arrow">↗</span>
+    </button>
+
+    <CampusStatsDialog
+      v-if="statsDialogOpen"
+      :buildings="buildingData"
+      :rooms="roomData"
+      :model-buildings="buildingOverview.modelBuildings"
+      :business-ready="businessReady"
+      @close="statsDialogOpen = false"
+    />
 
     <!-- 工具栏 -->
     <div class="toolbar">
@@ -691,6 +635,7 @@ import ExportDialog from './ExportDialog.vue';
 import AllocationPanel from './AllocationPanel.vue';
 import DxfImport from './DxfImport.vue';
 import FloorPlan2D from './FloorPlan2D.vue';
+import CampusStatsDialog from './CampusStatsDialog.vue';
 import { useBuildingStore } from '../stores/building';
 import { computeTotalArea, submitAllocation } from '../utils/allocation';
 
@@ -718,27 +663,11 @@ const modelStageText = computed(() => {
   return '';
 });
 
-// 首页「模型概览」：onModelReady 后由 MapScene.getModelStats() 从当前 GLB 实时统计，
-// 不写死、也不使用 SAMPLE_BUILDING_DATA 等示例数据；可收起以免遮挡地图。
-const modelStats = ref<ModelStats | null>(null); // 技术参数默认隐藏，仅「开发用」折叠区展示
-const statsExpanded = ref(true);
-const detailsOpen = ref(false);   // 楼栋明细列表
-const techOpen = ref(false);      // 技术参数（开发用）
+// 模型统计：onModelReady 后由 MapScene.getModelStats() 从当前 GLB 实时统计（用于触发按钮 v-if）。
+// 详细统计已移到 CampusStatsDialog 弹窗，首页只保留一个触发按钮。
+const modelStats = ref<ModelStats | null>(null);
+const statsDialogOpen = ref(false);
 const businessReady = ref(false); // buildings.geojson / rooms.geojson 是否都加载成功（防止把示例数据当真实数据展示）
-function fmtCount(n: number): string {
-  if (!isFinite(n) || n <= 0) return '0';
-  if (n >= 10000) return `${(n / 10000).toFixed(n >= 100000 ? 1 : 2)} 万`;
-  return n.toLocaleString('zh-CN');
-}
-function fmtArea(n: number | null): string {
-  return n != null ? `${n.toLocaleString('zh-CN')} ㎡` : '—';
-}
-function fmtMB(bytes: number): string {
-  return bytes > 0 ? `${(bytes / 1024 / 1024).toFixed(2)} MB` : '—';
-}
-function fmtSec(ms: number): string {
-  return ms > 0 ? `${(ms / 1000).toFixed(1)} s` : '—';
-}
 
 const config: SceneConfig = DEFAULT_SCENE_CONFIG;
 // 属性数据源：优先从 GeoJSON / 后端 API 读取，失败则回退到内置示例数据
@@ -2185,6 +2114,37 @@ onBeforeUnmount(() => {
   background: #34d399;
   box-shadow: 0 0 0 3px rgba(52, 211, 153, 0.15);
 }
+
+/* 统计概览触发按钮：左上角、标题徽标下方，点击打开校区数据统计弹窗 */
+.stats-trigger {
+  position: absolute;
+  z-index: 120;
+  top: 60px;
+  left: 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 38px;
+  padding: 0 13px;
+  border: 1px solid #2d4260;
+  border-radius: 20px;
+  background: rgba(16, 24, 40, 0.92);
+  box-shadow: 0 8px 24px rgba(2, 6, 23, 0.3);
+  backdrop-filter: blur(10px);
+  color: #e2e8f0;
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: border-color .15s, background .15s, transform .12s;
+}
+.stats-trigger:hover { border-color: #3d82c4; background: rgba(20, 38, 64, 0.96); transform: translateY(-1px); }
+.stats-trigger strong { font-weight: 600; }
+.stats-trigger__dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: #34d399; box-shadow: 0 0 0 4px rgba(52, 211, 153, 0.16);
+  flex-shrink: 0;
+}
+.stats-trigger__brief { color: #93a4bd; font-size: 11.5px; }
+.stats-trigger__arrow { color: #56b0f0; font-size: 14px; margin-left: 2px; }
 
 /* 首页模型数据概览：左上角、标题徽标下方，可收起 */
 .model-stats {

@@ -112,16 +112,6 @@ export interface Floor {
   transform?: FloorTransform;
 }
 
-/** 房间维护信息（巡检 / 责任等），随楼层一并持久化 */
-export interface RoomMaintenance {
-  /** 责任部门 */
-  responsibleDept?: string;
-  /** 最近巡检日期（ISO yyyy-mm-dd） */
-  lastInspect?: string;
-  /** 维护备注 */
-  note?: string;
-}
-
 /**
  * 房间在 6×2 示意网格中的定位。
  * 结构编辑（拆分 / 合并 / 新增 / 拖动）后随房间实体一起持久化，
@@ -169,8 +159,6 @@ export interface Room {
   remark?: string;
   /** 预览确认阶段用户可剔除误识别房间 */
   selected?: boolean;
-  /** 维护信息（巡检 / 责任等） */
-  maintenance?: RoomMaintenance;
   /** 示意网格定位（结构编辑后写入，刷新后据此恢复拆分子房 / 拖动位置） */
   gridSpan?: RoomGridSpan;
 }

@@ -313,7 +313,7 @@ export const useBuildingStore = defineStore('building', () => {
     patch: Partial<
       Pick<
         Room,
-        'code' | 'number' | 'name' | 'dept' | 'usePurpose' | 'useArea' | 'buildArea' | 'inspectStatus' | 'maintenance'
+        'code' | 'number' | 'name' | 'dept' | 'usePurpose' | 'useArea' | 'buildArea' | 'inspectStatus'
       >
     >,
   ): void {
@@ -483,8 +483,7 @@ export const useBuildingStore = defineStore('building', () => {
    * outlines 由组件按网格子矩形算好后传入，这里只负责替换房间实体与持久化。
    *  - 面积按份数平分（原房已填面积优先，未填则回退轮廓几何面积），避免拆完每间仍显示整间面积；
    *  - 房号 / 名称加 -1 / -2… 后缀避免重号，用户可在「编辑资料」里逐间改；
-   *  - 部门 / 用途 / 业务状态 / 审图状态继承原房（物理分割通常仍归同一部门）；
-   *  - 维护台账（责任部门 / 巡检 / 备注）不复制，拆出的房间需重新指定，避免一份台账被复制成多份。
+   *  - 部门 / 用途 / 业务状态 / 审图状态继承原房（物理分割通常仍归同一部门）。
    */
   function splitRoom(fid: string, roomId: string, outlines: Pt[][]): string[] {
     const list = rooms.value[fid];

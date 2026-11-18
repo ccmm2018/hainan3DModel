@@ -24,6 +24,15 @@ const ElInput = {
   emits: ['update:modelValue'],
   template: `<input class="el-input-stub" :value="modelValue" @input="$emit('update:modelValue', $event.target.value)" />`,
 };
+const ElSelect = {
+  props: ['modelValue', 'size', 'placeholder', 'filterable', 'allowCreate', 'defaultFirstOption'],
+  emits: ['update:modelValue'],
+  template: `<select class="el-select-stub" :value="modelValue"><slot/></select>`,
+};
+const ElOption = {
+  props: ['label', 'value'],
+  template: `<option class="el-option-stub" :value="value">{{ label }}</option>`,
+};
 const ElEmpty = { props: ['description'], template: `<div class="el-empty-stub"></div>` };
 const passthrough = (name: string) => ({
   name,
@@ -36,6 +45,8 @@ const stubs = {
   'el-dialog': ElDialog,
   'el-button': ElButton,
   'el-input': ElInput,
+  'el-select': ElSelect,
+  'el-option': ElOption,
   'el-empty': ElEmpty,
   'el-radio-group': passthrough('el-radio-group'),
   'el-radio-button': passthrough('el-radio-button'),
@@ -95,9 +106,18 @@ describe('FloorPlan2D 房间编辑/隐藏/重新显示', () => {
     await editBtn!.trigger('click');
     await nextTick();
 
-    // 新 UX：基础资料 / 维护台账合并为一个表单，一次保存（不再有两个入口 / 两个保存按钮）
+    // 编辑本房间：基础资料单表单，一次保存（维护台账已移除，部门改为下拉）
     expect(wrapper.find('.fpv-pop__form--all').exists()).toBe(true);
     expect(wrapper.find('.fpv-pop__section').exists()).toBe(true);
+    // s496：部门是下拉（el-select），不是手动输入框；维护台账及其字段已彻底移除
+    expect(wrapper.find('.fpv-pop__form--all .el-select-stub').exists()).toBe(true);
+    expect(wrapper.find('.fpv-pop__form--all').text()).not.toContain('维护台账');
+    expect(wrapper.find('.fpv-pop__form--all').text()).not.toContain('责任部门');
+    // s497：编辑态与只读态显示项一致——也要有审图状态 + 业务状态色块
+    const editFormText = wrapper.find('.fpv-pop__form--all').text();
+    expect(editFormText).toContain('审图状态');
+    expect(editFormText).toContain('业务状态');
+    expect(wrapper.find('.fpv-pop__form--all .fpv-pop__status-btn').exists()).toBe(true);
     // 合并表单第一项仍是房间号、第二项是名称（绑定 editRoom.name）
     const editNameInput = wrapper.findAll('input.el-input-stub')[1];
     expect(editNameInput.exists()).toBe(true);

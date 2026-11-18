@@ -412,35 +412,6 @@ function floorStatusLabel(s: Floor['status']): string {
   return { pending: '待导入', parsed: '正常', partial: '部分完成', failed: '失败' }[s] ?? s;
 }
 
-// ---- 维护信息（Room.maintenance）----
-const maintForm = reactive({ responsibleDept: '', lastInspect: '', note: '' });
-function loadMaint(r: RoomLike | null): void {
-  const m = r && 'maintenance' in r ? r.maintenance : undefined;
-  maintForm.responsibleDept = m?.responsibleDept ?? '';
-  maintForm.lastInspect = m?.lastInspect ?? '';
-  maintForm.note = m?.note ?? '';
-}
-
-/** notify=false 供合并保存调用（由 saveRoomAll 统一给一次提示，避免连弹两个 toast） */
-function saveMaint(notify = true): void {
-  const f = currentFloor.value;
-  const r = liveRoom.value;
-  if (!f || !r) return;
-  if (!isRealRoom(r)) {
-    // 合成预览房间不入库，仅给出提示，不写 store
-    if (notify) ElMessage.info('当前为预览房间，维护信息未写入数据库');
-    return;
-  }
-  store.updateRoom(f.id, r.id, {
-    maintenance: {
-      responsibleDept: maintForm.responsibleDept.trim() || undefined,
-      lastInspect: maintForm.lastInspect.trim() || undefined,
-      note: maintForm.note.trim() || undefined,
-    },
-  });
-  if (notify) ElMessage.success('已保存维护信息');
-}
-
 // ---- 空状态 / 错误状态 / 部分成功状态（store 模式，针对当前选中楼层）----
 const isFailed = computed(() => props.embedded ? false : currentFloor.value?.status === 'failed');
 const isPartial = computed(() => props.embedded ? false : currentFloor.value?.status === 'partial');
@@ -2066,8 +2037,8 @@ const statusStatItems = computed(() =>
 // ---- 交互：仅点击选中弹出小卡片（已移除 hover tooltip，避免遮挡与误触）----
 const selectedId = ref<string | null>(null);
 const selectedIds = ref<string[]>([]);
-/** 详情卡子面板：null = 只读信息；'edit' = 一个表单（基础资料 + 维护台账）。
- *  2026-11-15 简化：原「修改信息」「维护房间信息」两个入口 / 两个保存按钮合并为「编辑本房间」一次保存。 */
+/** 详情卡子面板：null = 只读信息；'edit' = 基础资料表单。
+ *  2026-11-15 原两个入口合并为「编辑本房间」一次保存；2026-11-18 移除维护台账，只留基础资料。 */
 const popMode = ref<'edit' | null>(null);
 
 /** 弹窗相对 .fpv-main 的锚点（点击点在 main 内的像素坐标）。弹窗从该锚点向左上展开，
@@ -2260,9 +2231,6 @@ const roomInfoPairs = computed<{ label: string; value: string }[]>(() => {
   ];
 });
 
-/** 选中房间变化时，同步加载其维护信息到表单 */
-watch(liveRoom, (r) => loadMaint(r), { immediate: true });
-
 /** 展开 / 收起「编辑本房间」表单会改变弹窗高度，重新夹取位置避免超出界面 */
 watch(popMode, (m) => {
   // 展开「编辑本房间」时，把当前房间字段重新载入表单，避免残留上次未保存的编辑
@@ -2397,6 +2365,16 @@ const editRoom = reactive({
   buildArea: '',
 });
 
+/** 部门下拉候选：当前数据里所有房间已出现过的部门（去重排序）。
+ *  用 el-select 的 filterable + allow-create：既能从已有部门里选、统一命名，也允许填新部门不锁死。 */
+const deptOptions = computed<string[]>(() => {
+  const set = new Set<string>();
+  Object.values(store.rooms).forEach((list) => list.forEach((r) => { if (r.dept?.trim()) set.add(r.dept.trim()); }));
+  // demo 房间（genDemoRooms）的部门也纳入，保证演示态下拉有选项
+  genDemoRooms().forEach((d) => { if (d.room.dept?.trim()) set.add(d.room.dept.trim()); });
+  return [...set].sort((a, b) => a.localeCompare(b, 'zh-Hans-CN'));
+});
+
 /** 进入补填模式：切到审图着色、自动选中第一个待补填房间 */
 function startFill(): void {
   fillMode.value = true;
@@ -2415,11 +2393,13 @@ function startFill(): void {
   if (first) selectedId.value = first.id;
 }
 
-/** 选中房间变化时，把字段载入编辑表单 */
+/** 选中房间变化时，把字段载入编辑表单。
+ *  s497：编辑态下不重载——点业务状态色块会更新 liveRoom，若此时重载会把用户正在填、未保存的字段冲掉。
+ *  进入编辑态时的字段载入由 popMode watch 负责，无需此 watch 在编辑态重复触发。 */
 watch(
   liveRoom,
   (r) => {
-    if (!r) return;
+    if (!r || popMode.value === 'edit') return;
     editRoom.code = r.code;
     editRoom.number = displayRoomNo(r);
     // s492: 同 popMode 载入处，名称栏与只读态同口径走 cleanName（面积脏值→「（未命名）」照常显示，不清空）
@@ -2459,19 +2439,14 @@ function saveEdit(notify = true): void {
   if (notify) ElMessage.success('已保存房间信息');
 }
 
-/**
- * 「编辑本房间」一次保存：基础资料 + 维护台账一起写库，保存后回到只读态。
- * 顺序必须先维护后基础：saveEdit 里 selectedRoom 重新指向会触发 watch(liveRoom) → loadMaint()，
- * 若后存维护信息，用户刚填的维护字段会被重载成旧值而丢失。
- */
+/** 「编辑本房间」保存基础资料并写库，保存后回到只读态 */
 function saveRoomAll(): void {
   const r = liveRoom.value;
   if (!r) return;
   const real = isRealRoom(r) && !!currentFloor.value;
-  saveMaint(false);
   saveEdit(false);
   popMode.value = null;
-  ElMessage.success(real ? '已保存房间资料' : '已保存基础资料（预览房间，维护信息不入库）');
+  ElMessage.success(real ? '已保存房间资料' : '已保存基础资料（预览房间不入库）');
 }
 
 /** 当前被「隐藏此房间」移除的房间列表（真实模式来自 store；demo 模式来自本地覆盖），用于侧栏恢复。 */
@@ -3001,7 +2976,7 @@ const GUIDE_HTML = `
   <p style="margin:0 0 6px">② <b>图例</b>：说明每种颜色代表什么。浏览时只读；<b>编辑结构 + 使用状态</b>时，先点色块再点房间即可批量标注状态；只改一间房的状态，直接在它的详情卡里点色块。</p>
   <p style="margin:0 0 6px">③ <b>楼层</b>：点 1F / 2F 切换楼层，标题里显示本层房间数与面积。</p>
   <p style="margin:0 0 6px">④ <b>视图工具</b>：源对齐（把图纸转正）、导入图纸、放大 / 缩小 / 复位；画布也支持滚轮缩放、按住拖拽平移。</p>
-  <p style="margin:0 0 6px">⑤ <b>房间结构</b>：只管「有哪些房间、怎么摆」。点「编辑结构」才出现新增 / 合并 / 拆分 / 删除 / 拖动；<b>恰好选中 1 间</b>再点「拆分」，可把它等分成 2~4 间（房号加 -1/-2 后缀、面积按份数平分，本层房间数不受限制）；点房间是<b>累积多选</b>，多选时拆分会置灰，点画布空白处或「清空选中」即可重新单选；<b>完成</b>保存、<b>取消·回滚</b>撤销本次全部改动；拆出的子房排布与拖动位置也会一起保存，刷新页面后仍保持。<b>改单间房资料不需要进这里</b>：浏览时点房间，在详情卡里点「编辑本房间」，基础资料和维护台账一起填、一次保存。</p>
+  <p style="margin:0 0 6px">⑤ <b>房间结构</b>：只管「有哪些房间、怎么摆」。点「编辑结构」才出现新增 / 合并 / 拆分 / 删除 / 拖动；<b>恰好选中 1 间</b>再点「拆分」，可把它等分成 2~4 间（房号加 -1/-2 后缀、面积按份数平分，本层房间数不受限制）；点房间是<b>累积多选</b>，多选时拆分会置灰，点画布空白处或「清空选中」即可重新单选；<b>完成</b>保存、<b>取消·回滚</b>撤销本次全部改动；拆出的子房排布与拖动位置也会一起保存，刷新页面后仍保持。<b>改单间房资料不需要进这里</b>：浏览时点房间，在详情卡里点「编辑本房间」，房间号 / 名称 / 部门 / 用途 / 面积一次填好保存（部门可从下拉选或输入新值）。</p>
   <p style="margin:0">⑥ <b>其它</b>：被隐藏的房间在这里恢复；点「?」可随时重看本说明。</p>
 </div>`;
 
@@ -3382,22 +3357,53 @@ function enterEdit(): void {
             </div>
 
             <div class="fpv-pop__content">
-              <!-- 编辑本房间：基础资料 + 维护台账合成一个表单、一次保存（2026-11-15 简化） -->
+              <!-- 编辑本房间：基础资料表单、一次保存（维护台账已于 2026-11-18 移除）。
+                   s497：补充缩略图 / 审图状态 / 业务状态色块，与只读态显示项完全一致，仅在能否编辑上有区别。 -->
               <div v-if="popMode === 'edit'" class="fpv-pop__form fpv-pop__form--all">
+                <!-- 头部：缩略图 + 审图状态 + 业务状态（flex 容器，不参与下方字段的 grid 两列） -->
+                <div class="fpv-pop__edit-head">
+                  <div v-if="roomThumb" class="fpv-pop__img">
+                    <svg :viewBox="roomThumb.viewBox" preserveAspectRatio="xMidYMid meet">
+                      <polygon :points="roomThumb.points" :fill="roomThumb.fill" :stroke="roomThumb.stroke" stroke-width="2" />
+                    </svg>
+                    <span class="fpv-pop__img-tag">缩略图</span>
+                  </div>
+                  <div v-else class="fpv-pop__img fpv-pop__img--empty">暂无图形</div>
+                  <div class="fpv-pop__edit-head-info">
+                    <div class="fpv-pop__cell"><span>审图状态</span><b>{{ INSPECT_LABELS[liveRoom?.inspectStatus ?? 'normal'] ?? '—' }}</b></div>
+                    <div class="fpv-pop__status">
+                      <div class="fpv-pop__status-hd">
+                        <span class="fpv-pop__status-label">业务状态 · 点色块直接改</span>
+                        <button type="button" class="fpv-pop__status-clear" @click="setUseStatus('')">清空</button>
+                      </div>
+                      <div class="fpv-pop__status-btns">
+                        <button
+                          v-for="s in STATUS_QUICK"
+                          :key="s.value"
+                          type="button"
+                          class="fpv-pop__status-btn"
+                          :class="{ 'is-on': liveRoom?.useStatus === s.value }"
+                          @click="setUseStatus(s.value)"
+                        ><i :style="{ background: USE_COLORS[s.value] }"></i>{{ s.label }}</button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
                 <div class="fpv-pop__section">基础资料</div>
                 <!-- s492: 「房间号」栏绑定 number（与顶面/只读态 displayRoomNo 同口径，显示 204）；
                      code 是房间编码(B1-F2-R04)，不作为房号展示。editRoom.code 仍在载入时保留原值，保存写回不丢。 -->
                 <div class="fpv-edit__row"><label>房间号</label><el-input v-model="editRoom.number" size="small" /></div>
                 <div class="fpv-edit__row"><label>名称</label><el-input v-model="editRoom.name" size="small" /></div>
-                <div class="fpv-edit__row"><label>部门</label><el-input v-model="editRoom.dept" size="small" /></div>
+                <div class="fpv-edit__row">
+                  <label>部门</label>
+                  <el-select v-model="editRoom.dept" size="small" filterable allow-create default-first-option placeholder="选择或输入部门" style="width:100%">
+                    <el-option v-for="d in deptOptions" :key="d" :label="d" :value="d" />
+                  </el-select>
+                </div>
                 <div class="fpv-edit__row"><label>用途</label><el-input v-model="editRoom.usePurpose" size="small" /></div>
                 <div class="fpv-edit__row"><label>使用面积</label><el-input v-model="editRoom.useArea" size="small" type="number" /></div>
                 <div class="fpv-edit__row"><label>建筑面积</label><el-input v-model="editRoom.buildArea" size="small" type="number" /></div>
-
-                <div class="fpv-pop__section">维护台账</div>
-                <div class="fpv-edit__row"><label>责任部门</label><el-input v-model="maintForm.responsibleDept" size="small" /></div>
-                <div class="fpv-edit__row"><label>最近巡检</label><el-input v-model="maintForm.lastInspect" size="small" placeholder="yyyy-mm-dd" /></div>
-                <div class="fpv-edit__row fpv-edit__row--wide"><label>备注</label><el-input v-model="maintForm.note" size="small" type="textarea" :rows="2" /></div>
 
                 <!-- 返回查看由卡片底部统一按钮承担，表单内不再重复放一个 -->
                 <div class="fpv-info__actions">
@@ -3987,8 +3993,10 @@ function enterEdit(): void {
 .fpv-pop__img svg { width: 100%; height: 100%; display: block; }
 .fpv-pop__img-tag { position: absolute; left: 4px; bottom: 3px; font-size: 10px; color: #9ca3af; background: rgba(255,255,255,.8); padding: 0 3px; border-radius: 3px; }
 .fpv-pop__img--empty { display: flex; align-items: center; justify-content: center; color: #9ca3af; font-size: 11px; text-align: center; }
-/* 表单态隐藏缩略图，把整行宽度让给字段 */
-.fpv-pop--form .fpv-pop__img { display: none; }
+/* s497：编辑态头部复用缩略图——覆盖「表单态隐藏缩略图」的旧规则，让编辑态与只读态显示项一致 */
+.fpv-pop--form .fpv-pop__edit-head .fpv-pop__img { display: block; }
+.fpv-pop__edit-head { grid-column: 1 / -1; display: flex; gap: 10px; align-items: flex-start; }
+.fpv-pop__edit-head-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
 
 .fpv-pop__info { flex: 1; min-width: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 5px; }
 .fpv-pop__cell {
@@ -4017,7 +4025,7 @@ function enterEdit(): void {
 .fpv-pop__form .fpv-info__actions { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 6px; margin: 2px 0 0; }
 .fpv-pop__form .fpv-edit__row--wide { grid-column: 1 / -1; }
 
-/* 合并后的单表单：基础资料 / 维护台账两节，一次保存 */
+/* 编辑本房间单表单：基础资料一节，一次保存（维护台账已移除） */
 .fpv-pop__form--all { width: 100%; }
 .fpv-pop__section {
   grid-column: 1 / -1;

@@ -685,7 +685,7 @@ function polyCentroid(pts: [number, number][]): [number, number] {
   let y = 0;
   for (const [px, py] of pts) {
     x += px;
-    y += py;
+    y += py; 
   }
   const n = pts.length || 1;
   return [x / n, y / n];
@@ -703,7 +703,7 @@ function offsetPoly(pts: [number, number][], amt: number): [number, number][] {
 }
 
 /** 点到线段距离（用于估算安全内缩量，避免小房间内缩自交） */
-function distPointToSeg(p: [number, number], a: [number, number], b: [number, number]): number {
+function distPointToSeg(p: [number, number], a: [number, number],  b: [number, number]): number {
   const dx = b[0] - a[0];
   const dy = b[1] - a[1];
   const l2 = dx * dx + dy * dy;
@@ -2395,7 +2395,7 @@ function startFill(): void {
 
 /** 选中房间变化时，把字段载入编辑表单。
  *  s497：编辑态下不重载——点业务状态色块会更新 liveRoom，若此时重载会把用户正在填、未保存的字段冲掉。
- *  进入编辑态时的字段载入由 popMode watch 负责，无需此 watch 在编辑态重复触发。 */
+ *  编辑态的载入由 watch(popMode) 进入时统一负责，这里不重复。 */
 watch(
   liveRoom,
   (r) => {
@@ -3992,10 +3992,15 @@ function enterEdit(): void {
 .fpv-pop__img svg { width: 100%; height: 100%; display: block; }
 .fpv-pop__img-tag { position: absolute; left: 4px; bottom: 3px; font-size: 10px; color: #9ca3af; background: rgba(255,255,255,.8); padding: 0 3px; border-radius: 3px; }
 .fpv-pop__img--empty { display: flex; align-items: center; justify-content: center; color: #9ca3af; font-size: 11px; text-align: center; }
-/* s497：编辑态头部复用缩略图——覆盖「表单态隐藏缩略图」的旧规则，让编辑态与只读态显示项一致 */
+/* 表单态默认隐藏缩略图，把整行宽度让给字段；但编辑本房间头部的缩略图要显示（s497） */
+.fpv-pop--form .fpv-pop__img { display: none; }
 .fpv-pop--form .fpv-pop__edit-head .fpv-pop__img { display: block; }
-.fpv-pop__edit-head { grid-column: 1 / -1; display: flex; gap: 10px; align-items: flex-start; }
-.fpv-pop__edit-head-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.fpv-pop__edit-head {
+  grid-column: 1 / -1; display: flex; gap: 10px; align-items: stretch;
+  padding: 6px; background: #f8fafc; border: 1px solid #f1f5f9; border-radius: 6px;
+}
+.fpv-pop__edit-head .fpv-pop__img { width: 84px; flex: 0 0 84px; }
+.fpv-pop__edit-head-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 5px; }
 
 .fpv-pop__info { flex: 1; min-width: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 5px; }
 .fpv-pop__cell {

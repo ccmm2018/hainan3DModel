@@ -577,6 +577,58 @@ describe('FloorPlan2D 房间编辑/隐藏/重新显示', () => {
 
     wrapper.unmount();
   });
+
+  it('s503: 房间号必填——清空房间号阻止保存并高亮，重新填写后可保存', async () => {
+    const store = useBuildingStore();
+    const parsed = parseDxfToResult(SAMPLE_DXF, '教学楼', 1);
+    parsed.rooms.forEach((r) => { r.selected = true; r.name = '原名称'; });
+    const fid = store.importFloor({
+      buildingName: '教学楼', floorNo: 1, fileName: 's503.dxf', parsed,
+      coordSource: 'local',
+      transform: { offset: [440000, 4100000] as [number, number], rotation: 0, scale: 0.001 },
+    });
+    const roomsBefore = store.roomsOfFloor(fid);
+    const target = roomsBefore[0];
+
+    const wrapper = mountPlan('教学楼', pinia);
+    await nextTick();
+    await wrapper.findAll('.fpv-room')[0].trigger('click');
+    await nextTick();
+    const editBtn = wrapper.findAll('button').find((b) => b.text().includes('编辑本房间'));
+    await editBtn!.trigger('click');
+    await nextTick();
+
+    const form = wrapper.find('.fpv-pop__form--all');
+    expect(form.text()).toContain('房间号');
+    // 房间号栏是第一个 input stub；把它清空，并把名称改成"改名测试"以验证整次保存都被拦截
+    const inputs = form.findAll('input.el-input-stub');
+    const roomNoInput = inputs[0];
+    const nameInput = inputs[1];
+    await nameInput.setValue('改名测试');
+    await roomNoInput.setValue('');
+    await nextTick();
+
+    const saveBtn = wrapper.findAll('button').find((b) => b.text().includes('保存资料'));
+    await saveBtn!.trigger('click');
+    await nextTick();
+    // 房间号为空 → 未退出编辑态、字段高亮、出现错误文案、store 未改变
+    expect(wrapper.find('.fpv-pop__form--all').exists()).toBe(true);
+    expect(wrapper.find('.fpv-edit__row--error').exists()).toBe(true);
+    expect(form.text()).toContain('房间号不能为空');
+    expect(store.roomsOfFloor(fid).find((r) => r.id === target.id)?.name).toBe('原名称');
+
+    // 重新填写房间号 → 错误态消除，可正常保存（名称一并写入）
+    await roomNoInput.setValue('999');
+    await nextTick();
+    expect(wrapper.find('.fpv-edit__row--error').exists()).toBe(false);
+    await saveBtn!.trigger('click');
+    await nextTick();
+    await nextTick();
+    const saved = store.roomsOfFloor(fid).find((r) => r.id === target.id);
+    expect(saved?.name).toBe('改名测试');
+
+    wrapper.unmount();
+  });
 });
 
 /** 从弹窗信息格里取出指定 label 的值文本 */

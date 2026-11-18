@@ -2199,6 +2199,7 @@ watch(popMode, (m) => {
   // 展开「编辑本房间」时，把当前房间字段重新载入表单，避免残留上次未保存的编辑
   if (m === 'edit' && liveRoom.value) {
     const r = liveRoom.value;
+    roomNoError.value = false; // s503: 每次进入编辑态清除上次的校验错误
     editRoom.code = r.code;
     editRoom.number = displayRoomNo(r);
     // s492: 名称栏与只读态「名称」信息行完全同口径——都走 cleanName(r.name)，
@@ -2336,6 +2337,8 @@ const editRoom = reactive({
   // s500: 业务状态暂存字段。编辑态点色块只改这里，点「保存资料」才写库（setUseStatus 是只读态的即时切换，别混用）
   useStatus: '' as UseStatus,
 });
+/** s503: 房间号必填校验——保存时房间号为空则阻止保存并高亮该栏；用户重新输入后自动清除。 */
+const roomNoError = ref(false);
 
 /** 部门下拉候选：当前数据里所有房间已出现过的部门（去重排序）。
  *  用 el-select 的 filterable + allow-create：既能从已有部门里选、统一命名，也允许填新部门不锁死。 */
@@ -2418,6 +2421,13 @@ function saveEdit(notify = true): void {
 function saveRoomAll(): void {
   const r = liveRoom.value;
   if (!r) return;
+  // s503: 房间号必填——用户清空该栏时阻止保存并高亮，避免误删后忘填导致房间无标识
+  if (!editRoom.number.trim()) {
+    roomNoError.value = true;
+    ElMessage.warning('房间号不能为空，请填写后再保存');
+    return;
+  }
+  roomNoError.value = false;
   const real = isRealRoom(r) && !!currentFloor.value;
   saveEdit(false);
   popMode.value = null;
@@ -3360,7 +3370,11 @@ function enterEdit(): void {
                 <div class="fpv-pop__section">基础资料</div>
                 <!-- s492: 「房间号」栏绑定 number（与顶面/只读态 displayRoomNo 同口径，显示 204）；
                      code 是房间编码(B1-F2-R04)，不作为房号展示。editRoom.code 仍在载入时保留原值，保存写回不丢。 -->
-                <div class="fpv-edit__row"><label>房间号</label><el-input v-model="editRoom.number" size="small" /></div>
+                <div class="fpv-edit__row fpv-edit__row--required" :class="{ 'fpv-edit__row--error': roomNoError }">
+                  <label>房间号</label>
+                  <el-input v-model="editRoom.number" size="small" placeholder="必填，如 204" @update:modelValue="roomNoError = false" />
+                  <span v-if="roomNoError" class="fpv-edit__err">房间号不能为空</span>
+                </div>
                 <div class="fpv-edit__row"><label>名称</label><el-input v-model="editRoom.name" size="small" /></div>
                 <div class="fpv-edit__row">
                   <label>部门</label>
@@ -3971,6 +3985,11 @@ function enterEdit(): void {
 .fpv-pop__info--edit .fpv-info__actions,
 .fpv-pop__form .fpv-info__actions { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 6px; margin: 2px 0 0; }
 .fpv-pop__form .fpv-edit__row--wide { grid-column: 1 / -1; }
+/* s503: 房间号必填校验样式（星号用伪元素，不进 label 文本，避免影响按文本定位的测试） */
+.fpv-pop__form .fpv-edit__row--required label::after { content: ' *'; color: #e11d48; }
+.fpv-pop__form .fpv-edit__row--error :deep(.el-input__wrapper) { box-shadow: 0 0 0 1px #e11d48 inset; }
+.fpv-pop__form .fpv-edit__row--error :deep(.el-input__inner) { border-color: #e11d48; }
+.fpv-edit__err { color: #e11d48; font-size: 10.5px; line-height: 1.2; }
 
 /* 编辑本房间单表单：基础资料一节，一次保存（维护台账已移除） */
 .fpv-pop__form--all { width: 100%; }

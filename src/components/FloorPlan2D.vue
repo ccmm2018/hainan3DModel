@@ -2319,34 +2319,6 @@ function onSelect(room: RoomLike, ev?: MouseEvent): void {
   nextTick(() => fitPopupInStage());
 }
 
-/**
- * 编辑结构态下「编辑资料」按钮：打开当前选中那一间房的资料表单。
- * 不能依赖双击 / click —— 编辑态 mousedown 会通过 dragTopBlocks 重排房间 <g> 的 DOM 顺序，
- * 浏览器在此场景下会吞掉后续 click / dblclick，故用工具栏按钮作为稳定入口。
- */
-function openSelectedRoomForm(): void {
-  if (!editMode.value) return;
-  const id = selectedIds.value.length === 1 ? selectedIds.value[0] : selectedId.value;
-  const room = displayedRooms.value.find((r) => r.id === id);
-  if (!room) {
-    ElMessage.info('请先点选 1 间房间，再点「编辑资料」');
-    return;
-  }
-  selectedIds.value = [room.id];
-  selectedId.value = room.id;
-  selectedRoom.value = room;
-  popMode.value = 'edit';
-  const stage = stageRef.value ?? mainRef.value;
-  if (!stage) return;
-  const r = stage.getBoundingClientRect();
-  popupAnchor.value = { x: r.width / 2, y: r.height / 2 };
-  popupBase.value = {
-    x: (r.width / 2 - 270) / zoom.value,
-    y: (r.height / 2 - 300) / zoom.value,
-  };
-  nextTick(() => fitPopupInStage());
-}
-
 /** 该房间是否为真实入库房间（存在于 displayedRooms），决定后续是写 store 还是走本地覆盖 */
 function isRealRoom(r: RoomLike | null): boolean {
   return !!r && displayedRooms.value.some((x) => x.id === r.id);
@@ -2622,10 +2594,10 @@ function fromScreen(clientX: number, clientY: number, z = 0): [number, number] {
 }
 
 /** 编辑模式：单击房间——仅选中高亮（蓝框），不弹窗；Shift/Ctrl 多选供合并。
- *  弹窗仅在新增 / 合并后自动打开，或用户点工具栏「编辑资料」主动打开，避免编辑时误弹卡片挡住画布。 */
+ *  弹窗仅在新增 / 合并后自动打开，避免编辑时误弹卡片挡住画布。 */
 /** 编辑模式：mousedown 选中房间——「确保选中」语义：未选则加入（支持多选累积），
  *  已选则保留（避免去抓一个已选中房间拖动时，mousedown 先把它取消、拖完就丢选中）。
- *  弹窗仅在新增 / 合并后自动打开，或用户点工具栏「编辑资料」主动打开，避免编辑时误弹卡片挡住画布。 */
+ *  弹窗仅在新增 / 合并后自动打开，避免编辑时误弹卡片挡住画布。 */
 function onSelectRoom(room: RoomLike, _ev?: MouseEvent): void {
   if (!selectedIds.value.includes(room.id)) {
     selectedIds.value = [...selectedIds.value, room.id];
@@ -2647,7 +2619,7 @@ function onRoomDown(room: RoomLike, ev: MouseEvent): void {
   if (armedStatus.value !== null) applyUseStatusToRoom(room, armedStatus.value);
   onSelectRoom(room, ev);
   if (activeTool.value !== 'select') return;
-  // 拆分出的子房用精确 rect 定位，拖动会跳回整格；这类房间先只允许选中 / 编辑资料 / 继续拆分
+  // 拆分出的子房用精确 rect 定位，拖动会跳回整格；这类房间先只允许选中 / 继续拆分
   if (gridPos[room.id]?.rect) return;
   dragKind.value = 'move';
   dragRoomId.value = room.id;
@@ -2781,7 +2753,7 @@ const splitHint = computed(() => {
   if (selectedIds.value.length > 1) return `当前已选 ${selectedIds.value.length} 间：拆分每次只处理 1 间，点「清空选中」后重新选 1 间`;
   return '把选中的这间房等分成 2~4 间';
 });
-/** 清空编辑态多选：累积选中会让「拆分 / 编辑资料」（要求恰好 1 间）一直置灰，给一个显式出口 */
+/** 清空编辑态多选：累积选中会让「拆分」（要求恰好 1 间）一直置灰，给一个显式出口 */
 function clearRoomSelection(): void {
   selectedIds.value = [];
   selectedId.value = null;
@@ -2839,12 +2811,12 @@ function confirmSplit(): void {
     gridPos[nid] = { bi0: src.bi0, bi1: src.bi1, c0: src.c0, c1: src.c1, rect: rects[i] };
   });
   scheduleGridPersist(); // 子矩形的布局随房间一起落盘，刷新后仍是「一格内并排 N 间」
-  // 只选中拆出来的第一间：既让「编辑资料 / 拆分」按钮保持可用，也方便对子房继续拆
+  // 只选中拆出来的第一间：让「拆分」按钮保持可用，也方便对子房继续拆
   selectedIds.value = ids.slice(0, 1);
   selectedId.value = ids[0] ?? null;
   selectedRoom.value = displayedRooms.value.find((r) => r.id === ids[0]) ?? null;
   closePop();
-  ElMessage.success(`已拆成 ${n} 间，房号自动加 -1…-${n} 后缀，点「编辑资料」可逐间修改`);
+  ElMessage.success(`已拆成 ${n} 间，房号自动加 -1…-${n} 后缀，可逐间修改资料`);
 }
 
 /** 删除所选房间：先弹确认框，避免误删（尤其合并 / 多选删除时） */
@@ -3027,7 +2999,7 @@ const GUIDE_HTML = `
   <p style="margin:0 0 6px">② <b>图例</b>：说明每种颜色代表什么。浏览时只读；<b>编辑结构 + 使用状态</b>时，先点色块再点房间即可批量标注状态；只改一间房的状态，直接在它的详情卡里点色块。</p>
   <p style="margin:0 0 6px">③ <b>楼层</b>：点 1F / 2F 切换楼层，标题里显示本层房间数与面积。</p>
   <p style="margin:0 0 6px">④ <b>视图工具</b>：源对齐（把图纸转正）、导入图纸、放大 / 缩小 / 复位；画布也支持滚轮缩放、按住拖拽平移。</p>
-  <p style="margin:0 0 6px">⑤ <b>房间结构</b>：只管「有哪些房间、怎么摆」。点「编辑结构」才出现新增 / 合并 / 拆分 / 删除 / 拖动；<b>恰好选中 1 间</b>再点「拆分」，可把它等分成 2~4 间（房号加 -1/-2 后缀、面积按份数平分，本层房间数不受限制）；点房间是<b>累积多选</b>，多选时拆分 / 编辑资料会置灰，点画布空白处或「清空选中」即可重新单选；<b>完成</b>保存、<b>取消·回滚</b>撤销本次全部改动；拆出的子房排布与拖动位置也会一起保存，刷新页面后仍保持。<b>改单间房资料不需要进这里</b>：浏览时点房间，在详情卡里点「编辑本房间」，基础资料和维护台账一起填、一次保存；已经进入「编辑结构」时，选中 1 间房再点工具栏「编辑资料」即可。</p>
+  <p style="margin:0 0 6px">⑤ <b>房间结构</b>：只管「有哪些房间、怎么摆」。点「编辑结构」才出现新增 / 合并 / 拆分 / 删除 / 拖动；<b>恰好选中 1 间</b>再点「拆分」，可把它等分成 2~4 间（房号加 -1/-2 后缀、面积按份数平分，本层房间数不受限制）；点房间是<b>累积多选</b>，多选时拆分会置灰，点画布空白处或「清空选中」即可重新单选；<b>完成</b>保存、<b>取消·回滚</b>撤销本次全部改动；拆出的子房排布与拖动位置也会一起保存，刷新页面后仍保持。<b>改单间房资料不需要进这里</b>：浏览时点房间，在详情卡里点「编辑本房间」，基础资料和维护台账一起填、一次保存。</p>
   <p style="margin:0">⑥ <b>其它</b>：被隐藏的房间在这里恢复；点「?」可随时重看本说明。</p>
 </div>`;
 
@@ -3254,12 +3226,11 @@ function enterEdit(): void {
                   <i :style="{ background: armedColor }"></i>标注中：{{ statusLabelOf(armedStatus) }}<b>×</b>
                 </span>
                 <!-- 多选时放在本组靠前位置：工具栏内容较多会横向滚动，放最右会看不见 -->
-                <el-button v-if="selectedIds.length > 1" size="small" text title="点房间是累积多选，清空后可重新只选 1 间（拆分 / 编辑资料需要）" @click="clearRoomSelection">清空选中</el-button>
+                <el-button v-if="selectedIds.length > 1" size="small" text title="点房间是累积多选，清空后可重新只选 1 间（拆分需要）" @click="clearRoomSelection">清空选中</el-button>
                 <el-button size="small" :disabled="!canAddRoom" @click="doAddRoom"><el-icon><Plus /></el-icon>新增</el-button>
                 <el-button size="small" :disabled="selectedIds.length < 2" @click="doMerge"><el-icon><Connection /></el-icon>合并</el-button>
                 <el-button size="small" type="primary" plain :disabled="!canSplit" :title="splitHint" @click="doSplit">拆分</el-button>
                 <el-button size="small" type="danger" plain :disabled="!selectedIds.length" @click="doDelete"><el-icon><Delete /></el-icon>删除</el-button>
-                <el-button size="small" :disabled="selectedIds.length !== 1" title="选中 1 间房后改它的资料" @click="openSelectedRoomForm()">编辑资料</el-button>
               </template>
             </div>
           </section>
@@ -3515,7 +3486,7 @@ function enterEdit(): void {
           <el-radio-button value="stack">上下叠放</el-radio-button>
         </el-radio-group>
       </div>
-      <p class="fpv-split__hint">房号自动加 -1 / -2… 后缀，面积按份数平分，部门、用途、状态沿用原房；拆完可点「编辑资料」逐间修改。</p>
+      <p class="fpv-split__hint">房号自动加 -1 / -2… 后缀，面积按份数平分，部门、用途、状态沿用原房；拆完点每间房可在详情卡逐间修改资料。</p>
     </div>
     <template #footer>
       <el-button @click="splitVisible = false">取消</el-button>

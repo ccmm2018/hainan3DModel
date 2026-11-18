@@ -114,10 +114,12 @@ describe('FloorPlan2D 房间编辑/隐藏/重新显示', () => {
     await nextTick();
     await nextTick();
 
-    // 断言：弹窗标题应包含新名称
+    // s493: 弹窗标题始终固定为房号，不随名称变化（改名称后标题仍是 101）
     const title = wrapper.find('.fpv-pop__title').text();
     console.log('TITLE_AFTER_SAVE=', title);
-    expect(title).toContain('测试会议室A');
+    expect(title).toBe('101');
+    // 名称改在弹窗「名称」信息行体现
+    expect(findCell(wrapper, '名称')).toContain('测试会议室A');
 
     // 断言：store 里【被点击那间】房间名称已更新（真实模式写入 store）
     const updated = store.roomsOfFloor(fid).find((r) => r.name === '测试会议室A');
@@ -182,9 +184,11 @@ describe('FloorPlan2D 房间编辑/隐藏/重新显示', () => {
     await nextTick();
     await nextTick();
 
+    // s493: 标题固定为房号，不随名称变化；名称在信息行体现
     const titleAfter = wrapper.find('.fpv-pop__title').text();
     console.log('DEMO TITLE_AFTER=', titleAfter);
-    expect(titleAfter).toContain('测试会议室B');
+    expect(titleAfter).toBe('101');
+    expect(findCell(wrapper, '名称')).toContain('测试会议室B');
 
     // 隐藏该房间：保存后表单自动收起，先重新展开「编辑本房间」
     const reopenEdit = wrapper.findAll('button').find((b) => b.text().includes('编辑本房间'));
@@ -260,11 +264,11 @@ describe('FloorPlan2D 房间编辑/隐藏/重新显示', () => {
     await nextTick();
     await nextTick();
 
-    // 新 UI：点击「保存资料」后自动回到只读态，无需再点一次按钮收起表单
+    // s493: 标题固定为房号 101（不随名称变化）；名称在信息行体现为新值
     const title1 = wrapper.find('.fpv-pop__title').text();
     const nameCell1 = findCell(wrapper, '名称');
     console.log('USER title1=', title1, 'nameCell1=', nameCell1);
-    expect(title1).toContain('面试会议室');
+    expect(title1).toBe('101');
     expect(nameCell1).toContain('面试会议室');
     // store 也应写入
     expect(store.roomsOfFloor(fid).find((r) => r.name === '面试会议室')).toBeTruthy();
@@ -451,6 +455,54 @@ describe('FloorPlan2D 房间编辑/隐藏/重新显示', () => {
     expect(noVal).not.toContain('B1-F2-R04');
     expect(nameVal).toBe(readonlyName);       // 名称栏 = 弹窗只读态名称（未命名）
     expect(nameVal).toContain('未命名');
+
+    wrapper.unmount();
+  });
+
+  // s493 复现：弹窗标题始终固定为房号，改名称后标题不变（不再跳变成名称值）
+  it('s493：改名称后弹窗顶部标题保持房号204不变', async () => {
+    const store = useBuildingStore();
+    const parsed = parseDxfToResult(SAMPLE_DXF, '教学楼', 1);
+    parsed.rooms.forEach((r, i) => {
+      if (i === 0) {
+        r.code = 'B1-F2-R04'; r.number = '204'; r.name = '面积:69.84';
+        r.useArea = 69.84; r.buildArea = 69.84;
+      } else { r.code = ''; r.number = ''; r.name = ''; }
+      r.selected = true;
+    });
+    store.importFloor({
+      buildingName: '教学楼', floorNo: 1, fileName: 'a.dxf', parsed,
+      coordSource: 'local', transform: { offset: [440000, 4100000] as [number, number], rotation: 0, scale: 0.001 },
+    });
+    const wrapper = mountPlan('教学楼', pinia);
+    await nextTick();
+    await wrapper.findAll('.fpv-room')[0].trigger('click');
+    await nextTick();
+
+    const titleBefore = wrapper.find('.fpv-pop__title').text();
+    console.log('S493 titleBefore=', titleBefore);
+    expect(titleBefore).toBe('204');
+
+    // 打开编辑 → 改名称为「办公室」→ 标题应仍是 204
+    const editBtn = wrapper.findAll('button').find((b) => b.text().includes('编辑本房间'));
+    await editBtn!.trigger('click');
+    await nextTick();
+    const nameInput = wrapper.findAll('.fpv-edit__row').find((r) => r.find('label')?.text().trim() === '名称')!.find('input');
+    await nameInput.setValue('办公室');
+    await nextTick();
+    const titleWhileEdit = wrapper.find('.fpv-pop__title').text();
+    console.log('S493 titleWhileEdit=', titleWhileEdit);
+    expect(titleWhileEdit).toBe('204');
+
+    // 保存后标题仍固定为 204，名称在信息行显示「办公室」
+    const saveBtn = wrapper.findAll('button').find((b) => b.text().includes('保存'));
+    await saveBtn!.trigger('click');
+    await nextTick();
+    await nextTick();
+    const titleAfter = wrapper.find('.fpv-pop__title').text();
+    console.log('S493 titleAfter=', titleAfter, 'nameCell=', findCell(wrapper, '名称'));
+    expect(titleAfter).toBe('204');
+    expect(findCell(wrapper, '名称')).toBe('办公室');
 
     wrapper.unmount();
   });

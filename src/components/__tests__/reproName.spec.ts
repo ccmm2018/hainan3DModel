@@ -48,7 +48,8 @@ describe('REPRO: name literally "未命名"', () => {
     const title0 = wrapper.find('.fpv-pop__title').text();
     const nameCell0 = findCell(wrapper, '名称');
     console.log('REPRO title0=', title0, 'nameCell0=', nameCell0);
-    expect(title0).toContain('未命名');
+    // s493: 标题固定为房号 101，不随名称变化
+    expect(title0).toBe('101');
 
     const editBtn = wrapper.findAll('button').find((b) => b.text().includes('编辑本房间'));
     await editBtn!.trigger('click');
@@ -63,11 +64,11 @@ describe('REPRO: name literally "未命名"', () => {
     await nextTick();
     await nextTick();
 
-    // 新 UI：点击「保存资料」后自动回到只读态，无需再点一次按钮收起表单
+    // s493: 标题固定为房号 101（不随名称变化）；名称在信息行体现为新值
     const title1 = wrapper.find('.fpv-pop__title').text();
     const nameCell1 = findCell(wrapper, '名称');
     console.log('REPRO title1=', title1, 'nameCell1=', nameCell1);
-    expect(title1).toContain('会议室A');
+    expect(title1).toBe('101');
     expect(nameCell1).toContain('会议室A');
     expect(store.roomsOfFloor(fid).find((r) => r.name === '会议室A')).toBeTruthy();
     wrapper.unmount();

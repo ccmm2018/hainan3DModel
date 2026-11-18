@@ -67,13 +67,23 @@ type ColorMode = 'inspect' | 'use' | 'dept' | 'purpose';
 type RoomLike = Room | ParsedRoom;
 
 /**
- * s491：房间号的唯一权威口径——顶面号码、弹窗标题、弹窗「房间号」、编辑表单全部走这里。
+ * s491：房间号的唯一权威口径——顶面号码、弹窗「房间号」、编辑表单走这里。
  * 优先「房间号码 number」（用户认知的房号，如 204），code（房间编码，如 B1-F2-R04）兜底，
  * 都没有再退回 name / roomNo。此前各显示点字段优先级不一致（顶面 number 优先、弹窗 code 优先），
  * 导致「顶面 204、弹窗 B1-F2-R04」的错位。
  */
 function displayRoomNo(r: Pick<RoomLike, 'number' | 'code' | 'name'> & { roomNo?: string }): string {
   return String(r.number || r.code || r.name || r.roomNo || '').trim();
+}
+
+/**
+ * s493：弹窗标题专用口径——始终显示「房间号」，只认 number / code 两个真正的房号字段，
+ * 绝不含 name。这样编辑名称时标题固定为房号（如 204），不会跳变成刚填的名称；
+ * 名称在弹窗「名称」信息行和顶面第二行照常显示。
+ * 房号为空时才回退「未命名房间」，由调用方处理。
+ */
+function titleRoomNo(r: Pick<RoomLike, 'number' | 'code'>): string {
+  return String(r.number || r.code || '').trim();
 }
 
 const visible = computed({
@@ -2078,24 +2088,19 @@ const liveRoom = computed<RoomLike | null>(() => {
   return base ? effectiveRoom(base) : null;
 });
 
-/** 弹窗标题：房间名称优先；名称是「面积/纯房号」等被误当成名称的无效文本、或为空时，回退到房间号，再否则「未命名房间」。
- *  关键：必须走 cleanName，否则面积文本(如「45.2㎡」)会被原样当成名称显示在标题上。 */
+/** 弹窗标题（s493）：始终固定显示「房间号」，只认 number / code，不再随名称变化。
+ *  用户诉求：标题就是这间房的房号标识（如 204），改名称不应让顶部跳变成名称值。
+ *  名称仍照常在弹窗「名称」信息行、顶面第二行显示。房号为空时回退「未命名房间」。 */
 const roomTitle = computed<string>(() => {
   const r = liveRoom.value;
   if (!r) return '';
-  const n = cleanName(r.name);
-  if (n !== '（未命名）') return n;
-  // s491: 名称无效时回退到「房间号码」(number优先)，与顶面/房间号信息格一致，
-  // 不再显示房间编码(code，如 B1-F2-R04)——那会与顶面房号 204 对不上。
-  return displayRoomNo(r) || '未命名房间';
+  return titleRoomNo(r) || '未命名房间';
 });
 
-/** 弹窗标题：编辑模式下实时跟随输入框中的名称，让用户打字时顶部立即反馈 */
+/** 编辑态标题同样固定为房号；因为房间号栏现在可编辑（绑 editRoom.number），改房号时标题实时跟随即可 */
 const displayTitle = computed<string>(() => {
   if (popMode.value === 'edit') {
-    const n = cleanName(editRoom.name);
-    if (n !== '（未命名）') return n;
-    return displayRoomNo(editRoom) || '未命名房间';
+    return titleRoomNo(editRoom) || '未命名房间';
   }
   return roomTitle.value;
 });

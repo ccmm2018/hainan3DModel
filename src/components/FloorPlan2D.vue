@@ -2190,7 +2190,7 @@ const roomInfoPairs = computed<{ label: string; value: string }[]>(() => {
     { label: '用途', value: r.usePurpose || '—' },
     { label: '使用面积', value: `${r.useArea > 0 ? r.useArea.toFixed(1) : '—'} ㎡` },
     { label: '建筑面积', value: `${r.buildArea > 0 ? r.buildArea.toFixed(1) : '—'} ㎡` },
-    { label: '审图状态', value: INSPECT_LABELS[r.inspectStatus] ?? '—' },
+    // s502: 审图状态移到状态区展示（与业务状态同区），使基础信息 6 项正好 2 列 3 行、不落单
   ];
 });
 
@@ -3335,26 +3335,25 @@ function enterEdit(): void {
               <!-- 编辑本房间：基础资料表单、一次保存（维护台账已于 2026-11-18 移除）。
                    s497：补充审图状态 / 业务状态色块，与只读态显示项完全一致，仅在能否编辑上有区别（缩略图 s501 已移除）。 -->
               <div v-if="popMode === 'edit'" class="fpv-pop__form fpv-pop__form--all">
-                <!-- 头部：审图状态 + 业务状态（flex 容器，不参与下方字段的 grid 两列）。s501: 已移除缩略图 -->
-                <div class="fpv-pop__edit-head">
-                  <div class="fpv-pop__edit-head-info">
-                    <div class="fpv-pop__cell"><span>审图状态</span><b>{{ INSPECT_LABELS[liveRoom?.inspectStatus ?? 'normal'] ?? '—' }}</b></div>
-                    <div class="fpv-pop__status">
-                      <div class="fpv-pop__status-hd">
-                        <span class="fpv-pop__status-label">业务状态 · 点色块选择，保存后生效</span>
-                        <button type="button" class="fpv-pop__status-clear" @click="stageUseStatus('')">清空</button>
-                      </div>
-                      <div class="fpv-pop__status-btns">
-                        <button
-                          v-for="s in STATUS_QUICK"
-                          :key="s.value"
-                          type="button"
-                          class="fpv-pop__status-btn"
-                          :class="{ 'is-on': editRoom.useStatus === s.value }"
-                          @click="stageUseStatus(s.value)"
-                        ><i :style="{ background: USE_COLORS[s.value] }"></i>{{ s.label }}</button>
-                      </div>
-                    </div>
+                <!-- s502: 状态区扁平化——一个灰框内放「审图状态」+「业务状态」，去掉原来的框中框与落单空格 -->
+                <div class="fpv-pop__status">
+                  <div class="fpv-pop__status-hd">
+                    <span class="fpv-pop__status-label">审图状态</span>
+                    <b class="fpv-pop__inspect-val">{{ INSPECT_LABELS[liveRoom?.inspectStatus ?? 'normal'] ?? '—' }}</b>
+                  </div>
+                  <div class="fpv-pop__status-hd">
+                    <span class="fpv-pop__status-label">业务状态 · 点色块选择，保存后生效</span>
+                    <button type="button" class="fpv-pop__status-clear" @click="stageUseStatus('')">清空</button>
+                  </div>
+                  <div class="fpv-pop__status-btns">
+                    <button
+                      v-for="s in STATUS_QUICK"
+                      :key="s.value"
+                      type="button"
+                      class="fpv-pop__status-btn"
+                      :class="{ 'is-on': editRoom.useStatus === s.value }"
+                      @click="stageUseStatus(s.value)"
+                    ><i :style="{ background: USE_COLORS[s.value] }"></i>{{ s.label }}</button>
                   </div>
                 </div>
 
@@ -3390,6 +3389,10 @@ function enterEdit(): void {
                     <span>{{ p.label }}</span><b>{{ p.value }}</b>
                   </div>
                   <div class="fpv-pop__status">
+                    <div class="fpv-pop__status-hd">
+                      <span class="fpv-pop__status-label">审图状态</span>
+                      <b class="fpv-pop__inspect-val">{{ INSPECT_LABELS[liveRoom?.inspectStatus ?? 'normal'] ?? '—' }}</b>
+                    </div>
                     <div class="fpv-pop__status-hd">
                       <span class="fpv-pop__status-label">业务状态</span>
                     </div>
@@ -3939,13 +3942,8 @@ function enterEdit(): void {
   overscroll-behavior: contain;
   padding: 10px;
 }
-/* s501: 缩略图已移除，只读信息区直接占满整行（不再 flex 左右并排） */
+/* s502: 缩略图已移除、状态区统一，只读信息区直接占满整行（不再 flex 左右并排） */
 .fpv-pop__body { display: block; }
-.fpv-pop__edit-head {
-  grid-column: 1 / -1;
-  padding: 6px; background: #f8fafc; border: 1px solid #f1f5f9; border-radius: 6px;
-}
-.fpv-pop__edit-head-info { min-width: 0; display: flex; flex-direction: column; gap: 5px; }
 
 .fpv-pop__info { flex: 1; min-width: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 5px; }
 .fpv-pop__cell {
@@ -3990,6 +3988,7 @@ function enterEdit(): void {
 }
 .fpv-pop__status-hd { display: flex; align-items: center; justify-content: space-between; margin-bottom: 5px; }
 .fpv-pop__status-label { color: #6b7280; font-size: 10.5px; }
+.fpv-pop__inspect-val { font-size: 11px; font-weight: 600; color: #111827; }
 .fpv-pop__status-clear { border: 0; background: none; color: #94a3b8; font-size: 10.5px; cursor: pointer; padding: 0 2px; }
 .fpv-pop__status-clear:hover { color: #2563eb; }
 .fpv-pop__status-btns { display: flex; flex-wrap: wrap; gap: 5px; }

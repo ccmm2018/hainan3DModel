@@ -66,6 +66,16 @@ type ColorMode = 'inspect' | 'use' | 'dept' | 'purpose';
 /** store 模式使用 Room，预览模式使用 ParsedRoom；两者共享着色所需字段 */
 type RoomLike = Room | ParsedRoom;
 
+/**
+ * s491：房间号的唯一权威口径——顶面号码、弹窗标题、弹窗「房间号」、编辑表单全部走这里。
+ * 优先「房间号码 number」（用户认知的房号，如 204），code（房间编码，如 B1-F2-R04）兜底，
+ * 都没有再退回 name / roomNo。此前各显示点字段优先级不一致（顶面 number 优先、弹窗 code 优先），
+ * 导致「顶面 204、弹窗 B1-F2-R04」的错位。
+ */
+function displayRoomNo(r: Pick<RoomLike, 'number' | 'code' | 'name'> & { roomNo?: string }): string {
+  return String(r.number || r.code || r.name || r.roomNo || '').trim();
+}
+
 const visible = computed({
   get: () => props.modelValue,
   set: (v) => emit('update:modelValue', v),
@@ -1354,7 +1364,7 @@ const roomBlocks = computed<RoomBlock[]>(() => {
     const useStyle = useStrokeStyle(room);
     // 部门 / 用途模式一律浅底深字；其余模式按填充亮度自动取深/白字
     const textColor = isLight(fill) ? '#1b2733' : '#ffffff';
-    const number = room.number || room.code || `房${idx + 1}`;
+    const number = displayRoomNo(room) || `房${idx + 1}`;
     // 子房间格子窄，只显示房号（如 101-1），完整资料点详情卡查看
     const name = isSub ? '' : cleanName(room.name);
     const dept = isSub ? '' : room.dept || '—';
@@ -1628,7 +1638,7 @@ interface RoomFill {
  *  文字颜色由顶面填充色亮度自动决定；浅色顶（含部门/用途色板）统一用高对比深色，
  *  副行也从原来的中灰 #4b5563 加深到 #3b4654，避免「灰字压浅底看不清」。 */
 function buildLabelLines(room: RoomLike, fill: string): Omit<LabelLine, 'y'>[] {
-  const code = (room.code || room.number || room.name || '').trim();
+  const code = displayRoomNo(room);
   const d = (s: string) => (s.trim() !== '' ? s.trim() : '—');
   const light = isLight(fill);
   const main = light ? '#1b2733' : '#ffffff';
@@ -2075,7 +2085,9 @@ const roomTitle = computed<string>(() => {
   if (!r) return '';
   const n = cleanName(r.name);
   if (n !== '（未命名）') return n;
-  return r.code || '未命名房间';
+  // s491: 名称无效时回退到「房间号码」(number优先)，与顶面/房间号信息格一致，
+  // 不再显示房间编码(code，如 B1-F2-R04)——那会与顶面房号 204 对不上。
+  return displayRoomNo(r) || '未命名房间';
 });
 
 /** 弹窗标题：编辑模式下实时跟随输入框中的名称，让用户打字时顶部立即反馈 */
@@ -2083,7 +2095,7 @@ const displayTitle = computed<string>(() => {
   if (popMode.value === 'edit') {
     const n = cleanName(editRoom.name);
     if (n !== '（未命名）') return n;
-    return editRoom.code || '未命名房间';
+    return displayRoomNo(editRoom) || '未命名房间';
   }
   return roomTitle.value;
 });
@@ -2231,7 +2243,7 @@ const roomInfoPairs = computed<{ label: string; value: string }[]>(() => {
   const r = liveRoom.value;
   if (!r) return [];
   return [
-    { label: '房间号', value: r.code || '—' },
+    { label: '房间号', value: displayRoomNo(r) || '—' },
     { label: '名称', value: cleanName(r.name) },
     { label: '部门', value: r.dept || '—' },
     { label: '用途', value: r.usePurpose || '—' },
@@ -2250,8 +2262,10 @@ watch(popMode, (m) => {
   if (m === 'edit' && liveRoom.value) {
     const r = liveRoom.value;
     editRoom.code = r.code;
-    editRoom.number = r.number;
-    editRoom.name = r.name;
+    editRoom.number = displayRoomNo(r);
+    // s492: 名称栏与只读态「名称」信息行完全同口径——都走 cleanName(r.name)，
+    // 面积脏值归一为「（未命名）」照常显示（只读态也显示它），不再清空造成「编辑态空、只读态未命名」的不一致。
+    editRoom.name = cleanName(r.name);
     editRoom.dept = r.dept;
     editRoom.usePurpose = r.usePurpose;
     editRoom.useArea = String(r.useArea);
@@ -2428,8 +2442,9 @@ watch(
   (r) => {
     if (!r) return;
     editRoom.code = r.code;
-    editRoom.number = r.number;
-    editRoom.name = r.name;
+    editRoom.number = displayRoomNo(r);
+    // s492: 同 popMode 载入处，名称栏与只读态同口径走 cleanName（面积脏值→「（未命名）」照常显示，不清空）
+    editRoom.name = cleanName(r.name);
     editRoom.dept = r.dept;
     editRoom.usePurpose = r.usePurpose;
     editRoom.useArea = String(r.useArea);
@@ -2446,7 +2461,8 @@ function saveEdit(notify = true): void {
   const patch = {
     code: editRoom.code.trim(),
     number: editRoom.number.trim() || editRoom.code.trim(),
-    name: editRoom.name.trim(),
+    // s492: 名称栏展示「（未命名）」占位（与只读态一致），但未改动就保存时该占位不应写入库，归一为空。
+    name: editRoom.name.trim() === '（未命名）' ? '' : editRoom.name.trim(),
     dept: editRoom.dept.trim(),
     usePurpose: editRoom.usePurpose.trim(),
     useArea: Number(editRoom.useArea) || 0,
@@ -3391,7 +3407,9 @@ function enterEdit(): void {
               <!-- 编辑本房间：基础资料 + 维护台账合成一个表单、一次保存（2026-11-15 简化） -->
               <div v-if="popMode === 'edit'" class="fpv-pop__form fpv-pop__form--all">
                 <div class="fpv-pop__section">基础资料</div>
-                <div class="fpv-edit__row"><label>房间号</label><el-input v-model="editRoom.code" size="small" /></div>
+                <!-- s492: 「房间号」栏绑定 number（与顶面/只读态 displayRoomNo 同口径，显示 204）；
+                     code 是房间编码(B1-F2-R04)，不作为房号展示。editRoom.code 仍在载入时保留原值，保存写回不丢。 -->
+                <div class="fpv-edit__row"><label>房间号</label><el-input v-model="editRoom.number" size="small" /></div>
                 <div class="fpv-edit__row"><label>名称</label><el-input v-model="editRoom.name" size="small" /></div>
                 <div class="fpv-edit__row"><label>部门</label><el-input v-model="editRoom.dept" size="small" /></div>
                 <div class="fpv-edit__row"><label>用途</label><el-input v-model="editRoom.usePurpose" size="small" /></div>

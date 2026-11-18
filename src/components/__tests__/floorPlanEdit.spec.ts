@@ -240,11 +240,12 @@ describe('FloorPlan2D 房间编辑/隐藏/重新显示', () => {
     await roomEls[0].trigger('click');
     await nextTick();
 
-    // 默认：标题应显示 code“面试”，名称格应显示“（未命名）”
+    // s491: 统一房间号口径——name 为空时标题回退显示「房间号码」(number=101)，与顶面一致；
+    // 不再显示房间编码(code=面试)。名称格仍显示「（未命名）」。
     const title0 = wrapper.find('.fpv-pop__title').text();
     const nameCell0 = findCell(wrapper, '名称');
     console.log('USER title0=', title0, 'nameCell0=', nameCell0);
-    expect(title0).toContain('面试');
+    expect(title0).toContain('101');
     expect(nameCell0).toContain('未命名');
 
     // 打开编辑本房间 → 在“名称”输入框写新名称 → 保存
@@ -299,8 +300,9 @@ describe('FloorPlan2D 房间编辑/隐藏/重新显示', () => {
     console.log('ISSUE1 title=', title);
     // 标题不应出现“面积”
     expect(title).not.toContain('面积');
-    // 应回退显示房间号
-    expect(title).toContain('A101');
+    // s491: 回退显示「房间号码」number=101（与顶面一致），而非房间编码 A101
+    expect(title).toContain('101');
+    expect(title).not.toContain('A101');
 
     wrapper.unmount();
   });
@@ -330,10 +332,12 @@ describe('FloorPlan2D 房间编辑/隐藏/重新显示', () => {
     await roomEls[0].trigger('click');
     await nextTick();
 
-    // 编辑前：名称是面积文本、code 为空 → 标题应为「未命名」（验证初始态与用户描述一致）
+    // s491: 编辑前名称是面积文本、code 为空，但房间号码 number=101 有值 →
+    // 标题回退显示 101（与顶面一致），不再是「未命名房间」。
     const title0 = wrapper.find('.fpv-pop__title').text();
     console.log('ISSUE2 title0=', title0);
-    expect(title0).toContain('未命名');
+    expect(title0).toContain('101');
+    expect(title0).not.toContain('未命名');
 
     // 打开编辑本房间 → 名称输入框写入纯数字「101」→ 保存
     const editBtn = wrapper.findAll('button').find((b) => b.text().includes('编辑本房间'));
@@ -357,6 +361,96 @@ describe('FloorPlan2D 房间编辑/隐藏/重新显示', () => {
     expect(nameCell1).toContain('101');
     // store 也应写入
     expect(store.roomsOfFloor(fid).find((r) => r.name === '101')).toBeTruthy();
+
+    wrapper.unmount();
+  });
+
+  // s491 回归：顶面房间号(number)与弹窗房间号(code)字段不一致 + 编辑态名称回填面积脏值
+  it('s491：弹窗房间号与顶面房号统一(number优先)，编辑态名称不回填面积脏值', async () => {
+    const store = useBuildingStore();
+    const parsed = parseDxfToResult(SAMPLE_DXF, '教学楼', 1);
+    parsed.rooms.forEach((r, i) => {
+      if (i === 0) {
+        r.code = 'B1-F2-R04';   // 房间编码
+        r.number = '204';       // 房间号码（顶面显示、用户认知的房号）
+        r.name = '面积:69.84';  // DXF 误把面积存进 name
+        r.useArea = 69.84;
+        r.buildArea = 69.84;
+      } else { r.code = ''; r.number = ''; r.name = ''; }
+      r.selected = true;
+    });
+    store.importFloor({
+      buildingName: '教学楼', floorNo: 1, fileName: 'a.dxf', parsed,
+      coordSource: 'local', transform: { offset: [440000, 4100000] as [number, number], rotation: 0, scale: 0.001 },
+    });
+    const wrapper = mountPlan('教学楼', pinia);
+    await nextTick();
+
+    const roomEls = wrapper.findAll('.fpv-room');
+    await roomEls[0].trigger('click');
+    await nextTick();
+    // 弹窗标题与信息格「房间号」都显示 204，而非编码 B1-F2-R04
+    expect(wrapper.find('.fpv-pop__title').text()).toBe('204');
+    expect(findCell(wrapper, '房间号')).toBe('204');
+    // 只读态名称为未命名
+    expect(findCell(wrapper, '名称')).toContain('未命名');
+
+    // s492: 点「编辑本房间」：名称输入框与只读态一致显示「（未命名）」（不是面积脏值「面积:69.84」），
+    // 房间号输入框显示 204（不是编码 B1-F2-R04）——两栏都要和只读态对应上。
+    const editBtn = wrapper.findAll('button').find((b) => b.text().includes('编辑本房间'));
+    await editBtn!.trigger('click');
+    await nextTick();
+    const rows = wrapper.findAll('.fpv-edit__row');
+    const nameRow = rows.find((r) => r.find('label')?.text().trim() === '名称');
+    const nameVal = nameRow?.find('input')?.element?.value;
+    expect(nameVal).toContain('未命名');
+    expect(nameVal).not.toContain('面积');
+    const noRow = rows.find((r) => r.find('label')?.text().trim() === '房间号');
+    expect(noRow?.find('input')?.element?.value).toBe('204');
+
+    wrapper.unmount();
+  });
+
+  // s492 复现：编辑态「房间号」栏应与弹窗房间号(number优先)一致，「名称」栏应与只读态名称一致
+  it('s492：编辑本房间时房间号栏=204(非编码B1-F2-R04)、名称栏=只读态名称', async () => {
+    const store = useBuildingStore();
+    const parsed = parseDxfToResult(SAMPLE_DXF, '教学楼', 1);
+    parsed.rooms.forEach((r, i) => {
+      if (i === 0) {
+        r.code = 'B1-F2-R04'; r.number = '204'; r.name = '面积:69.84';
+        r.useArea = 69.84; r.buildArea = 69.84;
+      } else { r.code = ''; r.number = ''; r.name = ''; }
+      r.selected = true;
+    });
+    store.importFloor({
+      buildingName: '教学楼', floorNo: 1, fileName: 'a.dxf', parsed,
+      coordSource: 'local', transform: { offset: [440000, 4100000] as [number, number], rotation: 0, scale: 0.001 },
+    });
+    const wrapper = mountPlan('教学楼', pinia);
+    await nextTick();
+    await wrapper.findAll('.fpv-room')[0].trigger('click');
+    await nextTick();
+
+    const readonlyRoomNo = findCell(wrapper, '房间号');
+    const readonlyName = findCell(wrapper, '名称');
+    console.log('S492 readonly: roomNo=', readonlyRoomNo, 'name=', readonlyName);
+
+    const editBtn = wrapper.findAll('button').find((b) => b.text().includes('编辑本房间'));
+    await editBtn!.trigger('click');
+    await nextTick();
+    const rows = wrapper.findAll('.fpv-edit__row');
+    const noRow = rows.find((r) => r.find('label')?.text().trim() === '房间号');
+    const nameRow = rows.find((r) => r.find('label')?.text().trim() === '名称');
+    const noVal = noRow?.find('input')?.element?.value;
+    const nameVal = nameRow?.find('input')?.element?.value;
+    console.log('S492 edit inputs: roomNo=', JSON.stringify(noVal), 'name=', JSON.stringify(nameVal));
+
+    // 用户核心诉求：编辑态两个栏都要与只读态/房间本身对应上
+    expect(noVal).toBe(readonlyRoomNo);       // 房间号栏 = 弹窗房间号 204
+    expect(noVal).toBe('204');
+    expect(noVal).not.toContain('B1-F2-R04');
+    expect(nameVal).toBe(readonlyName);       // 名称栏 = 弹窗只读态名称（未命名）
+    expect(nameVal).toContain('未命名');
 
     wrapper.unmount();
   });

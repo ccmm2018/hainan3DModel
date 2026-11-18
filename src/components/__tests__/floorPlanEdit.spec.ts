@@ -532,6 +532,51 @@ describe('FloorPlan2D 房间编辑/隐藏/重新显示', () => {
 
     wrapper.unmount();
   });
+
+  it('s500: 编辑态点业务状态色块只暂存，点保存资料后才写入 store', async () => {
+    const store = useBuildingStore();
+    const parsed = parseDxfToResult(SAMPLE_DXF, '教学楼', 1);
+    parsed.rooms.forEach((r) => {
+      r.selected = true;
+      r.useStatus = 'vacant'; // 统一初始状态，便于断言
+    });
+    const fid = store.importFloor({
+      buildingName: '教学楼', floorNo: 1, fileName: 's500.dxf', parsed,
+      coordSource: 'local',
+      transform: { offset: [440000, 4100000] as [number, number], rotation: 0, scale: 0.001 },
+    });
+    const rooms = store.roomsOfFloor(fid);
+    expect(rooms.length).toBeGreaterThan(0);
+    rooms.forEach((r) => expect(r.useStatus).toBe('vacant'));
+
+    const wrapper = mountPlan('教学楼', pinia);
+    await nextTick();
+    await wrapper.findAll('.fpv-room')[0].trigger('click');
+    await nextTick();
+    const editBtn = wrapper.findAll('button').find((b) => b.text().includes('编辑本房间'));
+    await editBtn!.trigger('click');
+    await nextTick();
+
+    // 编辑态高亮当前状态（vacant=空置），点「无权限」色块只改暂存，不写库
+    const form = wrapper.find('.fpv-pop__form--all');
+    expect(form.text()).toContain('点色块选择，保存后生效');
+    const noaccessBtn = form.findAll('.fpv-pop__status-btn').find((b) => b.text().includes('无权限'));
+    expect(noaccessBtn).toBeTruthy();
+    await noaccessBtn!.trigger('click');
+    await nextTick();
+    // 暂存高亮切到无权限，但 store 里所有房间仍是 vacant（未点保存）
+    expect(noaccessBtn!.classes()).toContain('is-on');
+    rooms.forEach((r) => expect(r.useStatus).toBe('vacant'));
+
+    // 点保存资料 → 状态才写入 store
+    const saveBtn = wrapper.findAll('button').find((b) => b.text().includes('保存资料'));
+    await saveBtn!.trigger('click');
+    await nextTick();
+    await nextTick();
+    expect(store.roomsOfFloor(fid).some((r) => r.useStatus === 'noaccess')).toBe(true);
+
+    wrapper.unmount();
+  });
 });
 
 /** 从弹窗信息格里取出指定 label 的值文本 */

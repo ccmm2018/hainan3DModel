@@ -2245,6 +2245,8 @@ watch(popMode, (m) => {
     editRoom.usePurpose = r.usePurpose;
     editRoom.useArea = String(r.useArea);
     editRoom.buildArea = String(r.buildArea);
+    // s500: 进入编辑态时把当前业务状态载入暂存字段（只读态点色块即时改的是 store 里的值，这里读的是同一份）
+    editRoom.useStatus = r.useStatus ?? '';
   }
   // 只刷新尺寸、不重定位：用户手动拖过的位置在切换子面板时保持不变
   nextTick(() => fitPopupInStage(false));
@@ -2309,6 +2311,11 @@ function setUseStatus(status: UseStatus): void {
   if (!r) return;
   applyUseStatusToRoom(r, status);
 }
+/** s500: 编辑态业务状态色块——只暂存到表单，不写库；点「保存资料」时由 saveRoomAll 统一写入。
+ *  与只读态 setUseStatus（即时写库）严格分开，避免"还没保存就改了状态"。 */
+function stageUseStatus(status: UseStatus): void {
+  editRoom.useStatus = status;
+}
 /** 业务状态 → 中文文案（图例提示用） */
 function statusLabelOf(s: UseStatus | null): string {
   return s == null ? '' : USE_LABELS[s] ?? String(s);
@@ -2363,6 +2370,8 @@ const editRoom = reactive({
   usePurpose: '',
   useArea: '',
   buildArea: '',
+  // s500: 业务状态暂存字段。编辑态点色块只改这里，点「保存资料」才写库（setUseStatus 是只读态的即时切换，别混用）
+  useStatus: '' as UseStatus,
 });
 
 /** 部门下拉候选：当前数据里所有房间已出现过的部门（去重排序）。
@@ -2408,6 +2417,7 @@ watch(
     editRoom.usePurpose = r.usePurpose;
     editRoom.useArea = String(r.useArea);
     editRoom.buildArea = String(r.buildArea);
+    editRoom.useStatus = r.useStatus ?? '';
   },
   { immediate: true },
 );
@@ -2426,6 +2436,8 @@ function saveEdit(notify = true): void {
     usePurpose: editRoom.usePurpose.trim(),
     useArea: Number(editRoom.useArea) || 0,
     buildArea: Number(editRoom.buildArea) || 0,
+    // s500: 业务状态随「保存资料」一起写库（编辑态点色块只暂存，不再即时生效）
+    useStatus: editRoom.useStatus,
   };
   if (isRealRoom(r) && f) {
     // 真实入库房间：写入 store（响应式，读视图立即刷新）
@@ -3373,8 +3385,8 @@ function enterEdit(): void {
                     <div class="fpv-pop__cell"><span>审图状态</span><b>{{ INSPECT_LABELS[liveRoom?.inspectStatus ?? 'normal'] ?? '—' }}</b></div>
                     <div class="fpv-pop__status">
                       <div class="fpv-pop__status-hd">
-                        <span class="fpv-pop__status-label">业务状态 · 点色块直接改</span>
-                        <button type="button" class="fpv-pop__status-clear" @click="setUseStatus('')">清空</button>
+                        <span class="fpv-pop__status-label">业务状态 · 点色块选择，保存后生效</span>
+                        <button type="button" class="fpv-pop__status-clear" @click="stageUseStatus('')">清空</button>
                       </div>
                       <div class="fpv-pop__status-btns">
                         <button
@@ -3382,8 +3394,8 @@ function enterEdit(): void {
                           :key="s.value"
                           type="button"
                           class="fpv-pop__status-btn"
-                          :class="{ 'is-on': liveRoom?.useStatus === s.value }"
-                          @click="setUseStatus(s.value)"
+                          :class="{ 'is-on': editRoom.useStatus === s.value }"
+                          @click="stageUseStatus(s.value)"
                         ><i :style="{ background: USE_COLORS[s.value] }"></i>{{ s.label }}</button>
                       </div>
                     </div>

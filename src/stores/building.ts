@@ -313,7 +313,7 @@ export const useBuildingStore = defineStore('building', () => {
     patch: Partial<
       Pick<
         Room,
-        'code' | 'number' | 'name' | 'dept' | 'usePurpose' | 'useArea' | 'buildArea' | 'inspectStatus'
+        'code' | 'number' | 'name' | 'dept' | 'usePurpose' | 'useArea' | 'buildArea' | 'inspectStatus' | 'useStatus'
       >
     >,
   ): void {

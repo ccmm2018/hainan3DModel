@@ -467,19 +467,21 @@ const INSPECT_COLORS: Record<InspectStatus, string> = {
   warning: '#8E44AD',
   partial: '#F5B041',
 };
-// 业务状态配色（2026-10-03 二次调整：整体加深一档，同时保持底色亮度 > 0.6 → 顶面文字仍用深色可读）
+// 业务状态配色（2026-11-18 调整：四态色相完全分开——使用中绿 / 空置蓝 / 无权限橙 / 未分配灰。
+//  旧版「无权限」与「未分配」都是浅灰，图例圆点几乎一样、难以区分；今把无权限改橙色系（警示/受限语义），
+//  未分配保留中性灰+虚线。底色仍保持亮度 > 0.6 → 顶面文字可用深色可读）
 const USE_COLORS: Record<Exclude<UseStatus, ''>, string> = {
   occupied: '#C8E6C9', // 使用中：绿(100)底
   vacant: '#BBDEFB', // 空置：蓝(100)底
-  noaccess: '#E0E0E0', // 无权限：灰(300)底（顶面渲染时叠加斜纹图案）
+  noaccess: '#FFE0B2', // 无权限：橙(100)底（顶面渲染时叠加橙色斜纹图案）
 };
-/** 未分配底色 */
+/** 未分配底色（中性灰，与无权限的橙色明显区分） */
 const UNASSIGNED_FILL = '#F0F0F0';
 /** 各业务状态的描边样式（'use' 着色模式生效）：颜色 + 实/虚线 */
 const USE_STROKES: Record<UseStatus, { stroke: string; dash?: string }> = {
   occupied: { stroke: '#66BB6A' }, // 使用中：绿(400)实线
   vacant: { stroke: '#64B5F6' }, // 空置：蓝(400)实线
-  noaccess: { stroke: '#9E9E9E' }, // 无权限：灰(500)实线
+  noaccess: { stroke: '#F57C00' }, // 无权限：橙(700)实线
   '': { stroke: '#9E9E9E', dash: '5 4' }, // 未分配：灰(500)虚线
 };
 
@@ -3273,10 +3275,10 @@ function enterEdit(): void {
                 <stop offset="0%" stop-color="#d9dee5" />
                 <stop offset="100%" stop-color="#aeb6c2" />
               </linearGradient>
-              <!-- 无权限房间：#E0E0E0 底 + 45° 斜纹 -->
+              <!-- 无权限房间：#FFE0B2 橙底 + 45° 斜纹（橙色系，与未分配的灰明显区分） -->
               <pattern id="fpvNoaccessHatch" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
-                <rect width="8" height="8" fill="#E0E0E0" />
-                <line x1="0" y1="0" x2="0" y2="8" stroke="#BDBDBD" stroke-width="3" />
+                <rect width="8" height="8" fill="#FFE0B2" />
+                <line x1="0" y1="0" x2="0" y2="8" stroke="#FB8C00" stroke-width="3" />
               </pattern>
             </defs>
             <g>
@@ -3537,10 +3539,10 @@ function enterEdit(): void {
                 <stop offset="0%" stop-color="#d9dee5" />
                 <stop offset="100%" stop-color="#aeb6c2" />
               </linearGradient>
-              <!-- 无权限房间：#E0E0E0 底 + 45° 斜纹（与主视图同 id：url(#) 按 document 顺序解析，两个 defs 内容一致） -->
+              <!-- 无权限房间：#FFE0B2 橙底 + 45° 斜纹（与主视图同 id：url(#) 按 document 顺序解析，两个 defs 内容一致） -->
               <pattern id="fpvNoaccessHatch" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
-                <rect width="8" height="8" fill="#E0E0E0" />
-                <line x1="0" y1="0" x2="0" y2="8" stroke="#BDBDBD" stroke-width="3" />
+                <rect width="8" height="8" fill="#FFE0B2" />
+                <line x1="0" y1="0" x2="0" y2="8" stroke="#FB8C00" stroke-width="3" />
               </pattern>
             </defs>
         <g>

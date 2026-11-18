@@ -62,11 +62,12 @@ export const ROOM_LABEL_FIELDS: RoomLabelField[] = [
   { key: 'user', label: '使用人' },
 ];
 
-/** 状态 → 显示配置（2026-10-03 与 FloorPlan2D 业务四态配色统一：
+/** 状态 → 显示配置（与 FloorPlan2D 业务四态配色统一：绿=使用中 / 蓝=空置 / 橙=无权限 / 灰=未分配。
+ *  2026-11-18：无权限从灰改橙，与未分配的中性灰彻底分开，图例/房间格子一眼可分。
  *  color=底色（图例圆点/房间格子填充），deep=深色调（描边/文字/3D 格子，保证可读可见） */
 export const ROOM_STATUS_CONFIG: Record<RoomStatus, { label: string; color: string; deep: string }> = {
   occupied: { label: '使用中', color: '#C8E6C9', deep: '#66BB6A' },
-  noaccess: { label: '无权限', color: '#E0E0E0', deep: '#9E9E9E' },
+  noaccess: { label: '无权限', color: '#FFE0B2', deep: '#F57C00' },
   vacant: { label: '空置', color: '#BBDEFB', deep: '#64B5F6' },
 };
 

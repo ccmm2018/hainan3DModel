@@ -151,7 +151,7 @@
       </div>
       <button class="measure-guide__finish" @click="completeMeasure">✓ 完成测量 <kbd>Enter</kbd></button>
       <button class="measure-guide__cancel" @click="stopMeasure">清除 <kbd>Esc</kbd></button>
-      <div class="measure-guide__sub">结束方式：点「完成测量」、双击地图空白处，或按 Enter；按 Esc 清除本次测量</div>
+      <div class="measure-guide__sub">已临时切到俯视便于准确测量，点「清除」后自动恢复原视角。结束方式：点「完成测量」、双击地图空白处，或按 Enter；按 Esc 清除本次测量</div>
     </div>
 
     <!-- 量算结果：锚定在测绘范围内（图形质心 / 折线中点），随视角变化跟随图形 -->

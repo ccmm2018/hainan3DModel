@@ -95,6 +95,13 @@ export interface SceneConfig {
   indoorZoom: number;
   /** 室内视角：进入后的倾斜角 */
   indoorPitch: number;
+  /**
+   * 测量时自动切换到的俯仰角（度）。默认 5° ≈ 正上方俯视。
+   * 原因：斜视角下「屏幕点反投影到地面」受透视压缩，点建筑高处还会产生视差，
+   * 量出来不是用户以为的距离/面积。俯视时屏幕所见≈真实地面距离，最接近拿尺量。
+   * 不用 0° 是为避开部分设备 3D 模式 pitch=0 的渲染边界；5° 残留误差可忽略。
+   */
+  measurePitch: number;
   /** 预留楼层组数（为将来 CAD 室内模型挂载用） */
   defaultFloorCount: number;
   /** 房屋分配提交后端 API 地址（留空则本地模拟） */
@@ -238,6 +245,7 @@ export const DEFAULT_SCENE_CONFIG: SceneConfig = {
   roomCellGap: 0.92,
   indoorZoom: 20,
   indoorPitch: 40,
+  measurePitch: 5,
   defaultFloorCount: 4,
   allocationApiUrl: '',
   hideAMapAttribution: false,

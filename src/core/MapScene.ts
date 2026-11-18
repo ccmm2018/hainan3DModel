@@ -15,9 +15,9 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import { wgs84ToGcj02, gcj02ToWgs84 } from '../utils/coordTransform';
+import { haversineDistance, polygonArea } from '../utils/measureMath';
 import type { SceneConfig } from '../config/mapConfig';
 import { ROOM_STATUS_CONFIG, type Room } from '../data/roomData';
-import area from '@turf/area';
 
 /** 首屏性能量算基准：模块脚本执行时刻（≈页面交互起点），用于把各阶段耗时统一到「距页面加载」 */
 const SCENE_T0 = performance.now();
@@ -262,6 +262,8 @@ export class MapScene {
   private indoorView = false;
   private indoorTarget: THREE.Object3D | null = null;
   private savedCamera: { zoom: number; center: [number, number]; pitch: number; rotation: number } | null = null;
+  /** 测量前保存的视角（与室内 savedCamera 分离，避免两者互相覆盖）。进入测量时切俯视、清除测量时恢复。 */
+  private savedCameraForMeasure: { zoom: number; center: [number, number]; pitch: number; rotation: number } | null = null;
   /** 初始水平朝向（度）：init 时由 config.initialRotation / ?rot= 解析，供 2D→3D 切换后复原 */
   private initialRotation = 0;
   /** 加载取景的额外屏幕平移 [往左, 往远处]（占屏幕宽/高比例）：init 时由 config.viewNudge / ?nx=&ny= 解析 */
@@ -3089,6 +3091,7 @@ export class MapScene {
   // -------------------------------------------------------------------------
   setMapView(mode: '2.5d' | '3d'): void {
     if (!this.map) return;
+    if (this.savedCameraForMeasure) this.stopMeasure(); // 若正在测量，先退出并恢复原视角，避免残留俯视/工具高亮
     if (this.indoorView) this.exitIndoorView(); // 若在室内，先退出并恢复原视角
     const center = this.map.getCenter();
     const zoom = this.map.getZoom();
@@ -3119,7 +3122,20 @@ export class MapScene {
   // -------------------------------------------------------------------------
   startMeasure(mode: 'distance' | 'area'): void {
     if (!this.map || !this.scene) return;
-    this.stopMeasure();
+    // 重置上一次测量（内部不恢复视角，避免切换测距/测面时视角闪回）
+    this.stopMeasure(false);
+    // 首次进入测量：保存当前视角并切到近正俯视。俯视下屏幕所见≈真实地面距离，
+    // 让测量像拿尺子量铅笔一样直观；退出测量（清除工具）时恢复原视角。
+    if (!this.savedCameraForMeasure) {
+      this.savedCameraForMeasure = {
+        zoom: this.map.getZoom(),
+        center: this.map.getCenter() as [number, number],
+        pitch: this.map.getPitch(),
+        rotation: this.map.getRotation(),
+      };
+      this.setPitchSafe(this.config.measurePitch ?? 5);
+      this.markDirty();
+    }
     this.measureMode = mode;
     this.measureReportMode = mode;
     this.measuring = true;
@@ -3134,7 +3150,12 @@ export class MapScene {
     this.finishMeasure();
   }
 
-  stopMeasure(): void {
+  /**
+   * 清除测量工具 / 退出测量。
+   * @param restoreCamera 是否恢复进入测量前的视角。切换测距↔测面时内部传 false 避免视角闪回；
+   *                      用户点「清除 / Esc / 结果面板×」等真正退出路径走默认值 true。
+   */
+  stopMeasure(restoreCamera = true): void {
     this.measuring = false;
     this.unbindMeasureDom();
     this.clearMeasureGraphics();
@@ -3143,8 +3164,21 @@ export class MapScene {
     this.measureMode = 'none';
     this.callbacks.onMeasureUpdate?.(null);
     this.callbacks.onMeasureActive?.(false);
+    if (restoreCamera) this.restoreCameraAfterMeasure();
     // 立即重绘一帧，确保清除后的画面（无线段）即时反映，不留残影
     this.requestRender();
+  }
+
+  /** 恢复进入测量前的视角（zoom/center/pitch/rotation 一并还原），无保存视角时为空操作 */
+  private restoreCameraAfterMeasure(): void {
+    const s = this.savedCameraForMeasure;
+    this.savedCameraForMeasure = null;
+    if (!s || !this.map) return;
+    const [glng, glat] = s.center;
+    this.map.setZoomAndCenter(s.zoom, [glng, glat], false, 500);
+    this.setPitchSafe(s.pitch);
+    this.map.setRotation(s.rotation);
+    this.markDirty();
   }
 
   /** 绑定容器级 DOM 事件（穿透 GLCustomLayer，可点在模型上）
@@ -3238,18 +3272,9 @@ export class MapScene {
     this.measureDownPos = null;
   }
 
-  /** GCJ-02 经纬度间的测地距离（米），自包含 Haversine，避免依赖 AMap 不存在的 map.getDistance */
+  /** GCJ-02 经纬度间的测地距离（米）——委托给可单测的纯函数 measureMath */
   private gcjDistance(a: [number, number], b: [number, number]): number {
-    const R = 6378137; // 地球半径（米）
-    const rad = Math.PI / 180;
-    const lat1 = a[1] * rad;
-    const lat2 = b[1] * rad;
-    const dLat = (b[1] - a[1]) * rad;
-    const dLng = (b[0] - a[0]) * rad;
-    const s =
-      Math.sin(dLat / 2) ** 2 +
-      Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2;
-    return 2 * R * Math.asin(Math.min(1, Math.sqrt(s)));
+    return haversineDistance(a, b);
   }
 
   /** 屏幕像素（相对容器）→ GCJ-02 经纬度 */
@@ -3441,7 +3466,7 @@ export class MapScene {
     let value = 0;
     if (this.measurePts.length >= 3) {
       const ring = [...this.measurePts, this.measurePts[0]];
-      value = area({ type: 'Polygon', coordinates: [ring] }) as number;
+      value = polygonArea(ring);
     }
     this.callbacks.onMeasureUpdate?.({
       mode: 'area',
@@ -4288,6 +4313,7 @@ export class MapScene {
     this.clearMeasureGraphics();
     this.measureScene = null;
     this.measureGroup = null;
+    this.savedCameraForMeasure = null;
     this.clearRooms();
     // 低配帧缓存 / 贴图场景 / 高亮材质缓存：随渲染器一起释放
     this.frameRt?.dispose();

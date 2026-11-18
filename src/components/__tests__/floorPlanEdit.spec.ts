@@ -100,6 +100,12 @@ describe('FloorPlan2D 房间编辑/隐藏/重新显示', () => {
     await roomEls[0].trigger('click');
     await nextTick();
 
+    // s498：只读态（未点「编辑本房间」）业务状态是纯展示——只有状态标签、无可点击按钮 / 清空 / 引导文案
+    expect(wrapper.find('.fpv-pop__body .fpv-pop__status-chip').exists()).toBe(true);
+    expect(wrapper.find('.fpv-pop__body .fpv-pop__status-btn').exists()).toBe(false);
+    expect(wrapper.find('.fpv-pop__body').text()).not.toContain('点色块直接改');
+    expect(wrapper.find('.fpv-pop__body').text()).not.toContain('清空');
+
     // 打开“编辑本房间”
     const editBtn = wrapper.findAll('button').find((b) => b.text().includes('编辑本房间'));
     expect(editBtn).toBeTruthy();

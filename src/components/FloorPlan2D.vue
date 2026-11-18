@@ -3412,7 +3412,9 @@ function enterEdit(): void {
                 </div>
               </div>
 
-              <!-- 只读信息：业务状态改成点色块直接切换，不必进编辑表单 -->
+              <!-- 只读信息：业务状态仅作展示，不可在此修改（要改需点下方「编辑本房间」进编辑态）。
+                   s498：原先只读态也绑了 setUseStatus，点色块就能改状态，与「只读」语义矛盾；
+                   改为纯展示标签（span，无 click / 无「清空」），但四态色块仍全部显示并高亮当前状态，与编辑态显示项一致。 -->
               <div v-else class="fpv-pop__body">
                 <div v-if="roomThumb" class="fpv-pop__img">
                   <svg :viewBox="roomThumb.viewBox" preserveAspectRatio="xMidYMid meet">
@@ -3428,18 +3430,15 @@ function enterEdit(): void {
                   </div>
                   <div class="fpv-pop__status">
                     <div class="fpv-pop__status-hd">
-                      <span class="fpv-pop__status-label">业务状态 · 点色块直接改</span>
-                      <button type="button" class="fpv-pop__status-clear" @click="setUseStatus('')">清空</button>
+                      <span class="fpv-pop__status-label">业务状态</span>
                     </div>
                     <div class="fpv-pop__status-btns">
-                      <button
+                      <span
                         v-for="s in STATUS_QUICK"
                         :key="s.value"
-                        type="button"
-                        class="fpv-pop__status-btn"
+                        class="fpv-pop__status-chip"
                         :class="{ 'is-on': liveRoom?.useStatus === s.value }"
-                        @click="setUseStatus(s.value)"
-                      ><i :style="{ background: USE_COLORS[s.value] }"></i>{{ s.label }}</button>
+                      ><i :style="{ background: USE_COLORS[s.value] }"></i>{{ s.label }}</span>
                     </div>
                   </div>
                 </div>
@@ -4052,6 +4051,14 @@ function enterEdit(): void {
 .fpv-pop__status-btn i { width: 9px; height: 9px; border-radius: 50%; border: 1px solid rgba(0,0,0,.12); }
 .fpv-pop__status-btn:hover { border-color: #93c5fd; }
 .fpv-pop__status-btn.is-on { border-color: #2563eb; background: #eff6ff; color: #1d4ed8; font-weight: 700; box-shadow: 0 0 0 2px rgba(37,99,235,.1); }
+/* 只读态状态标签：与可点按钮同款视觉，但不响应点击（cursor 默认、无 hover）。仅高亮当前状态。 */
+.fpv-pop__status-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  height: 24px; padding: 0 8px; font-size: 11px; color: #334155;
+  background: #fff; border: 1px solid #dbe2ea; border-radius: 6px; cursor: default;
+}
+.fpv-pop__status-chip i { width: 9px; height: 9px; border-radius: 50%; border: 1px solid rgba(0,0,0,.12); }
+.fpv-pop__status-chip.is-on { border-color: #2563eb; background: #eff6ff; color: #1d4ed8; font-weight: 700; box-shadow: 0 0 0 2px rgba(37,99,235,.1); }
 
 /* 拆分房间小面板（只在点「拆分」时出现） */
 .fpv-split { font-size: 13px; color: #1f2937; }

@@ -2179,43 +2179,6 @@ function resetPopPosition(): void {
   nextTick(() => fitPopupInStage(true));
 }
 
-/** 选中房间缩略图：用房间自身轮廓生成一张「对应的图片」（无外部图片数据时也能稳定展示） */
-const roomThumb = computed<{ viewBox: string; points: string; fill: string; stroke: string } | null>(() => {
-  const r = selectedRoom.value;
-  if (!r) return null;
-  const poly = polyOf(r);
-  if (poly.length < 3) return null;
-  let minX = Infinity;
-  let minY = Infinity;
-  let maxX = -Infinity;
-  let maxY = -Infinity;
-  for (const [x, y] of poly) {
-    if (x < minX) minX = x;
-    if (y < minY) minY = y;
-    if (x > maxX) maxX = x;
-    if (y > maxY) maxY = y;
-  }
-  const w = maxX - minX || 1;
-  const h = maxY - minY || 1;
-  const W = 220;
-  const H = 130;
-  const pad = 10;
-  const scale = Math.min((W - pad * 2) / w, (H - pad * 2) / h);
-  const ox = pad + (W - pad * 2 - w * scale) / 2;
-  const oy = pad + (H - pad * 2 - h * scale) / 2;
-  const points = poly
-    .map(([x, y]) => {
-      const px = ox + (x - minX) * scale;
-      const py = oy + (maxY - y) * scale; // 翻转 Y（SVG 向下为正）
-      return `${px.toFixed(1)},${py.toFixed(1)}`;
-    })
-    .join(' ');
-  const fill = colorFor(r);
-  // 部门 / 用途模式用色板自带的同色描边；其余模式用顶面色的温和加深，缩略图不再出现黑边
-  const stroke = categoryColorOf(r)?.stroke ?? darken(fill, 0.28);
-  return { viewBox: `0 0 ${W} ${H}`, points, fill, stroke };
-});
-
 /** 弹窗数据：一行两个属性，按 [label, value] 成对排列 */
 const roomInfoPairs = computed<{ label: string; value: string }[]>(() => {
   const r = liveRoom.value;
@@ -3370,17 +3333,10 @@ function enterEdit(): void {
 
             <div class="fpv-pop__content">
               <!-- 编辑本房间：基础资料表单、一次保存（维护台账已于 2026-11-18 移除）。
-                   s497：补充缩略图 / 审图状态 / 业务状态色块，与只读态显示项完全一致，仅在能否编辑上有区别。 -->
+                   s497：补充审图状态 / 业务状态色块，与只读态显示项完全一致，仅在能否编辑上有区别（缩略图 s501 已移除）。 -->
               <div v-if="popMode === 'edit'" class="fpv-pop__form fpv-pop__form--all">
-                <!-- 头部：缩略图 + 审图状态 + 业务状态（flex 容器，不参与下方字段的 grid 两列） -->
+                <!-- 头部：审图状态 + 业务状态（flex 容器，不参与下方字段的 grid 两列）。s501: 已移除缩略图 -->
                 <div class="fpv-pop__edit-head">
-                  <div v-if="roomThumb" class="fpv-pop__img">
-                    <svg :viewBox="roomThumb.viewBox" preserveAspectRatio="xMidYMid meet">
-                      <polygon :points="roomThumb.points" :fill="roomThumb.fill" :stroke="roomThumb.stroke" stroke-width="2" />
-                    </svg>
-                    <span class="fpv-pop__img-tag">缩略图</span>
-                  </div>
-                  <div v-else class="fpv-pop__img fpv-pop__img--empty">暂无图形</div>
                   <div class="fpv-pop__edit-head-info">
                     <div class="fpv-pop__cell"><span>审图状态</span><b>{{ INSPECT_LABELS[liveRoom?.inspectStatus ?? 'normal'] ?? '—' }}</b></div>
                     <div class="fpv-pop__status">
@@ -3428,14 +3384,7 @@ function enterEdit(): void {
                    s498：原先只读态也绑了 setUseStatus，点色块就能改状态，与「只读」语义矛盾；
                    改为纯展示标签（span，无 click / 无「清空」），但四态色块仍全部显示并高亮当前状态，与编辑态显示项一致。 -->
               <div v-else class="fpv-pop__body">
-                <div v-if="roomThumb" class="fpv-pop__img">
-                  <svg :viewBox="roomThumb.viewBox" preserveAspectRatio="xMidYMid meet">
-                    <polygon :points="roomThumb.points" :fill="roomThumb.fill" :stroke="roomThumb.stroke" stroke-width="2" />
-                  </svg>
-                  <span class="fpv-pop__img-tag">缩略图</span>
-                </div>
-                <div v-else class="fpv-pop__img fpv-pop__img--empty">暂无图形</div>
-
+                <!-- s501: 移除房间轮廓缩略图（纯色剪影、与画布高亮房间重复且占宽），信息区占满整行 -->
                 <div class="fpv-pop__info">
                   <div v-for="p in roomInfoPairs" :key="p.label" class="fpv-pop__cell">
                     <span>{{ p.label }}</span><b>{{ p.value }}</b>
@@ -3933,7 +3882,7 @@ function enterEdit(): void {
 
 /* 点击房间弹出的详情卡：
    标题栏即拖拽手柄；内容区独立滚动 + 整体限高，展开「编辑本房间」表单也不会撑出画布。
-   缩略图缩到 92px 并与信息左右并排，字段改 2 列紧凑排布，整体高度从 514~657px 降到约 230~330px。 */
+   s501: 已移除房间轮廓缩略图（信息重复且占宽），信息区占满整行、字段 2 列紧凑排布。 */
 .fpv-pop {
   position: absolute;
   z-index: 30;
@@ -3990,29 +3939,13 @@ function enterEdit(): void {
   overscroll-behavior: contain;
   padding: 10px;
 }
-.fpv-pop__body { display: flex; gap: 10px; align-items: flex-start; }
-.fpv-pop__img {
-  position: relative;
-  flex: 0 0 92px;
-  width: 92px;
-  height: 92px;
-  background: #f8fafc;
-  border: 1px solid #eef0f3;
-  border-radius: 8px;
-  overflow: hidden;
-}
-.fpv-pop__img svg { width: 100%; height: 100%; display: block; }
-.fpv-pop__img-tag { position: absolute; left: 4px; bottom: 3px; font-size: 10px; color: #9ca3af; background: rgba(255,255,255,.8); padding: 0 3px; border-radius: 3px; }
-.fpv-pop__img--empty { display: flex; align-items: center; justify-content: center; color: #9ca3af; font-size: 11px; text-align: center; }
-/* 表单态默认隐藏缩略图，把整行宽度让给字段；但编辑本房间头部的缩略图要显示（s497） */
-.fpv-pop--form .fpv-pop__img { display: none; }
-.fpv-pop--form .fpv-pop__edit-head .fpv-pop__img { display: block; }
+/* s501: 缩略图已移除，只读信息区直接占满整行（不再 flex 左右并排） */
+.fpv-pop__body { display: block; }
 .fpv-pop__edit-head {
-  grid-column: 1 / -1; display: flex; gap: 10px; align-items: stretch;
+  grid-column: 1 / -1;
   padding: 6px; background: #f8fafc; border: 1px solid #f1f5f9; border-radius: 6px;
 }
-.fpv-pop__edit-head .fpv-pop__img { width: 84px; flex: 0 0 84px; }
-.fpv-pop__edit-head-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 5px; }
+.fpv-pop__edit-head-info { min-width: 0; display: flex; flex-direction: column; gap: 5px; }
 
 .fpv-pop__info { flex: 1; min-width: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 5px; }
 .fpv-pop__cell {

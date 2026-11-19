@@ -780,6 +780,55 @@ describe('FloorPlan2D 房间编辑/隐藏/重新显示', () => {
     wrapper.unmount();
   });
 
+  it('拆分：合计相等但某间使用面积>建筑面积时拦截，改回后可拆分', async () => {
+    const store = useBuildingStore();
+    const parsed = parseDxfToResult(SAMPLE_DXF, '教学楼', 1);
+    // 原房使用=建筑=100，预填每间 use=50/build=50。改值时刻意让两类合计都仍=100，
+    // 以便单独验证「每间使用≤建筑」这条校验，而不被合计校验抢先拦掉。
+    parsed.rooms.forEach((r) => { r.selected = true; r.useArea = 100; r.buildArea = 100; });
+    const fid = store.importFloor({
+      buildingName: '教学楼', floorNo: 1, fileName: 'split-order.dxf', parsed,
+      coordSource: 'local', transform: { offset: [440000, 4100000] as [number, number], rotation: 0, scale: 0.001 },
+    });
+    const countBefore = store.roomsOfFloor(fid).length;
+
+    const wrapper = mountPlan('教学楼', pinia);
+    await nextTick();
+    await wrapper.findAll('button').find((b) => b.text().includes('编辑结构'))!.trigger('click');
+    await nextTick();
+    await wrapper.findAll('.fpv-room')[0].trigger('mousedown');
+    await nextTick();
+    await wrapper.findAll('button').find((b) => b.text().includes('拆分'))!.trigger('click');
+    await nextTick();
+
+    const vm = wrapper.vm as any;
+    expect(vm.splitVisible).toBe(true);
+    vm.splitForms[0].number = '431';
+    vm.splitForms[1].number = '432';
+    // 第1间 use60/build40、第2间 use40/build60：使用合计=100、建筑合计=100 都相等，但第1间 use>build
+    vm.splitForms[0].useArea = '60';
+    vm.splitForms[0].buildArea = '40';
+    vm.splitForms[1].useArea = '40';
+    vm.splitForms[1].buildArea = '60';
+    vm.confirmSplit();
+    await nextTick();
+    expect((wrapper.vm as any).splitVisible).toBe(true);
+    expect((wrapper.vm as any).splitAreaError).toContain('大于建筑面积');
+    expect(store.roomsOfFloor(fid).length).toBe(countBefore);
+
+    // 两间都改回 use=build=50 → 合法，可成功拆分
+    vm.splitForms[0].useArea = '50';
+    vm.splitForms[0].buildArea = '50';
+    vm.splitForms[1].useArea = '50';
+    vm.splitForms[1].buildArea = '50';
+    vm.confirmSplit();
+    await nextTick();
+    await nextTick();
+    expect(store.roomsOfFloor(fid).length).toBe(countBefore + 1);
+
+    wrapper.unmount();
+  });
+
   it('s503: 房间号必填——清空房间号阻止保存并高亮，重新填写后可保存', async () => {
     const store = useBuildingStore();
     const parsed = parseDxfToResult(SAMPLE_DXF, '教学楼', 1);

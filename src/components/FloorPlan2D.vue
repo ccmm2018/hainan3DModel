@@ -2825,7 +2825,7 @@ interface SplitPartForm {
 }
 const splitForms = ref<SplitPartForm[]>([]);
 const splitNoError = ref(false);
-/** 拆分子房面积合计不等于原房总面积时的错误提示（空串=无错误）。面积属硬校验，超额或不足都拦截拆分。 */
+/** 拆分子房面积错误提示（空串=无错误）。硬校验两类：①各间合计必须等于原房总面积（超额/不足都拦）；②每间使用面积不得大于建筑面积。 */
 const splitAreaError = ref('');
 /** 按当前份数重建子房表单默认值：房号 -1/-2 后缀、名称加后缀，部门/用途/状态沿用原房，
  *  面积按原房面积 ÷ 份数预填（原房没填面积则留空，由 store 回退到轮廓几何面积）。 */
@@ -2947,9 +2947,18 @@ function confirmSplit(): void {
   };
   checkSum('使用面积', sumUse, totalUse);
   checkSum('建筑面积', sumBuild, totalBuild);
+  // 逐间校验：每间「使用面积 ≤ 建筑面积」（与房间编辑表单同一口径，未分配=建筑−使用不能为负）。
+  // 同样按 effective 后的实际写入值判断：留空的按 total/n 平分，避免"校验用填值、写入用平分值"口径打架。
+  forms.forEach((fm, i) => {
+    const use = effective(fm.useArea, totalUse);
+    const build = effective(fm.buildArea, totalBuild);
+    if (!isAreaOrderValid(use, build)) {
+      parts.push(`第 ${i + 1} 间使用面积 ${use.toFixed(2)}㎡ 大于建筑面积 ${build.toFixed(2)}㎡`);
+    }
+  });
   if (parts.length) {
     splitAreaError.value = parts.join('；');
-    ElMessage.warning('各间面积合计必须等于原房间总面积：' + splitAreaError.value);
+    ElMessage.warning('面积设置有误：' + splitAreaError.value);
     return;
   }
   const [x0, y0, x1, y1] = spanToRect(src);
@@ -3777,7 +3786,7 @@ function enterEdit(): void {
       </div>
       <p v-if="splitNoError" class="fpv-struct__err fpv-struct__err--block">每间子房的房号都要填写</p>
       <p v-if="splitAreaError" class="fpv-struct__err fpv-struct__err--block">{{ splitAreaError }}</p>
-      <p class="fpv-split__hint">使用/建筑面积已按原房÷份数预填（最后一间补齐余数），可逐间改为实际值（留空则自动按原房平分）；各间面积合计<b>必须等于原房总面积</b>，超出或不足都会拦截。房号/名称已按原房预填后缀，部门、用途、状态可逐间设定。</p>
+      <p class="fpv-split__hint">使用/建筑面积已按原房÷份数预填（最后一间补齐余数），可逐间改为实际值（留空则自动按原房平分）；各间面积合计<b>必须等于原房总面积</b>（超出或不足都拦截），且每间<b>使用面积不得大于建筑面积</b>。房号/名称已按原房预填后缀，部门、用途、状态可逐间设定。</p>
     </div>
     <template #footer>
       <el-button @click="splitVisible = false">取消</el-button>

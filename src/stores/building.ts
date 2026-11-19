@@ -441,7 +441,12 @@ export const useBuildingStore = defineStore('building', () => {
    * 每房优先取已填面积，未填（≤0）时回退该房轮廓的几何面积，保证合并值 = 原各房之和。
    * 房号 / 名称留空：由用户在合并后弹出的信息表单中自行填写，不再默认继承第一个房间的「101」。
    */
-  function mergeRooms(fid: string, ids: string[]): string | null {
+  /** 合并/拆分时可由弹窗预填的房间资料字段（几何字段仍由 store 计算，不接受外部覆盖）。 */
+  type RoomInfoPatch = Partial<
+    Pick<Room, 'code' | 'number' | 'name' | 'dept' | 'usePurpose' | 'useStatus'>
+  >;
+
+  function mergeRooms(fid: string, ids: string[], info?: RoomInfoPatch): string | null {
     const list = rooms.value[fid];
     if (!list || ids.length < 2) return null;
     const sel = list.filter((r) => ids.includes(r.id));
@@ -455,17 +460,18 @@ export const useBuildingStore = defineStore('building', () => {
     const merged: Room = {
       id: `${fid}-m${Date.now()}`,
       floorId: fid,
-      code: '',
-      number: '',
-      name: '',
-      dept: '',
-      usePurpose: '',
+      // 弹窗预填的房号/名称等参数优先；未传时保持旧的留空行为（由合并后表单再填）。
+      code: info?.code ?? '',
+      number: info?.number ?? '',
+      name: info?.name ?? '',
+      dept: info?.dept ?? '',
+      usePurpose: info?.usePurpose ?? '',
       useArea,
       buildArea,
       outline,
       centroid,
       inspectStatus: 'normal',
-      useStatus: '',
+      useStatus: info?.useStatus ?? '',
       selected: true,
     };
     rooms.value[fid] = list.filter((r) => !ids.includes(r.id)).concat(merged);
@@ -485,7 +491,7 @@ export const useBuildingStore = defineStore('building', () => {
    *  - 房号 / 名称加 -1 / -2… 后缀避免重号，用户可在「编辑资料」里逐间改；
    *  - 部门 / 用途 / 业务状态 / 审图状态继承原房（物理分割通常仍归同一部门）。
    */
-  function splitRoom(fid: string, roomId: string, outlines: Pt[][]): string[] {
+  function splitRoom(fid: string, roomId: string, outlines: Pt[][], infos?: RoomInfoPatch[]): string[] {
     const list = rooms.value[fid];
     const src = list?.find((r) => r.id === roomId);
     if (!list || !src || outlines.length < 2) return [];
@@ -495,21 +501,24 @@ export const useBuildingStore = defineStore('building', () => {
     const parts: Room[] = outlines.map((outline, i) => {
       const area = polygonArea(outline);
       const suffix = `-${i + 1}`;
-      const code = `${base}${suffix}`;
+      const defaultCode = `${base}${suffix}`;
+      // 弹窗可按子房逐间预填房号/名称等参数；未提供或某字段留空时回退到旧的自动命名 / 继承原房。
+      const info = infos?.[i];
+      const code = info?.code || defaultCode;
       return {
         id: `${fid}-s${stamp}-${i}`,
         floorId: fid,
         code,
-        number: code,
-        name: src.name ? `${src.name}${suffix}` : '',
-        dept: src.dept,
-        usePurpose: src.usePurpose,
+        number: info?.number || code,
+        name: info?.name ?? (src.name ? `${src.name}${suffix}` : ''),
+        dept: info?.dept ?? src.dept,
+        usePurpose: info?.usePurpose ?? src.usePurpose,
         useArea: src.useArea > 0 ? src.useArea / n : area,
         buildArea: src.buildArea > 0 ? src.buildArea / n : area,
         outline,
         centroid: polygonCentroid(outline),
         inspectStatus: src.inspectStatus,
-        useStatus: src.useStatus,
+        useStatus: info?.useStatus ?? src.useStatus,
         selected: true,
       };
     });

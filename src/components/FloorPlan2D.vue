@@ -2655,19 +2655,57 @@ function doAddRoom(): void {
   ElMessage.success('已新增一间房，请在弹窗填写房间信息');
 }
 
-/** 合并所选房间 */
+// ---- 合并房间：先弹参数表单，确认后才真正合并 ----
+const mergeVisible = ref(false);
+/** 合并后新房的可编辑资料（房号 / 名称 / 部门 / 用途 / 状态）；面积由 store 按原各房之和自动算，不接受手填 */
+const mergeForm = reactive({
+  code: '',
+  number: '',
+  name: '',
+  dept: '',
+  usePurpose: '',
+  useStatus: '' as UseStatus,
+});
+const mergeNoError = ref(false);
+/** 待合并房间 id 的快照：弹窗期间用户可能又点画布改选中，合并必须以点「合并」那一刻的选中为准 */
+const mergeTargetIds = ref<string[]>([]);
+
+/** 点「合并」：校验后打开参数表单，不立即改 store */
 function doMerge(): void {
-  const f = currentFloor.value;
-  if (!f) return;
   if (selectedIds.value.length < 2) {
     ElMessage.warning('请先点选 2 个及以上房间（点一下选中、再点另一个可多选）后再合并');
     return;
   }
+  mergeTargetIds.value = [...selectedIds.value];
+  // 预填策略：房号 / 名称留空强制用户填写（避免默认沿用第一间房的 101）；部门 / 用途取第一间，减少重复输入。
+  const first = displayedRooms.value.find((r) => r.id === mergeTargetIds.value[0]);
+  mergeForm.code = '';
+  mergeForm.number = '';
+  mergeForm.name = '';
+  mergeForm.dept = first?.dept ?? '';
+  mergeForm.usePurpose = first?.usePurpose ?? '';
+  mergeForm.useStatus = (first?.useStatus ?? '') as UseStatus;
+  mergeNoError.value = false;
+  mergeVisible.value = true;
+}
+
+/** 确认合并：先校验房号必填，再算网格外包范围、带参数执行 store 合并 */
+function confirmMerge(): void {
+  const f = currentFloor.value;
+  if (!f) { mergeVisible.value = false; return; }
+  if (!mergeForm.number.trim()) {
+    mergeNoError.value = true;
+    ElMessage.warning('房间号不能为空，请填写后再合并');
+    return;
+  }
+  const mergedIds = [...mergeTargetIds.value];
+  if (mergedIds.length < 2) { mergeVisible.value = false; return; }
+
   // 合并后新房间占据所选房间网格单元的外包范围。必须在改 store 之前先算好：
   // mergeRooms 会同步替换数组、触发 watch(displayedRooms)→initGridPos，若新房此刻无定位，
   // 就会被 idxToSpan 兜底铺到默认格（越界的末格），画面上表现为「房间跑位 / 多出空格」。
   let bi0 = GRID_ROWS - 1, bi1 = 0, c0 = ROOM_COLS - 1, c1 = 0;
-  for (const sid of selectedIds.value) {
+  for (const sid of mergedIds) {
     const s = gridPos[sid];
     if (!s) continue;
     bi0 = Math.min(bi0, s.bi0);
@@ -2675,8 +2713,16 @@ function doMerge(): void {
     c0 = Math.min(c0, s.c0);
     c1 = Math.max(c1, s.c1);
   }
-  const mergedIds = [...selectedIds.value];
-  const id = store.mergeRooms(f.id, mergedIds);
+  const no = mergeForm.number.trim();
+  const id = store.mergeRooms(f.id, mergedIds, {
+    code: mergeForm.code.trim() || no,
+    number: no,
+    name: mergeForm.name.trim(),
+    dept: mergeForm.dept.trim(),
+    usePurpose: mergeForm.usePurpose.trim(),
+    useStatus: mergeForm.useStatus,
+  });
+  mergeVisible.value = false;
   if (id) {
     // 先删被合并房间的旧定位，再给新房预置外包范围——两者都在改 store 后同步执行，
     // 保证随后的 initGridPos / 渲染看到的新房定位是正确的，而非默认兜底格。
@@ -2686,11 +2732,7 @@ function doMerge(): void {
     selectedIds.value = [id];
     selectedRoom.value = displayedRooms.value.find((r) => r.id === id) ?? null;
     selectedId.value = id;
-    // 合并后的新房间号 / 名称留空，由用户填写：自动弹出信息编辑表单，避免默认沿用第一间房的「101」
-    nextTick(() => {
-      popMode.value = 'edit';
-      ElMessage.info('已合并为新房间，请在表单中填写房间号与名称后保存');
-    });
+    ElMessage.success('已按填写的参数合并为新房间');
   } else {
     selectedIds.value = [];
     selectedRoom.value = null;
@@ -2703,6 +2745,39 @@ const splitVisible = ref(false);
 const splitTargetId = ref<string | null>(null);
 const splitParts = ref(2);
 const splitLayout = ref<'side' | 'stack'>('side');
+/** 每个子房的可编辑资料（与合并表单同口径）。份数/排列变化时按默认值重建，用户可逐间改。 */
+interface SplitPartForm {
+  code: string;
+  number: string;
+  name: string;
+  dept: string;
+  usePurpose: string;
+  useStatus: UseStatus;
+}
+const splitForms = ref<SplitPartForm[]>([]);
+const splitNoError = ref(false);
+/** 按当前份数重建子房表单默认值：房号 -1/-2 后缀、名称加后缀，部门/用途/状态沿用原房 */
+function rebuildSplitForms(): void {
+  const id = splitTargetId.value;
+  const src = id ? displayedRooms.value.find((r) => r.id === id) : null;
+  const base = src?.code || src?.number || '新房间';
+  const n = splitParts.value;
+  splitForms.value = Array.from({ length: n }, (_, i) => {
+    const suffix = `-${i + 1}`;
+    const no = `${base}${suffix}`;
+    return {
+      code: no,
+      number: no,
+      name: src?.name ? `${src.name}${suffix}` : '',
+      dept: src?.dept ?? '',
+      usePurpose: src?.usePurpose ?? '',
+      useStatus: (src?.useStatus ?? '') as UseStatus,
+    };
+  });
+  splitNoError.value = false;
+}
+/** 份数或排列变化 → 重建子房表单（默认值随份数走，用户尚未确认，覆盖是预期的） */
+watch([splitParts, splitLayout], () => { if (splitVisible.value) rebuildSplitForms(); });
 /** 拆分份数上限。拆出的子房用精确 rect 定位、共用原房间的整格占位，并不新增网格格子，
  *  因此不受 6×2 示意网格 12 格的限制（旧实现按「本层房间数」限制，房间稍多的楼层会永远无法拆分）。 */
 const MAX_SPLIT_PARTS = 4;
@@ -2742,6 +2817,7 @@ function doSplit(): void {
   splitTargetId.value = id;
   splitParts.value = 2;
   splitLayout.value = 'side';
+  rebuildSplitForms();
   splitVisible.value = true;
 }
 
@@ -2754,6 +2830,13 @@ function confirmSplit(): void {
   if (!src) { splitVisible.value = false; ElMessage.warning('原房间已不存在，请重新选择'); return; }
   const n = splitParts.value;
   if (n < 2 || n > MAX_SPLIT_PARTS) return; // 防御：只接受 2~4 份，不再受示意网格房间数限制
+  // 逐间校验房间号必填（每间子房都要有可辨识的房号）
+  const forms = splitForms.value;
+  if (forms.length !== n || forms.some((f) => !f.number.trim())) {
+    splitNoError.value = true;
+    ElMessage.warning('请填写每间子房的房间号后再拆分');
+    return;
+  }
   const [x0, y0, x1, y1] = spanToRect(src);
   const rects: [number, number, number, number][] = [];
   for (let i = 0; i < n; i++) {
@@ -2763,7 +2846,19 @@ function confirmSplit(): void {
         : [x0, y0 + ((y1 - y0) * i) / n, x1, y0 + ((y1 - y0) * (i + 1)) / n],
     );
   }
-  const ids = store.splitRoom(f.id, id, rects.map(rectToPolygon));
+  const ids = store.splitRoom(
+    f.id,
+    id,
+    rects.map(rectToPolygon),
+    forms.map((fm) => ({
+      code: fm.code.trim() || fm.number.trim(),
+      number: fm.number.trim(),
+      name: fm.name.trim(),
+      dept: fm.dept.trim(),
+      usePurpose: fm.usePurpose.trim(),
+      useStatus: fm.useStatus,
+    })),
+  );
   splitVisible.value = false;
   if (!ids.length) { ElMessage.warning('拆分失败，请重新选择房间'); return; }
   delete gridPos[id];
@@ -2778,7 +2873,7 @@ function confirmSplit(): void {
   selectedId.value = ids[0] ?? null;
   selectedRoom.value = displayedRooms.value.find((r) => r.id === ids[0]) ?? null;
   closePop();
-  ElMessage.success(`已拆成 ${n} 间，房号自动加 -1…-${n} 后缀，可逐间修改资料`);
+  ElMessage.success(`已按填写的参数拆成 ${n} 间`);
 }
 
 /** 删除所选房间：先弹确认框，避免误删（尤其合并 / 多选删除时） */
@@ -2961,7 +3056,7 @@ const GUIDE_HTML = `
   <p style="margin:0 0 6px">② <b>图例</b>：说明每种颜色代表什么。浏览时只读；<b>编辑结构 + 使用状态</b>时，先点色块再点房间即可批量标注状态；只改一间房的状态，直接在它的详情卡里点色块。</p>
   <p style="margin:0 0 6px">③ <b>楼层</b>：点 1F / 2F 切换楼层，标题里显示本层房间数与面积。</p>
   <p style="margin:0 0 6px">④ <b>视图工具</b>：源对齐（把图纸转正）、导入图纸、放大 / 缩小 / 复位；画布也支持滚轮缩放、按住拖拽平移。</p>
-  <p style="margin:0 0 6px">⑤ <b>房间结构</b>：只管「有哪些房间、怎么摆」。点「编辑结构」才出现新增 / 合并 / 拆分 / 删除 / 拖动；<b>恰好选中 1 间</b>再点「拆分」，可把它等分成 2~4 间（房号加 -1/-2 后缀、面积按份数平分，本层房间数不受限制）；点房间是<b>累积多选</b>，多选时拆分会置灰，点画布空白处或「清空选中」即可重新单选；<b>完成</b>保存、<b>取消·回滚</b>撤销本次全部改动；拆出的子房排布与拖动位置也会一起保存，刷新页面后仍保持。<b>改单间房资料不需要进这里</b>：浏览时点房间，在详情卡里点「编辑本房间」，房间号 / 名称 / 部门 / 用途 / 面积一次填好保存（部门可从下拉选或输入新值）。</p>
+  <p style="margin:0 0 6px">⑤ <b>房间结构</b>：只管「有哪些房间、怎么摆」。点「编辑结构」才出现新增 / 合并 / 拆分 / 删除 / 拖动；<b>恰好选中 1 间</b>再点「拆分」，可把它等分成 2~4 间——会先弹出表单给每间子房设定房号/名称/部门/状态，确认后才真正拆分（面积按份数平分，本层房间数不受限制）；点房间是<b>累积多选</b>，多选时拆分会置灰，点画布空白处或「清空选中」即可重新单选；<b>完成</b>保存、<b>取消·回滚</b>撤销本次全部改动；拆出的子房排布与拖动位置也会一起保存，刷新页面后仍保持。<b>改单间房资料不需要进这里</b>：浏览时点房间，在详情卡里点「编辑本房间」，房间号 / 名称 / 部门 / 用途 / 面积一次填好保存（部门可从下拉选或输入新值）。</p>
   <p style="margin:0">⑥ <b>其它</b>：被隐藏的房间在这里恢复；点「?」可随时重看本说明。</p>
 </div>`;
 
@@ -3442,18 +3537,65 @@ function enterEdit(): void {
     </div>
   </el-dialog>
 
-  <!-- 拆分房间：只在点「拆分」时出现的小面板，份数与排列一次选好，不做多步向导 -->
+  <!-- 合并房间：点「合并」先弹此表单重设新房参数，确认后才真正合并（面积自动求和，不接受手填） -->
+  <el-dialog
+    v-if="!embedded"
+    v-model="mergeVisible"
+    title="合并房间 · 设定新房参数"
+    width="420px"
+    append-to-body
+    :close-on-click-modal="false"
+    class="fpv-struct-dialog"
+  >
+    <div class="fpv-split">
+      <p class="fpv-split__tip">将选中的 <b>{{ mergeTargetIds.length }}</b> 间房合并为一间，原房间会被替换。请先设定新房资料。</p>
+      <div class="fpv-struct__row" :class="{ 'fpv-struct__row--error': mergeNoError }">
+        <label>房间号<i>*</i></label>
+        <el-input v-model="mergeForm.number" size="small" placeholder="必填" @update:modelValue="mergeNoError = false" />
+        <span v-if="mergeNoError" class="fpv-struct__err">房间号不能为空</span>
+      </div>
+      <div class="fpv-struct__row"><label>名称</label><el-input v-model="mergeForm.name" size="small" /></div>
+      <div class="fpv-struct__row">
+        <label>部门</label>
+        <el-select v-model="mergeForm.dept" size="small" filterable allow-create default-first-option placeholder="选择或输入部门" style="width:100%">
+          <el-option v-for="d in deptOptions" :key="d" :label="d" :value="d" />
+        </el-select>
+      </div>
+      <div class="fpv-struct__row"><label>用途</label><el-input v-model="mergeForm.usePurpose" size="small" /></div>
+      <div class="fpv-struct__row fpv-struct__row--status">
+        <label>业务状态</label>
+        <div class="fpv-pop__status-btns">
+          <button type="button" class="fpv-pop__status-btn" :class="{ 'is-on': mergeForm.useStatus === '' }" @click="mergeForm.useStatus = ''">未分配</button>
+          <button
+            v-for="s in STATUS_QUICK"
+            :key="s.value"
+            type="button"
+            class="fpv-pop__status-btn"
+            :class="{ 'is-on': mergeForm.useStatus === s.value }"
+            @click="mergeForm.useStatus = s.value"
+          ><i :style="{ background: USE_COLORS[s.value] }"></i>{{ s.label }}</button>
+        </div>
+      </div>
+      <p class="fpv-split__hint">面积按原各房之和自动计算。房间号必填，其余可留空。</p>
+    </div>
+    <template #footer>
+      <el-button @click="mergeVisible = false">取消</el-button>
+      <el-button type="primary" @click="confirmMerge()">确认合并</el-button>
+    </template>
+  </el-dialog>
+
+  <!-- 拆分房间：份数/排列 + 每间子房参数一次选好，确认后一次性拆分 -->
   <el-dialog
     v-if="!embedded"
     v-model="splitVisible"
-    title="拆分房间"
-    width="380px"
+    title="拆分房间 · 设定各间参数"
+    width="480px"
     append-to-body
     :close-on-click-modal="false"
-    class="fpv-split-dialog"
+    class="fpv-struct-dialog"
   >
     <div class="fpv-split">
-      <p class="fpv-split__tip">把 <b>{{ splitTargetName }}</b> 平均拆成多间，原房间会被替换。</p>
+      <p class="fpv-split__tip">把 <b>{{ splitTargetName }}</b> 平均拆成多间，原房间会被替换。请先设定各间资料。</p>
       <div class="fpv-split__row">
         <span class="fpv-split__label">拆成</span>
         <el-radio-group v-model="splitParts">
@@ -3471,7 +3613,39 @@ function enterEdit(): void {
           <el-radio-button value="stack">上下叠放</el-radio-button>
         </el-radio-group>
       </div>
-      <p class="fpv-split__hint">房号自动加 -1 / -2… 后缀，面积按份数平分，部门、用途、状态沿用原房；拆完点每间房可在详情卡逐间修改资料。</p>
+      <div class="fpv-split__parts">
+        <div v-for="(fm, idx) in splitForms" :key="idx" class="fpv-split__part">
+          <div class="fpv-split__part-hd">第 {{ idx + 1 }} 间</div>
+          <div class="fpv-struct__row" :class="{ 'fpv-struct__row--error': splitNoError && !fm.number.trim() }">
+            <label>房号<i>*</i></label>
+            <el-input v-model="fm.number" size="small" placeholder="必填" @update:modelValue="splitNoError = false" />
+          </div>
+          <div class="fpv-struct__row"><label>名称</label><el-input v-model="fm.name" size="small" /></div>
+          <div class="fpv-struct__row">
+            <label>部门</label>
+            <el-select v-model="fm.dept" size="small" filterable allow-create default-first-option placeholder="选择或输入部门" style="width:100%">
+              <el-option v-for="d in deptOptions" :key="d" :label="d" :value="d" />
+            </el-select>
+          </div>
+          <div class="fpv-struct__row"><label>用途</label><el-input v-model="fm.usePurpose" size="small" /></div>
+          <div class="fpv-struct__row fpv-struct__row--status">
+            <label>状态</label>
+            <div class="fpv-pop__status-btns">
+              <button type="button" class="fpv-pop__status-btn" :class="{ 'is-on': fm.useStatus === '' }" @click="fm.useStatus = ''">未分配</button>
+              <button
+                v-for="s in STATUS_QUICK"
+                :key="s.value"
+                type="button"
+                class="fpv-pop__status-btn"
+                :class="{ 'is-on': fm.useStatus === s.value }"
+                @click="fm.useStatus = s.value"
+              ><i :style="{ background: USE_COLORS[s.value] }"></i>{{ s.label }}</button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <p v-if="splitNoError" class="fpv-struct__err fpv-struct__err--block">每间子房的房号都要填写</p>
+      <p class="fpv-split__hint">面积按份数平分；房号/名称已按原房预填后缀，可直接改。部门、用途、状态可逐间设定。</p>
     </div>
     <template #footer>
       <el-button @click="splitVisible = false">取消</el-button>
@@ -4034,6 +4208,19 @@ function enterEdit(): void {
 .fpv-split__row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
 .fpv-split__label { flex: 0 0 36px; color: #6b7280; }
 .fpv-split__hint { margin: 12px 0 0; padding: 8px 10px; background: #f8fafc; border-radius: 6px; color: #64748b; font-size: 12px; line-height: 1.6; }
+
+/* 合并 / 拆分参数表单：一行一字段，紧凑排列；必填星号用 i 标签，不进 label 文本 */
+.fpv-struct__row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.fpv-struct__row > label { flex: 0 0 52px; font-size: 12px; color: #6b7280; }
+.fpv-struct__row > label i { color: #e11d48; font-style: normal; }
+.fpv-struct__row--status { align-items: flex-start; }
+.fpv-struct__row--status > label { padding-top: 4px; }
+.fpv-struct__err { color: #e11d48; font-size: 11px; }
+.fpv-struct__err--block { display: block; margin: 4px 0 0; }
+.fpv-struct__row--error :deep(.el-input__wrapper) { box-shadow: 0 0 0 1px #e11d48 inset; }
+.fpv-split__parts { max-height: 46vh; overflow-y: auto; margin-top: 4px; padding-right: 4px; }
+.fpv-split__part { padding: 10px 12px 6px; margin-bottom: 10px; border: 1px solid #e2e8f0; border-radius: 8px; background: #fcfdfe; }
+.fpv-split__part-hd { font-size: 12px; font-weight: 700; color: #334155; margin-bottom: 8px; padding-bottom: 5px; border-bottom: 1px dashed #e2e8f0; }
 
 .fpv-pop__acts {
   flex: 0 0 auto;

@@ -578,6 +578,119 @@ describe('FloorPlan2D 房间编辑/隐藏/重新显示', () => {
     wrapper.unmount();
   });
 
+  it('合并：点合并先弹参数表单不立即合并，房号必填，确认后按填写参数写入新房', async () => {
+    const store = useBuildingStore();
+    const parsed = parseDxfToResult(SAMPLE_DXF, '教学楼', 1);
+    parsed.rooms.forEach((r) => { r.selected = true; r.dept = '教务处'; });
+    const fid = store.importFloor({
+      buildingName: '教学楼', floorNo: 1, fileName: 'merge.dxf', parsed,
+      coordSource: 'local', transform: { offset: [440000, 4100000] as [number, number], rotation: 0, scale: 0.001 },
+    });
+    const countBefore = store.roomsOfFloor(fid).length;
+
+    const wrapper = mountPlan('教学楼', pinia);
+    await nextTick();
+    // 进入编辑结构态
+    const editStructBtn = wrapper.findAll('button').find((b) => b.text().includes('编辑结构'));
+    expect(editStructBtn).toBeTruthy();
+    await editStructBtn!.trigger('click');
+    await nextTick();
+
+    // 选中前两间房（编辑态选中走 mousedown）
+    const rooms = wrapper.findAll('.fpv-room');
+    await rooms[0].trigger('mousedown');
+    await rooms[1].trigger('mousedown');
+    await nextTick();
+
+    // 点合并：只应弹表单，store 不应变化
+    const mergeBtn = wrapper.findAll('button').find((b) => b.text().includes('合并'));
+    expect(mergeBtn).toBeTruthy();
+    await mergeBtn!.trigger('click');
+    await nextTick();
+    expect((wrapper.vm as any).mergeVisible).toBe(true);
+    expect(store.roomsOfFloor(fid).length).toBe(countBefore);
+
+    // 房号留空点确认 → 被拦截，store 不变
+    const vm = wrapper.vm as any;
+    vm.mergeForm.number = '';
+    await nextTick();
+    vm.confirmMerge();
+    await nextTick();
+    expect((wrapper.vm as any).mergeVisible).toBe(true);
+    expect(store.roomsOfFloor(fid).length).toBe(countBefore);
+
+    // 填写参数后确认 → 真正合并，房间数 -1，新房参数写入
+    vm.mergeForm.number = '301';
+    vm.mergeForm.name = '合并教室';
+    vm.mergeForm.dept = '学生处';
+    await nextTick();
+    vm.confirmMerge();
+    await nextTick();
+    await nextTick();
+    expect(store.roomsOfFloor(fid).length).toBe(countBefore - 1);
+    const merged = store.roomsOfFloor(fid).find((r) => r.number === '301');
+    expect(merged).toBeTruthy();
+    expect(merged!.name).toBe('合并教室');
+    expect(merged!.dept).toBe('学生处');
+
+    wrapper.unmount();
+  });
+
+  it('拆分：点拆分弹表单且默认预填各子房房号，确认后按填写参数写入子房', async () => {
+    const store = useBuildingStore();
+    const parsed = parseDxfToResult(SAMPLE_DXF, '教学楼', 1);
+    parsed.rooms.forEach((r) => { r.selected = true; });
+    const fid = store.importFloor({
+      buildingName: '教学楼', floorNo: 1, fileName: 'split.dxf', parsed,
+      coordSource: 'local', transform: { offset: [440000, 4100000] as [number, number], rotation: 0, scale: 0.001 },
+    });
+    const countBefore = store.roomsOfFloor(fid).length;
+
+    const wrapper = mountPlan('教学楼', pinia);
+    await nextTick();
+    const editStructBtn = wrapper.findAll('button').find((b) => b.text().includes('编辑结构'));
+    await editStructBtn!.trigger('click');
+    await nextTick();
+
+    // 只选中一间
+    await wrapper.findAll('.fpv-room')[0].trigger('mousedown');
+    await nextTick();
+    const splitBtn = wrapper.findAll('button').find((b) => b.text().includes('拆分'));
+    expect(splitBtn).toBeTruthy();
+    await splitBtn!.trigger('click');
+    await nextTick();
+
+    const vm = wrapper.vm as any;
+    expect(vm.splitVisible).toBe(true);
+    expect(vm.splitForms.length).toBe(2);
+    // 默认预填：房号带 -1 / -2 后缀
+    expect(vm.splitForms[0].number).toContain('-1');
+    expect(vm.splitForms[1].number).toContain('-2');
+
+    // 房号留空一间 → 拦截
+    vm.splitForms[0].number = '';
+    await nextTick();
+    vm.confirmSplit();
+    await nextTick();
+    expect((wrapper.vm as any).splitVisible).toBe(true);
+    expect(store.roomsOfFloor(fid).length).toBe(countBefore);
+
+    // 逐间填写参数后确认 → 房间数 +1，子房参数按填写写入
+    vm.splitForms[0].number = '401';
+    vm.splitForms[0].name = '拆分A';
+    vm.splitForms[1].number = '402';
+    vm.splitForms[1].name = '拆分B';
+    await nextTick();
+    vm.confirmSplit();
+    await nextTick();
+    await nextTick();
+    expect(store.roomsOfFloor(fid).length).toBe(countBefore + 1);
+    expect(store.roomsOfFloor(fid).find((r) => r.number === '401' && r.name === '拆分A')).toBeTruthy();
+    expect(store.roomsOfFloor(fid).find((r) => r.number === '402' && r.name === '拆分B')).toBeTruthy();
+
+    wrapper.unmount();
+  });
+
   it('s503: 房间号必填——清空房间号阻止保存并高亮，重新填写后可保存', async () => {
     const store = useBuildingStore();
     const parsed = parseDxfToResult(SAMPLE_DXF, '教学楼', 1);

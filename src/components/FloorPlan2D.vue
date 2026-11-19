@@ -34,7 +34,7 @@ import { useBuildingStore } from '../stores/building';
 import { persistence } from '../utils/persist';
 import { isRoomFieldComplete } from '../utils/roomFields';
 import { cleanName } from '../utils/roomName';
-import { fitLabelText, type FitResult } from '../utils/labelFit';
+import { fitLabelText, fitVerticalLayout, type FitResult } from '../utils/labelFit';
 import { unassignedArea, formatUnassignedArea, isAreaOrderValid } from '../utils/roomArea';
 import { polygonArea } from '../utils/geometry';
 import type { Floor, InspectStatus, ParsedRoom, Room, RoomGridSpan, UseStatus } from '../types/cad';
@@ -1340,9 +1340,10 @@ const roomBlocks = computed<RoomBlock[]>(() => {
     const cx = (t0[0] + t1[0] + t2[0] + t3[0]) / 4;
     const cy = (t0[1] + t1[1] + t2[1] + t3[1]) / 4;
     const roomHpx = Math.abs(t0[1] - t3[1]);
-    const gap = Math.max(roomHpx * 0.21, 8) * (isSub ? 0.78 : 1);
-    const sizeNumber = Math.min(Math.max(gap * 0.95, 10), 16) * (isSub ? 0.82 : 1);
-    const sizeOther = Math.min(Math.max(gap * 0.62, 7.5), 11) * (isSub ? 0.82 : 1);
+    // 先判断是否显示「未分配」行，决定总行数；垂直排版据此压缩行距/字号，避免 5 行顶出顶面。
+    const unassignedText = formatUnassignedArea(unassignedArea(room.useArea, room.buildArea));
+    const lineCount = unassignedText ? 5 : 4;
+    const { gap, sizeNumber, sizeOther } = fitVerticalLayout(roomHpx, lineCount, isSub);
 
     // 顶面填充色：跟随「着色」模式（业务=使用状态 / 审图=审图状态 / 部门 / 用途），使状态修改即时体现在图层上
     const fill = roomFill(room);
@@ -1363,13 +1364,10 @@ const roomBlocks = computed<RoomBlock[]>(() => {
     const nameFit = fitLabelText(name, textMaxW, sizeOther, minFitSize);
     const deptFit = fitLabelText(dept, textMaxW, sizeOther, minFitSize);
     const areaFit = fitLabelText(area, textMaxW, sizeOther, minFitSize);
-    // 第 5 行：未分配面积（建筑−使用），统一口径；无差额则空串，模板据此隐藏该行。
-    // 字号比副行再小一档，配合窄格可读性；同样做宽度自适应。
-    const unassigned = formatUnassignedArea(unassignedArea(room.useArea, room.buildArea));
+    // 第 5 行：未分配面积（建筑−使用），复用上方已算好的 unassignedText；字号比副行再小一档。
     const sizeUnassigned = Math.max(6.5, sizeOther * 0.9);
-    const unassignedFit = fitLabelText(unassigned, textMaxW, sizeUnassigned, 6.5);
-    // 4 行 / 5 行都垂直居中：行数不同时把起始 y 上移半行差。
-    const lineCount = unassigned ? 5 : 4;
+    const unassignedFit = fitLabelText(unassignedText, textMaxW, sizeUnassigned, 6.5);
+    // 4 行 / 5 行都垂直居中：行数不同时把起始 y 上移半行差（gap 已随行数压缩）。
     const top = cy - gap * ((lineCount - 1) / 2);
 
     // 前缘（底部）色带：沿顶面「朝观察者前缘」(t3→t2) 画一条细带。
@@ -1407,7 +1405,7 @@ const roomBlocks = computed<RoomBlock[]>(() => {
       name,
       dept,
       area,
-      unassigned,
+      unassigned: unassignedText,
       unassignedFit,
       numberFit,
       nameFit,
@@ -1970,22 +1968,20 @@ const roomFills = computed<RoomFill[]>(() => {
             topPts.reduce((s, p) => s + p[1], 0) / topPts.length,
           ]
         : toScreen(room.centroid ?? [0, 0]);
-    // 与合成网格一致的自适应行距/字号：按顶面屏幕竖向像素高度推 gap，再夹紧到可读范围
-    const ys = topPts.map((p) => p[1]);
-    const roomHpx = ys.length > 1 ? Math.abs(Math.max(...ys) - Math.min(...ys)) : 0;
-    const gap = Math.max(roomHpx * 0.21, 8);
-    const sizeNumber = Math.min(Math.max(gap * 0.95, 10), 16);
-    const sizeOther = Math.min(Math.max(gap * 0.62, 7.5), 11);
     // 顶面填充色：跟随「着色」模式（业务=使用状态 / 审图=审图状态 / 部门 / 用途），使状态修改即时体现在图层上
     const fill = roomFill(room);
     const useStyle = useStrokeStyle(room);
-    // 拆出的子房：也显示完整四行（名称/部门/面积填了就显示），副行字号温和缩小避免窄格糊成一团。
     const isSubFill = !!gridPos[room.id]?.rect;
-    // 顶面水平像素宽：子房被切窄后这里随之变小，四行文字据此自适应（缩字号/截断），不再溢出到邻房。
+    // 先生成标签行（含条件出现的「未分配」第 5 行），行数决定垂直排版：5 行时压缩行距/字号，避免顶出顶面。
+    const rawLines = buildLabelLines(room, fill);
+    const ys = topPts.map((p) => p[1]);
+    const roomHpx = ys.length > 1 ? Math.abs(Math.max(...ys) - Math.min(...ys)) : 0;
+    const { gap, sizeNumber, sizeOther } = fitVerticalLayout(roomHpx, rawLines.length, isSubFill);
+    // 顶面水平像素宽：子房被切窄后这里随之变小，各行文字据此自适应（缩字号/截断），不再溢出到邻房。
     const topXs = topPts.map((p) => p[0]);
     const faceWpx = topXs.length ? Math.max(...topXs) - Math.min(...topXs) : Infinity;
     const textMaxW = Math.max(18, faceWpx - 10);
-    const baseLines = buildLabelLines(room, fill).map((ln, i) => {
+    const baseLines = rawLines.map((ln, i) => {
       const baseSize = i === 0 ? sizeNumber : (isSubFill ? Math.max(7, sizeOther * 0.86) : sizeOther);
       const fit = fitLabelText(ln.text, textMaxW, baseSize, 7);
       return { ...ln, size: fit.size, text: fit.text, ...(fit.truncated ? { full: fit.full } : {}) };

@@ -691,6 +691,50 @@ describe('FloorPlan2D 房间编辑/隐藏/重新显示', () => {
     wrapper.unmount();
   });
 
+  it('拆分：各间面积合计超过原房总面积时拦截，改回不超过后可拆分', async () => {
+    const store = useBuildingStore();
+    const parsed = parseDxfToResult(SAMPLE_DXF, '教学楼', 1);
+    parsed.rooms.forEach((r) => { r.selected = true; });
+    const fid = store.importFloor({
+      buildingName: '教学楼', floorNo: 1, fileName: 'split-area.dxf', parsed,
+      coordSource: 'local', transform: { offset: [440000, 4100000] as [number, number], rotation: 0, scale: 0.001 },
+    });
+    const countBefore = store.roomsOfFloor(fid).length;
+
+    const wrapper = mountPlan('教学楼', pinia);
+    await nextTick();
+    await wrapper.findAll('button').find((b) => b.text().includes('编辑结构'))!.trigger('click');
+    await nextTick();
+    await wrapper.findAll('.fpv-room')[0].trigger('mousedown');
+    await nextTick();
+    await wrapper.findAll('button').find((b) => b.text().includes('拆分'))!.trigger('click');
+    await nextTick();
+
+    const vm = wrapper.vm as any;
+    expect(vm.splitVisible).toBe(true);
+    // 房号填全，避免被房号必填先拦住
+    vm.splitForms[0].number = '411';
+    vm.splitForms[1].number = '412';
+    // 面积填成远超原房总面积 → 拦截
+    vm.splitForms[0].useArea = '999999';
+    vm.splitForms[1].useArea = '999999';
+    vm.confirmSplit();
+    await nextTick();
+    expect((wrapper.vm as any).splitVisible).toBe(true);
+    expect((wrapper.vm as any).splitAreaError).toContain('超过原房');
+    expect(store.roomsOfFloor(fid).length).toBe(countBefore);
+
+    // 改回留空（回退到几何平分）→ 可成功拆分
+    vm.splitForms[0].useArea = '';
+    vm.splitForms[1].useArea = '';
+    vm.confirmSplit();
+    await nextTick();
+    await nextTick();
+    expect(store.roomsOfFloor(fid).length).toBe(countBefore + 1);
+
+    wrapper.unmount();
+  });
+
   it('s503: 房间号必填——清空房间号阻止保存并高亮，重新填写后可保存', async () => {
     const store = useBuildingStore();
     const parsed = parseDxfToResult(SAMPLE_DXF, '教学楼', 1);

@@ -34,6 +34,8 @@ import { useBuildingStore } from '../stores/building';
 import { persistence } from '../utils/persist';
 import { isRoomFieldComplete } from '../utils/roomFields';
 import { cleanName } from '../utils/roomName';
+import { fitLabelText, type FitResult } from '../utils/labelFit';
+import { polygonArea } from '../utils/geometry';
 import type { Floor, InspectStatus, ParsedRoom, Room, RoomGridSpan, UseStatus } from '../types/cad';
 import FpvTip from './FpvTip.vue';
 
@@ -1352,6 +1354,15 @@ const roomBlocks = computed<RoomBlock[]>(() => {
     const name = cleanName(room.name);
     const dept = room.dept || '—';
     const area = `${room.useArea > 0 ? room.useArea.toFixed(2) : '—'}㎡ / ${room.buildArea > 0 ? room.buildArea.toFixed(2) : '—'}㎡`;
+    // 可用文字宽度 = 顶面水平像素宽 - 左右留白。子房被切成 1/n 宽时这里会明显变小，
+    // 四行文字据此自适应（先缩字号到下限、仍超则截断加省略号），不再溢出到隔壁房间。
+    const faceWpx = Math.min(Math.abs(t1[0] - t0[0]), Math.abs(t2[0] - t3[0]));
+    const textMaxW = Math.max(18, faceWpx - 10);
+    const minFitSize = isSub ? 7 : 8;
+    const numberFit = fitLabelText(number, textMaxW, sizeNumber, minFitSize);
+    const nameFit = fitLabelText(name, textMaxW, sizeOther, minFitSize);
+    const deptFit = fitLabelText(dept, textMaxW, sizeOther, minFitSize);
+    const areaFit = fitLabelText(area, textMaxW, sizeOther, minFitSize);
 
     // 前缘（底部）色带：沿顶面「朝观察者前缘」(t3→t2) 画一条细带。
     // 取前缘中点相对房间中心的内法线方向，向内推 thk 像素，得到一条贴边的细色带（画在顶面之下，仅露出贴边部分）。
@@ -1388,6 +1399,10 @@ const roomBlocks = computed<RoomBlock[]>(() => {
       name,
       dept,
       area,
+      numberFit,
+      nameFit,
+      deptFit,
+      areaFit,
       special: false,
       textColor,
       yNumber: top,
@@ -1534,6 +1549,8 @@ interface LabelLine {
   color: string;
   badge: boolean;
   y: number;
+  /** 截断前的完整文本；只有发生截断才填，模板据此挂 <title> 悬浮显示全文 */
+  full?: string;
 }
 
 /** 平面模式（top）的侧壁 quad */
@@ -1571,6 +1588,11 @@ interface RoomBlock {
   dept: string;
   /** 第 4 行：两个面积 */
   area: string;
+  /** 按顶面宽度自适应后的四行文字（含显示文本/字号/是否被截断/完整原文） */
+  numberFit: FitResult;
+  nameFit: FitResult;
+  deptFit: FitResult;
+  areaFit: FitResult;
   /** 是否特殊房间（用醒目色标出） */
   special: boolean;
   /** 文字颜色：普通房间深色、特殊房间白色以保证对比 */
@@ -1939,9 +1961,15 @@ const roomFills = computed<RoomFill[]>(() => {
     const useStyle = useStrokeStyle(room);
     // 拆出的子房：也显示完整四行（名称/部门/面积填了就显示），副行字号温和缩小避免窄格糊成一团。
     const isSubFill = !!gridPos[room.id]?.rect;
-    const baseLines = buildLabelLines(room, fill).map((ln, i) =>
-      i === 0 ? { ...ln, size: sizeNumber } : { ...ln, size: isSubFill ? Math.max(7, sizeOther * 0.86) : sizeOther },
-    );
+    // 顶面水平像素宽：子房被切窄后这里随之变小，四行文字据此自适应（缩字号/截断），不再溢出到邻房。
+    const topXs = topPts.map((p) => p[0]);
+    const faceWpx = topXs.length ? Math.max(...topXs) - Math.min(...topXs) : Infinity;
+    const textMaxW = Math.max(18, faceWpx - 10);
+    const baseLines = buildLabelLines(room, fill).map((ln, i) => {
+      const baseSize = i === 0 ? sizeNumber : (isSubFill ? Math.max(7, sizeOther * 0.86) : sizeOther);
+      const fit = fitLabelText(ln.text, textMaxW, baseSize, 7);
+      return { ...ln, size: fit.size, text: fit.text, ...(fit.truncated ? { full: fit.full } : {}) };
+    });
     const startY = c[1] - ((baseLines.length - 1) * gap) / 2;
     const lines: LabelLine[] = baseLines.map((ln, i) => ({ ...ln, y: startY + i * gap }));
     return {
@@ -2757,6 +2785,8 @@ interface SplitPartForm {
 }
 const splitForms = ref<SplitPartForm[]>([]);
 const splitNoError = ref(false);
+/** 拆分子房面积合计超过原房总面积时的错误提示（空串=无错误）。面积属硬校验，超额拦截拆分。 */
+const splitAreaError = ref('');
 /** 按当前份数重建子房表单默认值：房号 -1/-2 后缀、名称加后缀，部门/用途/状态沿用原房，
  *  面积按原房面积 ÷ 份数预填（原房没填面积则留空，由 store 回退到轮廓几何面积）。 */
 function rebuildSplitForms(): void {
@@ -2781,6 +2811,7 @@ function rebuildSplitForms(): void {
     };
   });
   splitNoError.value = false;
+  splitAreaError.value = '';
 }
 /** 份数或排列变化 → 重建子房表单（默认值随份数走，用户尚未确认，覆盖是预期的） */
 watch([splitParts, splitLayout], () => { if (splitVisible.value) rebuildSplitForms(); });
@@ -2841,6 +2872,24 @@ function confirmSplit(): void {
   if (forms.length !== n || forms.some((f) => !f.number.trim())) {
     splitNoError.value = true;
     ElMessage.warning('请填写每间子房的房间号后再拆分');
+    return;
+  }
+  // 面积硬校验：各子房填写的面积合计不得超过原房总面积，超额拦截拆分。
+  // 原房填了面积就以它为准；没填则回退到轮廓几何面积（与 store 拆分时的面积口径一致）。
+  splitAreaError.value = '';
+  const srcRoom = displayedRooms.value.find((r) => r.id === id);
+  const geoArea = srcRoom ? polygonArea(polyOf(srcRoom)) : 0;
+  const totalUse = srcRoom && srcRoom.useArea > 0 ? srcRoom.useArea : geoArea;
+  const totalBuild = srcRoom && srcRoom.buildArea > 0 ? srcRoom.buildArea : geoArea;
+  const sumUse = forms.reduce((s, fm) => s + (Number(fm.useArea) || 0), 0);
+  const sumBuild = forms.reduce((s, fm) => s + (Number(fm.buildArea) || 0), 0);
+  const EPS = 0.01; // 容差：避免 toFixed(2) 四舍五入造成的微小假超额
+  if (sumUse > totalUse + EPS || sumBuild > totalBuild + EPS) {
+    const parts: string[] = [];
+    if (sumUse > totalUse + EPS) parts.push(`使用面积合计 ${sumUse.toFixed(2)}㎡ 超过原房 ${totalUse.toFixed(2)}㎡`);
+    if (sumBuild > totalBuild + EPS) parts.push(`建筑面积合计 ${sumBuild.toFixed(2)}㎡ 超过原房 ${totalBuild.toFixed(2)}㎡`);
+    splitAreaError.value = parts.join('；');
+    ElMessage.warning('各间面积合计不能超过原房间总面积：' + splitAreaError.value);
     return;
   }
   const [x0, y0, x1, y1] = spanToRect(src);
@@ -3407,10 +3456,10 @@ function enterEdit(): void {
             <!-- ⑥ 房间文字（四行：号码/名称/部门/面积）：始终显示 -->
             <g v-if="renderStage >= 4" class="fpv-labels" pointer-events="none">
               <g v-for="rb in roomBlocks" :key="'L' + rb.id">
-                <text :x="rb.cx" :y="rb.yName" text-anchor="middle" :font-size="rb.sizeNumber" font-weight="700" :fill="rb.textColor" dominant-baseline="middle">{{ rb.name }}</text>
-                <text :x="rb.cx" :y="rb.yNumber" text-anchor="middle" :font-size="rb.sizeOther" :fill="rb.textColor" dominant-baseline="middle">{{ rb.number }}</text>
-                <text :x="rb.cx" :y="rb.yDept" text-anchor="middle" :font-size="rb.sizeOther" :fill="rb.textColor" dominant-baseline="middle">{{ rb.dept }}</text>
-                <text :x="rb.cx" :y="rb.yArea" text-anchor="middle" :font-size="rb.sizeOther" :fill="rb.textColor" dominant-baseline="middle">{{ rb.area }}</text>
+                <text :x="rb.cx" :y="rb.yName" text-anchor="middle" :font-size="rb.nameFit.size" font-weight="700" :fill="rb.textColor" dominant-baseline="middle">{{ rb.nameFit.text }}<title v-if="rb.nameFit.truncated">{{ rb.nameFit.full }}</title></text>
+                <text :x="rb.cx" :y="rb.yNumber" text-anchor="middle" :font-size="rb.numberFit.size" :fill="rb.textColor" dominant-baseline="middle">{{ rb.numberFit.text }}<title v-if="rb.numberFit.truncated">{{ rb.numberFit.full }}</title></text>
+                <text :x="rb.cx" :y="rb.yDept" text-anchor="middle" :font-size="rb.deptFit.size" :fill="rb.textColor" dominant-baseline="middle">{{ rb.deptFit.text }}<title v-if="rb.deptFit.truncated">{{ rb.deptFit.full }}</title></text>
+                <text :x="rb.cx" :y="rb.yArea" text-anchor="middle" :font-size="rb.areaFit.size" :fill="rb.textColor" dominant-baseline="middle">{{ rb.areaFit.text }}<title v-if="rb.areaFit.truncated">{{ rb.areaFit.full }}</title></text>
               </g>
             </g>
             <!-- ① 地面(楼板)：楼板已由第 1 步盒顶面提供；此外轮廓为 z=0 投影(比楼板低一个墙高)、且为近白填充，
@@ -3638,9 +3687,9 @@ function enterEdit(): void {
             </el-select>
           </div>
           <div class="fpv-struct__row"><label>用途</label><el-input v-model="fm.usePurpose" size="small" /></div>
-          <div class="fpv-struct__row fpv-struct__row--areas">
-            <div class="fpv-struct__area"><label>使用面积(㎡)</label><el-input v-model="fm.useArea" size="small" type="number" min="0" /></div>
-            <div class="fpv-struct__area"><label>建筑面积(㎡)</label><el-input v-model="fm.buildArea" size="small" type="number" min="0" /></div>
+          <div class="fpv-struct__row fpv-struct__row--areas" :class="{ 'fpv-struct__row--error': !!splitAreaError }">
+            <div class="fpv-struct__area"><label>使用面积(㎡)</label><el-input v-model="fm.useArea" size="small" type="number" min="0" @update:modelValue="splitAreaError = ''" /></div>
+            <div class="fpv-struct__area"><label>建筑面积(㎡)</label><el-input v-model="fm.buildArea" size="small" type="number" min="0" @update:modelValue="splitAreaError = ''" /></div>
           </div>
           <div class="fpv-struct__row fpv-struct__row--status">
             <label>状态</label>
@@ -3659,7 +3708,8 @@ function enterEdit(): void {
         </div>
       </div>
       <p v-if="splitNoError" class="fpv-struct__err fpv-struct__err--block">每间子房的房号都要填写</p>
-      <p class="fpv-split__hint">使用/建筑面积已按原房÷份数预填，可逐间改为实际值（留空则自动按轮廓算）。房号/名称已按原房预填后缀，部门、用途、状态可逐间设定。</p>
+      <p v-if="splitAreaError" class="fpv-struct__err fpv-struct__err--block">{{ splitAreaError }}</p>
+      <p class="fpv-split__hint">使用/建筑面积已按原房÷份数预填，可逐间改为实际值（留空则自动按轮廓算）；各间面积合计不能超过原房总面积。房号/名称已按原房预填后缀，部门、用途、状态可逐间设定。</p>
     </div>
     <template #footer>
       <el-button @click="splitVisible = false">取消</el-button>
@@ -3774,10 +3824,10 @@ function enterEdit(): void {
         <!-- ⑥ 房间文字（第 4 步）：每个房间顶面正中心四行（号码最大加粗 / 名称 / 部门 / 两面积），水平不倾斜 -->
         <g v-if="renderStage >= 4" class="fpv-labels" pointer-events="none">
           <g v-for="rb in roomBlocks" :key="'L' + rb.id">
-            <text :x="rb.cx" :y="rb.yNumber" text-anchor="middle" :font-size="rb.sizeNumber" font-weight="700" :fill="rb.textColor" dominant-baseline="middle">{{ rb.number }}</text>
-            <text :x="rb.cx" :y="rb.yName" text-anchor="middle" :font-size="rb.sizeOther" :fill="rb.textColor" dominant-baseline="middle">{{ rb.name }}</text>
-            <text :x="rb.cx" :y="rb.yDept" text-anchor="middle" :font-size="rb.sizeOther" :fill="rb.textColor" dominant-baseline="middle">{{ rb.dept }}</text>
-            <text :x="rb.cx" :y="rb.yArea" text-anchor="middle" :font-size="rb.sizeOther" :fill="rb.textColor" dominant-baseline="middle">{{ rb.area }}</text>
+            <text :x="rb.cx" :y="rb.yNumber" text-anchor="middle" :font-size="rb.numberFit.size" font-weight="700" :fill="rb.textColor" dominant-baseline="middle">{{ rb.numberFit.text }}<title v-if="rb.numberFit.truncated">{{ rb.numberFit.full }}</title></text>
+            <text :x="rb.cx" :y="rb.yName" text-anchor="middle" :font-size="rb.nameFit.size" :fill="rb.textColor" dominant-baseline="middle">{{ rb.nameFit.text }}<title v-if="rb.nameFit.truncated">{{ rb.nameFit.full }}</title></text>
+            <text :x="rb.cx" :y="rb.yDept" text-anchor="middle" :font-size="rb.deptFit.size" :fill="rb.textColor" dominant-baseline="middle">{{ rb.deptFit.text }}<title v-if="rb.deptFit.truncated">{{ rb.deptFit.full }}</title></text>
+            <text :x="rb.cx" :y="rb.yArea" text-anchor="middle" :font-size="rb.areaFit.size" :fill="rb.textColor" dominant-baseline="middle">{{ rb.areaFit.text }}<title v-if="rb.areaFit.truncated">{{ rb.areaFit.full }}</title></text>
           </g>
         </g>
         <!-- ① 地面(楼板) + ② 走廊：保留给后续阶段（第 4 步起） -->
@@ -3844,7 +3894,7 @@ function enterEdit(): void {
                 :font-weight="ln.weight"
                 :fill="ln.color"
                 dominant-baseline="middle"
-              >{{ ln.text }}</text>
+              >{{ ln.text }}<title v-if="ln.full">{{ ln.full }}</title></text>
             </g>
           </template>
         </g>

@@ -4216,16 +4216,16 @@ function enterEdit(): void {
 .fpv-pop {
   position: absolute;
   z-index: 30;
-  width: 356px;
+  width: 392px;
   max-width: calc(100% - 16px);
-  max-height: min(560px, calc(100% - 16px));
+  max-height: min(620px, calc(100% - 16px));
   display: flex;
   flex-direction: column;
   background: #fff;
   border: 1px solid #e5e7eb;
   border-radius: 12px;
   box-shadow: 0 10px 30px rgba(15, 23, 42, .18);
-  font-size: 13px;
+  font-size: 14px;
   color: #111827;
   overflow: hidden;
 }
@@ -4253,7 +4253,7 @@ function enterEdit(): void {
 .fpv-pop__title {
   flex: 1;
   min-width: 0;
-  font-size: 14px;
+  font-size: 16px;
   font-weight: 700;
   color: #111827;
   overflow: hidden;
@@ -4283,8 +4283,8 @@ function enterEdit(): void {
   border: 1px solid #f1f5f9;
   border-radius: 6px;
 }
-.fpv-pop__cell span { color: #6b7280; font-size: 10.5px; line-height: 1.3; }
-.fpv-pop__cell b { font-weight: 600; color: #111827; font-size: 12px; line-height: 1.35; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fpv-pop__cell span { color: #6b7280; font-size: 12px; line-height: 1.3; }
+.fpv-pop__cell b { font-weight: 600; color: #111827; font-size: 14px; line-height: 1.35; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* 未分配面积：派生只读值，独占整行 + 中性灰底，与「原始填写的两个面积」在视觉上区分开 */
 .fpv-pop__cell--wide { grid-column: 1 / -1; flex-direction: row; align-items: center; justify-content: space-between; background: #f1f5f9; border-color: #e2e8f0; }
 .fpv-pop__cell--wide span { color: #475569; }
@@ -4296,7 +4296,7 @@ function enterEdit(): void {
 .fpv-pop__info--edit .fpv-edit__row,
 .fpv-pop__form .fpv-edit__row { display: flex; flex-direction: column; align-items: stretch; gap: 2px; min-width: 0; }
 .fpv-pop__info--edit .fpv-edit__row label,
-.fpv-pop__form .fpv-edit__row label { width: auto; font-size: 11px; color: #6b7280; line-height: 1.2; }
+.fpv-pop__form .fpv-edit__row label { width: auto; font-size: 12.5px; color: #6b7280; line-height: 1.2; }
 .fpv-pop__info--edit .fpv-edit__row :deep(.el-input),
 .fpv-pop__form .fpv-edit__row :deep(.el-input) { flex: 0 0 auto; width: 100%; }
 .fpv-pop__info--edit .fpv-info__actions,
@@ -4306,13 +4306,13 @@ function enterEdit(): void {
 .fpv-pop__form .fpv-edit__row--required label::after { content: ' *'; color: #e11d48; }
 .fpv-pop__form .fpv-edit__row--error :deep(.el-input__wrapper) { box-shadow: 0 0 0 1px #e11d48 inset; }
 .fpv-pop__form .fpv-edit__row--error :deep(.el-input__inner) { border-color: #e11d48; }
-.fpv-edit__err { color: #e11d48; font-size: 10.5px; line-height: 1.2; }
+.fpv-edit__err { color: #e11d48; font-size: 12px; line-height: 1.2; }
 
 /* 编辑本房间单表单：基础资料一节，一次保存（维护台账已移除） */
 .fpv-pop__form--all { width: 100%; }
 .fpv-pop__section {
   grid-column: 1 / -1;
-  font-size: 11px; font-weight: 700; color: #475569; letter-spacing: .3px;
+  font-size: 12.5px; font-weight: 700; color: #475569; letter-spacing: .3px;
   padding: 5px 0 4px; border-bottom: 1px solid #e8edf4;
 }
 .fpv-pop__section:not(:first-child) { margin-top: 4px; }
@@ -4323,26 +4323,26 @@ function enterEdit(): void {
   background: #f8fafc; border: 1px solid #f1f5f9; border-radius: 6px;
 }
 .fpv-pop__status-hd { display: flex; align-items: center; justify-content: space-between; margin-bottom: 5px; }
-.fpv-pop__status-label { color: #6b7280; font-size: 10.5px; }
-.fpv-pop__inspect-val { font-size: 11px; font-weight: 600; color: #111827; }
-.fpv-pop__status-clear { border: 0; background: none; color: #94a3b8; font-size: 10.5px; cursor: pointer; padding: 0 2px; }
+.fpv-pop__status-label { color: #6b7280; font-size: 12px; }
+.fpv-pop__inspect-val { font-size: 12.5px; font-weight: 600; color: #111827; }
+.fpv-pop__status-clear { border: 0; background: none; color: #94a3b8; font-size: 12px; cursor: pointer; padding: 0 2px; }
 .fpv-pop__status-clear:hover { color: #2563eb; }
 .fpv-pop__status-btns { display: flex; flex-wrap: wrap; gap: 5px; }
 .fpv-pop__status-btn {
-  display: inline-flex; align-items: center; gap: 4px;
-  height: 24px; padding: 0 8px; font-size: 11px; color: #334155;
+  display: inline-flex; align-items: center; gap: 5px;
+  height: 28px; padding: 0 10px; font-size: 12.5px; color: #334155;
   background: #fff; border: 1px solid #dbe2ea; border-radius: 6px; cursor: pointer;
 }
-.fpv-pop__status-btn i { width: 9px; height: 9px; border-radius: 50%; border: 1px solid rgba(0,0,0,.12); }
+.fpv-pop__status-btn i { width: 11px; height: 11px; border-radius: 50%; border: 1px solid rgba(0,0,0,.12); }
 .fpv-pop__status-btn:hover { border-color: #93c5fd; }
 .fpv-pop__status-btn.is-on { border-color: #2563eb; background: #eff6ff; color: #1d4ed8; font-weight: 700; box-shadow: 0 0 0 2px rgba(37,99,235,.1); }
 /* 只读态状态标签：与可点按钮同款视觉，但不响应点击（cursor 默认、无 hover）。仅高亮当前状态。 */
 .fpv-pop__status-chip {
-  display: inline-flex; align-items: center; gap: 4px;
-  height: 24px; padding: 0 8px; font-size: 11px; color: #334155;
+  display: inline-flex; align-items: center; gap: 5px;
+  height: 28px; padding: 0 10px; font-size: 12.5px; color: #334155;
   background: #fff; border: 1px solid #dbe2ea; border-radius: 6px; cursor: default;
 }
-.fpv-pop__status-chip i { width: 9px; height: 9px; border-radius: 50%; border: 1px solid rgba(0,0,0,.12); }
+.fpv-pop__status-chip i { width: 11px; height: 11px; border-radius: 50%; border: 1px solid rgba(0,0,0,.12); }
 .fpv-pop__status-chip.is-on { border-color: #2563eb; background: #eff6ff; color: #1d4ed8; font-weight: 700; box-shadow: 0 0 0 2px rgba(37,99,235,.1); }
 
 /* 拆分房间小面板（只在点「拆分」时出现） */
@@ -4350,18 +4350,18 @@ function enterEdit(): void {
 .fpv-split__tip { margin: 0 0 14px; line-height: 1.6; }
 .fpv-split__row { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
 .fpv-split__label { flex: 0 0 36px; color: #6b7280; }
-.fpv-split__hint { margin: 12px 0 0; padding: 8px 10px; background: #f8fafc; border-radius: 6px; color: #64748b; font-size: 12px; line-height: 1.6; }
+.fpv-split__hint { margin: 12px 0 0; padding: 8px 10px; background: #f8fafc; border-radius: 6px; color: #64748b; font-size: 13px; line-height: 1.6; }
 
 /* 合并 / 拆分参数表单：一行一字段，紧凑排列；必填星号用 i 标签，不进 label 文本 */
 .fpv-struct__row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
-.fpv-struct__row > label { flex: 0 0 52px; font-size: 12px; color: #6b7280; }
+.fpv-struct__row > label { flex: 0 0 56px; font-size: 13px; color: #6b7280; }
 .fpv-struct__row > label i { color: #e11d48; font-style: normal; }
 .fpv-struct__row--status { align-items: flex-start; }
 .fpv-struct__row--status > label { padding-top: 4px; }
 .fpv-struct__row--areas { gap: 10px; }
 .fpv-struct__area { flex: 1; min-width: 0; }
-.fpv-struct__area > label { display: block; flex: none; font-size: 11px; color: #6b7280; margin-bottom: 3px; }
-.fpv-struct__err { color: #e11d48; font-size: 11px; }
+.fpv-struct__area > label { display: block; flex: none; font-size: 12px; color: #6b7280; margin-bottom: 3px; }
+.fpv-struct__err { color: #e11d48; font-size: 12px; }
 .fpv-struct__err--block { display: block; margin: 4px 0 0; }
 .fpv-struct__row--error :deep(.el-input__wrapper) { box-shadow: 0 0 0 1px #e11d48 inset; }
 .fpv-split__parts { max-height: 46vh; overflow-y: auto; margin-top: 4px; padding-right: 4px; }
@@ -4378,11 +4378,11 @@ function enterEdit(): void {
 }
 .fpv-pop__acts .el-button { flex: 1; margin: 0; }
 .fpv-pop__foot-hint {
-  flex: 0 0 auto; padding: 5px 10px; border-top: 1px dashed #eef0f3;
-  color: #94a3b8; font-size: 11px; line-height: 1.4; background: #fcfdff;
+  flex: 0 0 auto; padding: 6px 10px; border-top: 1px dashed #eef0f3;
+  color: #94a3b8; font-size: 12px; line-height: 1.4; background: #fcfdff;
 }
-.fpv-pop .el-button { font-size: 12px; padding: 5px 10px; }
+.fpv-pop .el-button { font-size: 13px; padding: 6px 12px; }
 .fpv-pop :deep(.el-input__inner),
-.fpv-pop :deep(.el-textarea__inner) { font-size: 12px; }
+.fpv-pop :deep(.el-textarea__inner) { font-size: 13px; }
 .fpv-tools__row--embed { margin-left: 10px; min-width: 160px; }
 </style>

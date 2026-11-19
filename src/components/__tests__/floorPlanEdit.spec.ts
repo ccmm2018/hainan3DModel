@@ -721,10 +721,55 @@ describe('FloorPlan2D 房间编辑/隐藏/重新显示', () => {
     vm.confirmSplit();
     await nextTick();
     expect((wrapper.vm as any).splitVisible).toBe(true);
-    expect((wrapper.vm as any).splitAreaError).toContain('超过原房');
+    expect((wrapper.vm as any).splitAreaError).toContain('需等于原房');
+    expect((wrapper.vm as any).splitAreaError).toContain('超出');
     expect(store.roomsOfFloor(fid).length).toBe(countBefore);
 
-    // 改回留空（回退到几何平分）→ 可成功拆分
+    // 改回留空（自动按原房平分，合计恰好等于总面积）→ 可成功拆分
+    vm.splitForms[0].useArea = '';
+    vm.splitForms[1].useArea = '';
+    vm.confirmSplit();
+    await nextTick();
+    await nextTick();
+    expect(store.roomsOfFloor(fid).length).toBe(countBefore + 1);
+
+    wrapper.unmount();
+  });
+
+  it('拆分：各间面积合计少于原房总面积时同样拦截，补齐后可拆分', async () => {
+    const store = useBuildingStore();
+    const parsed = parseDxfToResult(SAMPLE_DXF, '教学楼', 1);
+    parsed.rooms.forEach((r) => { r.selected = true; });
+    const fid = store.importFloor({
+      buildingName: '教学楼', floorNo: 1, fileName: 'split-short.dxf', parsed,
+      coordSource: 'local', transform: { offset: [440000, 4100000] as [number, number], rotation: 0, scale: 0.001 },
+    });
+    const countBefore = store.roomsOfFloor(fid).length;
+
+    const wrapper = mountPlan('教学楼', pinia);
+    await nextTick();
+    await wrapper.findAll('button').find((b) => b.text().includes('编辑结构'))!.trigger('click');
+    await nextTick();
+    await wrapper.findAll('.fpv-room')[0].trigger('mousedown');
+    await nextTick();
+    await wrapper.findAll('button').find((b) => b.text().includes('拆分'))!.trigger('click');
+    await nextTick();
+
+    const vm = wrapper.vm as any;
+    expect(vm.splitVisible).toBe(true);
+    vm.splitForms[0].number = '421';
+    vm.splitForms[1].number = '422';
+    // 面积填得远小于总面积 → 拦截（新规则：合计必须恰好等于总面积，不足也不行）
+    vm.splitForms[0].useArea = '1';
+    vm.splitForms[1].useArea = '1';
+    vm.confirmSplit();
+    await nextTick();
+    expect((wrapper.vm as any).splitVisible).toBe(true);
+    expect((wrapper.vm as any).splitAreaError).toContain('需等于原房');
+    expect((wrapper.vm as any).splitAreaError).toContain('还差');
+    expect(store.roomsOfFloor(fid).length).toBe(countBefore);
+
+    // 改回留空（自动按原房平分，合计恰好等于总面积）→ 可成功拆分
     vm.splitForms[0].useArea = '';
     vm.splitForms[1].useArea = '';
     vm.confirmSplit();
@@ -783,6 +828,46 @@ describe('FloorPlan2D 房间编辑/隐藏/重新显示', () => {
     await nextTick();
     const saved = store.roomsOfFloor(fid).find((r) => r.id === target.id);
     expect(saved?.name).toBe('改名测试');
+
+    wrapper.unmount();
+  });
+
+  it('未分配面积：建筑>使用时详情卡显示派生行，相等/未填/建筑<使用时不显示', async () => {
+    const store = useBuildingStore();
+    const parsed = parseDxfToResult(SAMPLE_DXF, '教学楼', 1);
+    // 第一间设成 建筑50/使用45（差 5㎡）；其余保持相等，便于分别点选验证显示与隐藏
+    parsed.rooms.forEach((r, i) => {
+      r.selected = true;
+      if (i === 0) { r.useArea = 45; r.buildArea = 50; }
+      else { r.useArea = 50; r.buildArea = 50; }
+    });
+    const fid = store.importFloor({
+      buildingName: '教学楼', floorNo: 1, fileName: 'unassigned.dxf', parsed,
+      coordSource: 'local', transform: { offset: [440000, 4100000] as [number, number], rotation: 0, scale: 0.001 },
+    });
+    const rooms = store.roomsOfFloor(fid);
+    const withGap = rooms[0];
+    const noGap = rooms[1];
+
+    const wrapper = mountPlan('教学楼', pinia);
+    await nextTick();
+    const vm = wrapper.vm as any;
+
+    // 让详情卡指向「有差额」的房间（selectedId 驱动 liveRoom computed），直接读信息格验证口径
+    vm.selectedId = withGap.id;
+    await nextTick();
+    const pairsGap = (vm.roomInfoPairs as { label: string; value: string; wide?: boolean }[]);
+    const row = pairsGap.find((p) => p.label.includes('未分配面积'));
+    expect(row).toBeTruthy();
+    expect(row!.value).toBe('5.00 ㎡');
+    expect(row!.wide).toBe(true);
+    expect(findCell(wrapper, '未分配面积（建筑−使用）')).toBe('5.00 ㎡');
+
+    // 无差额房间 → 不显示该行
+    vm.selectedId = noGap.id;
+    await nextTick();
+    const pairsNoGap = (vm.roomInfoPairs as { label: string; value: string }[]);
+    expect(pairsNoGap.some((p) => p.label.includes('未分配面积'))).toBe(false);
 
     wrapper.unmount();
   });

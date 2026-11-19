@@ -35,6 +35,7 @@ import { persistence } from '../utils/persist';
 import { isRoomFieldComplete } from '../utils/roomFields';
 import { cleanName } from '../utils/roomName';
 import { fitLabelText, type FitResult } from '../utils/labelFit';
+import { unassignedArea, formatUnassignedArea } from '../utils/roomArea';
 import { polygonArea } from '../utils/geometry';
 import type { Floor, InspectStatus, ParsedRoom, Room, RoomGridSpan, UseStatus } from '../types/cad';
 import FpvTip from './FpvTip.vue';
@@ -1342,7 +1343,6 @@ const roomBlocks = computed<RoomBlock[]>(() => {
     const gap = Math.max(roomHpx * 0.21, 8) * (isSub ? 0.78 : 1);
     const sizeNumber = Math.min(Math.max(gap * 0.95, 10), 16) * (isSub ? 0.82 : 1);
     const sizeOther = Math.min(Math.max(gap * 0.62, 7.5), 11) * (isSub ? 0.82 : 1);
-    const top = cy - gap * 1.5;
 
     // 顶面填充色：跟随「着色」模式（业务=使用状态 / 审图=审图状态 / 部门 / 用途），使状态修改即时体现在图层上
     const fill = roomFill(room);
@@ -1363,6 +1363,14 @@ const roomBlocks = computed<RoomBlock[]>(() => {
     const nameFit = fitLabelText(name, textMaxW, sizeOther, minFitSize);
     const deptFit = fitLabelText(dept, textMaxW, sizeOther, minFitSize);
     const areaFit = fitLabelText(area, textMaxW, sizeOther, minFitSize);
+    // 第 5 行：未分配面积（建筑−使用），统一口径；无差额则空串，模板据此隐藏该行。
+    // 字号比副行再小一档，配合窄格可读性；同样做宽度自适应。
+    const unassigned = formatUnassignedArea(unassignedArea(room.useArea, room.buildArea));
+    const sizeUnassigned = Math.max(6.5, sizeOther * 0.9);
+    const unassignedFit = fitLabelText(unassigned, textMaxW, sizeUnassigned, 6.5);
+    // 4 行 / 5 行都垂直居中：行数不同时把起始 y 上移半行差。
+    const lineCount = unassigned ? 5 : 4;
+    const top = cy - gap * ((lineCount - 1) / 2);
 
     // 前缘（底部）色带：沿顶面「朝观察者前缘」(t3→t2) 画一条细带。
     // 取前缘中点相对房间中心的内法线方向，向内推 thk 像素，得到一条贴边的细色带（画在顶面之下，仅露出贴边部分）。
@@ -1399,6 +1407,8 @@ const roomBlocks = computed<RoomBlock[]>(() => {
       name,
       dept,
       area,
+      unassigned,
+      unassignedFit,
       numberFit,
       nameFit,
       deptFit,
@@ -1409,6 +1419,7 @@ const roomBlocks = computed<RoomBlock[]>(() => {
       yName: top + gap,
       yDept: top + gap * 2,
       yArea: top + gap * 3,
+      yUnassigned: top + gap * 4,
       sizeNumber,
       sizeOther,
       statusColor,
@@ -1588,6 +1599,10 @@ interface RoomBlock {
   dept: string;
   /** 第 4 行：两个面积 */
   area: string;
+  /** 第 5 行（条件显示）：未分配面积＝建筑−使用；null/空串表示该房不显示此行 */
+  unassigned: string;
+  /** 第 5 行按顶面宽度自适应后的文字；无未分配面积时 text 为空串 */
+  unassignedFit: FitResult;
   /** 按顶面宽度自适应后的四行文字（含显示文本/字号/是否被截断/完整原文） */
   numberFit: FitResult;
   nameFit: FitResult;
@@ -1602,6 +1617,7 @@ interface RoomBlock {
   yName: number;
   yDept: number;
   yArea: number;
+  yUnassigned: number;
   sizeNumber: number;
   sizeOther: number;
   /** 前缘（底部）色带：沿房间顶面「朝观察者前缘」的一条细色带。
@@ -1648,7 +1664,7 @@ function buildLabelLines(room: RoomLike, fill: string): Omit<LabelLine, 'y'>[] {
   const light = isLight(fill);
   const main = light ? '#1b2733' : '#ffffff';
   const sub = light ? '#3b4654' : 'rgba(255,255,255,0.96)';
-  return [
+  const lines: Omit<LabelLine, 'y'>[] = [
     { text: code !== '' ? code : '未命名房间', size: 13, weight: 700, color: main, badge: false },
     { text: d(room.name), size: 9, weight: 500, color: sub, badge: false },
     { text: d(room.dept), size: 9, weight: 500, color: sub, badge: false },
@@ -1660,6 +1676,10 @@ function buildLabelLines(room: RoomLike, fill: string): Omit<LabelLine, 'y'>[] {
       badge: false,
     },
   ];
+  // 第 5 行：未分配面积（建筑−使用），仅在两者都填且有正差额时出现，口径与合成网格/详情卡统一。
+  const unassigned = formatUnassignedArea(unassignedArea(room.useArea, room.buildArea));
+  if (unassigned) lines.push({ text: unassigned, size: 8, weight: 500, color: sub, badge: false });
+  return lines;
 }
 
 // ---- 墙体与房间填充（建筑分层渲染：①地面/②走廊 → ③房间 → ④墙侧面 → ⑤墙顶面 → ⑥文字）----
@@ -2206,11 +2226,11 @@ function resetPopPosition(): void {
   nextTick(() => fitPopupInStage(true));
 }
 
-/** 弹窗数据：一行两个属性，按 [label, value] 成对排列 */
-const roomInfoPairs = computed<{ label: string; value: string }[]>(() => {
+/** 弹窗数据：一行两个属性，按 [label, value] 成对排列；wide=true 独占整行（派生值展示） */
+const roomInfoPairs = computed<{ label: string; value: string; wide?: boolean }[]>(() => {
   const r = liveRoom.value;
   if (!r) return [];
-  return [
+  const pairs: { label: string; value: string; wide?: boolean }[] = [
     { label: '房间号', value: displayRoomNo(r) || '—' },
     { label: '名称', value: cleanName(r.name) },
     { label: '部门', value: r.dept || '—' },
@@ -2219,6 +2239,12 @@ const roomInfoPairs = computed<{ label: string; value: string }[]>(() => {
     { label: '建筑面积', value: `${r.buildArea > 0 ? r.buildArea.toFixed(1) : '—'} ㎡` },
     // s502: 审图状态移到状态区展示（与业务状态同区），使基础信息 6 项正好 2 列 3 行、不落单
   ];
+  // 未分配面积＝建筑−使用：派生只读值，仅两者都填且有正差额时出现；独占整行避免 2 列 3 行被改成落单项。
+  const unassigned = unassignedArea(r.useArea, r.buildArea);
+  if (unassigned !== null) {
+    pairs.push({ label: '未分配面积（建筑−使用）', value: `${unassigned.toFixed(2)} ㎡`, wide: true });
+  }
+  return pairs;
 });
 
 /** 展开 / 收起「编辑本房间」表单会改变弹窗高度，重新夹取位置避免超出界面 */
@@ -2785,7 +2811,7 @@ interface SplitPartForm {
 }
 const splitForms = ref<SplitPartForm[]>([]);
 const splitNoError = ref(false);
-/** 拆分子房面积合计超过原房总面积时的错误提示（空串=无错误）。面积属硬校验，超额拦截拆分。 */
+/** 拆分子房面积合计不等于原房总面积时的错误提示（空串=无错误）。面积属硬校验，超额或不足都拦截拆分。 */
 const splitAreaError = ref('');
 /** 按当前份数重建子房表单默认值：房号 -1/-2 后缀、名称加后缀，部门/用途/状态沿用原房，
  *  面积按原房面积 ÷ 份数预填（原房没填面积则留空，由 store 回退到轮廓几何面积）。 */
@@ -2794,8 +2820,14 @@ function rebuildSplitForms(): void {
   const src = id ? displayedRooms.value.find((r) => r.id === id) : null;
   const base = src?.code || src?.number || '新房间';
   const n = splitParts.value;
-  const perUse = src && src.useArea > 0 ? (src.useArea / n).toFixed(2) : '';
-  const perBuild = src && src.buildArea > 0 ? (src.buildArea / n).toFixed(2) : '';
+  // 面积按原房面积 ÷ 份数预填；最后一间补齐余数，让默认合计严格等于总面积
+  // （否则 100㎡ 拆 3 间各 33.33 → 合计 99.99，会被"必须相等"校验误判）。
+  const hasUse = !!(src && src.useArea > 0);
+  const hasBuild = !!(src && src.buildArea > 0);
+  const perUse = hasUse ? (src!.useArea / n).toFixed(2) : '';
+  const perBuild = hasBuild ? (src!.buildArea / n).toFixed(2) : '';
+  const lastUse = hasUse ? (src!.useArea - Number(perUse) * (n - 1)).toFixed(2) : '';
+  const lastBuild = hasBuild ? (src!.buildArea - Number(perBuild) * (n - 1)).toFixed(2) : '';
   splitForms.value = Array.from({ length: n }, (_, i) => {
     const suffix = `-${i + 1}`;
     const no = `${base}${suffix}`;
@@ -2806,8 +2838,8 @@ function rebuildSplitForms(): void {
       dept: src?.dept ?? '',
       usePurpose: src?.usePurpose ?? '',
       useStatus: (src?.useStatus ?? '') as UseStatus,
-      useArea: perUse,
-      buildArea: perBuild,
+      useArea: i === n - 1 ? lastUse : perUse,
+      buildArea: i === n - 1 ? lastBuild : perBuild,
     };
   });
   splitNoError.value = false;
@@ -2874,22 +2906,36 @@ function confirmSplit(): void {
     ElMessage.warning('请填写每间子房的房间号后再拆分');
     return;
   }
-  // 面积硬校验：各子房填写的面积合计不得超过原房总面积，超额拦截拆分。
+  // 面积硬校验：各子房面积合计必须【恰好等于】原房总面积——既不能超，也不能少。
   // 原房填了面积就以它为准；没填则回退到轮廓几何面积（与 store 拆分时的面积口径一致）。
+  // 留空的子房按 store 的实际写入口径计入合计（填了>0用填值、留空则 total/n 平分），
+  // 保证"校验通过"与"真正写进子房的面积"口径完全一致，不会出现拆分后合计又对不上。
   splitAreaError.value = '';
   const srcRoom = displayedRooms.value.find((r) => r.id === id);
   const geoArea = srcRoom ? polygonArea(polyOf(srcRoom)) : 0;
   const totalUse = srcRoom && srcRoom.useArea > 0 ? srcRoom.useArea : geoArea;
   const totalBuild = srcRoom && srcRoom.buildArea > 0 ? srcRoom.buildArea : geoArea;
-  const sumUse = forms.reduce((s, fm) => s + (Number(fm.useArea) || 0), 0);
-  const sumBuild = forms.reduce((s, fm) => s + (Number(fm.buildArea) || 0), 0);
-  const EPS = 0.01; // 容差：避免 toFixed(2) 四舍五入造成的微小假超额
-  if (sumUse > totalUse + EPS || sumBuild > totalBuild + EPS) {
-    const parts: string[] = [];
-    if (sumUse > totalUse + EPS) parts.push(`使用面积合计 ${sumUse.toFixed(2)}㎡ 超过原房 ${totalUse.toFixed(2)}㎡`);
-    if (sumBuild > totalBuild + EPS) parts.push(`建筑面积合计 ${sumBuild.toFixed(2)}㎡ 超过原房 ${totalBuild.toFixed(2)}㎡`);
+  // 与 store.splitRoom 一致：填了(>0)用填值，留空/0 用 total/n
+  const effective = (raw: string, total: number): number => {
+    const v = Number(raw) || 0;
+    return v > 0 ? v : total / n;
+  };
+  const sumUse = forms.reduce((s, fm) => s + effective(fm.useArea, totalUse), 0);
+  const sumBuild = forms.reduce((s, fm) => s + effective(fm.buildArea, totalBuild), 0);
+  const EPS = 0.05; // 容差：允许逐间 toFixed(2) 手工填写带来的几分钱舍入，超过才算不相等
+  const parts: string[] = [];
+  const checkSum = (label: string, sum: number, total: number): void => {
+    const diff = sum - total;
+    if (Math.abs(diff) > EPS) {
+      const dir = diff > 0 ? `超出 ${diff.toFixed(2)}㎡` : `还差 ${(-diff).toFixed(2)}㎡`;
+      parts.push(`${label}合计 ${sum.toFixed(2)}㎡ 需等于原房 ${total.toFixed(2)}㎡（${dir}）`);
+    }
+  };
+  checkSum('使用面积', sumUse, totalUse);
+  checkSum('建筑面积', sumBuild, totalBuild);
+  if (parts.length) {
     splitAreaError.value = parts.join('；');
-    ElMessage.warning('各间面积合计不能超过原房间总面积：' + splitAreaError.value);
+    ElMessage.warning('各间面积合计必须等于原房间总面积：' + splitAreaError.value);
     return;
   }
   const [x0, y0, x1, y1] = spanToRect(src);
@@ -3460,6 +3506,7 @@ function enterEdit(): void {
                 <text :x="rb.cx" :y="rb.yNumber" text-anchor="middle" :font-size="rb.numberFit.size" :fill="rb.textColor" dominant-baseline="middle">{{ rb.numberFit.text }}<title v-if="rb.numberFit.truncated">{{ rb.numberFit.full }}</title></text>
                 <text :x="rb.cx" :y="rb.yDept" text-anchor="middle" :font-size="rb.deptFit.size" :fill="rb.textColor" dominant-baseline="middle">{{ rb.deptFit.text }}<title v-if="rb.deptFit.truncated">{{ rb.deptFit.full }}</title></text>
                 <text :x="rb.cx" :y="rb.yArea" text-anchor="middle" :font-size="rb.areaFit.size" :fill="rb.textColor" dominant-baseline="middle">{{ rb.areaFit.text }}<title v-if="rb.areaFit.truncated">{{ rb.areaFit.full }}</title></text>
+                <text v-if="rb.unassigned" :x="rb.cx" :y="rb.yUnassigned" text-anchor="middle" :font-size="rb.unassignedFit.size" :fill="rb.textColor" dominant-baseline="middle">{{ rb.unassignedFit.text }}<title v-if="rb.unassignedFit.truncated">{{ rb.unassignedFit.full }}</title></text>
               </g>
             </g>
             <!-- ① 地面(楼板)：楼板已由第 1 步盒顶面提供；此外轮廓为 z=0 投影(比楼板低一个墙高)、且为近白填充，
@@ -3551,7 +3598,7 @@ function enterEdit(): void {
               <div v-else class="fpv-pop__body">
                 <!-- s501: 移除房间轮廓缩略图（纯色剪影、与画布高亮房间重复且占宽），信息区占满整行 -->
                 <div class="fpv-pop__info">
-                  <div v-for="p in roomInfoPairs" :key="p.label" class="fpv-pop__cell">
+                  <div v-for="p in roomInfoPairs" :key="p.label" class="fpv-pop__cell" :class="{ 'fpv-pop__cell--wide': p.wide }">
                     <span>{{ p.label }}</span><b>{{ p.value }}</b>
                   </div>
                   <div class="fpv-pop__status">
@@ -3709,7 +3756,7 @@ function enterEdit(): void {
       </div>
       <p v-if="splitNoError" class="fpv-struct__err fpv-struct__err--block">每间子房的房号都要填写</p>
       <p v-if="splitAreaError" class="fpv-struct__err fpv-struct__err--block">{{ splitAreaError }}</p>
-      <p class="fpv-split__hint">使用/建筑面积已按原房÷份数预填，可逐间改为实际值（留空则自动按轮廓算）；各间面积合计不能超过原房总面积。房号/名称已按原房预填后缀，部门、用途、状态可逐间设定。</p>
+      <p class="fpv-split__hint">使用/建筑面积已按原房÷份数预填（最后一间补齐余数），可逐间改为实际值（留空则自动按原房平分）；各间面积合计<b>必须等于原房总面积</b>，超出或不足都会拦截。房号/名称已按原房预填后缀，部门、用途、状态可逐间设定。</p>
     </div>
     <template #footer>
       <el-button @click="splitVisible = false">取消</el-button>
@@ -3828,6 +3875,7 @@ function enterEdit(): void {
             <text :x="rb.cx" :y="rb.yName" text-anchor="middle" :font-size="rb.nameFit.size" :fill="rb.textColor" dominant-baseline="middle">{{ rb.nameFit.text }}<title v-if="rb.nameFit.truncated">{{ rb.nameFit.full }}</title></text>
             <text :x="rb.cx" :y="rb.yDept" text-anchor="middle" :font-size="rb.deptFit.size" :fill="rb.textColor" dominant-baseline="middle">{{ rb.deptFit.text }}<title v-if="rb.deptFit.truncated">{{ rb.deptFit.full }}</title></text>
             <text :x="rb.cx" :y="rb.yArea" text-anchor="middle" :font-size="rb.areaFit.size" :fill="rb.textColor" dominant-baseline="middle">{{ rb.areaFit.text }}<title v-if="rb.areaFit.truncated">{{ rb.areaFit.full }}</title></text>
+            <text v-if="rb.unassigned" :x="rb.cx" :y="rb.yUnassigned" text-anchor="middle" :font-size="rb.unassignedFit.size" :fill="rb.textColor" dominant-baseline="middle">{{ rb.unassignedFit.text }}<title v-if="rb.unassignedFit.truncated">{{ rb.unassignedFit.full }}</title></text>
           </g>
         </g>
         <!-- ① 地面(楼板) + ② 走廊：保留给后续阶段（第 4 步起） -->
@@ -4210,6 +4258,10 @@ function enterEdit(): void {
 }
 .fpv-pop__cell span { color: #6b7280; font-size: 10.5px; line-height: 1.3; }
 .fpv-pop__cell b { font-weight: 600; color: #111827; font-size: 12px; line-height: 1.35; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 未分配面积：派生只读值，独占整行 + 中性灰底，与「原始填写的两个面积」在视觉上区分开 */
+.fpv-pop__cell--wide { grid-column: 1 / -1; flex-direction: row; align-items: center; justify-content: space-between; background: #f1f5f9; border-color: #e2e8f0; }
+.fpv-pop__cell--wide span { color: #475569; }
+.fpv-pop__cell--wide b { color: #334155; }
 
 .fpv-pop__info--edit,
 .fpv-pop__form { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 8px; }

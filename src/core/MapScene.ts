@@ -161,6 +161,10 @@ export class MapScene {
 
   private renderer: THREE.WebGLRenderer | null = null;
   private lowEnd = false; // 低配设备标记：用于降低渲染负载（关阴影 / 跳过 PMREM / 像素比封顶）
+  /** 画质增强档（默认开）：低配下仍保留 2048 贴图 / 离屏 RT MSAA / 高像素比，代价是可能的掉帧。
+   *  ?q=low 关闭 → 回退到老的省 CPU 路径（贴图降 1024 / RT 无 MSAA / 像素比封顶 1）。
+   *  仅影响「清晰度相关」的降级，不碰离屏 RT 缓存、关阴影、按需渲染等 CPU 链路。 */
+  private qualityBoost = true;
   private loadStartTs = 0; // 模型下载+解析发起时刻（prefetchModel 或 startModelLoad 入口），用于量「下载+解析」耗时
   private onLoadEntryTs = 0; // 模型解析完成的入口时刻（下载+解析完成后），用于把耗时拆分为「下载/解析」与「后处理」两段
   private modelReadyTs = 0;  // 模型挂载完成（onModelReady 触发前）时刻，用于统计总加载耗时
@@ -317,8 +321,14 @@ export class MapScene {
   private lowRtH = 0;
   /** 交互期渲染分辨率倍率（0.6 = 填充率降至 36%）：拖动本就在动，略糊可接受，静止恢复全清 */
   private static readonly INTERACT_SCALE = 0.6;
+  /** 画质增强档下、WebGL1 低配机的离屏超采样倍率：放大 RT 渲染再 downsample 到屏幕，替代不可用的 MSAA */
+  private static readonly QUALITY_SS = 1.35;
+  /** 画质增强档的轻度锐化强度（unsharp mask 系数）：抵消 downsample 与低 PPI 带来的发糊 */
+  private static readonly QUALITY_SHARP = 0.25;
   /** 全屏贴图材质引用（RT 重建后需指向新纹理） */
   private blitMat: THREE.MeshBasicMaterial | null = null;
+  /** 全屏贴图 shader 的 uniforms（超采样 RT 尺寸变化后需更新锐化的 texel）；只声明用到的字段，避免依赖 three 内部未导出的类型 */
+  private blitSharpUniforms: { uTexel: { value: THREE.Vector2 }; uSharp: { value: number } } | null = null;
   /** 页面不可见时暂停渲染，彻底 0 占用 */
   private paused = false;
   /** visibilitychange 处理器引用，用于 destroy 时移除，避免监听器泄漏 */
@@ -599,11 +609,17 @@ export class MapScene {
       const forced = new URLSearchParams(location.search).get('lowend');
       if (forced === '1') lowEnd = true;
       else if (forced === '0') lowEnd = false;
+      // 画质增强档：?q=low 关闭回退到老的低配降质路径；其余情况（含缺省）默认开启。
+      const q = new URLSearchParams(location.search).get('q');
+      if (q === 'low') this.qualityBoost = false;
     } catch { /* ignore */ }
     this.lowEnd = lowEnd;
     if (this.lowEnd) {
       // eslint-disable-next-line no-console
-      console.info(`[MapScene] 低配模式生效（software=${this.softwareRender}）：启用离屏 RT 合成，空闲帧仅全屏贴图，压低 CPU`);
+      console.info(
+        `[MapScene] 低配模式生效（software=${this.softwareRender}，画质增强=${this.qualityBoost ? '开' : '关/?q=low'}）：`
+        + `启用离屏 RT 合成，空闲帧仅全屏贴图，压低 CPU`,
+      );
     }
   }
 
@@ -621,12 +637,15 @@ export class MapScene {
     // 可用 URL 参数 ?lowend=1 / ?lowend=0 强制覆盖（用于测试/排查性能问题）。
     // 注意：判定逻辑已抽到 resolveLowEnd() 并在 init() 建图前执行，这里直接复用，避免重复实现。
     const lowEnd = this.lowEnd;
+    // antialias 对「高德共享 context」实际不生效（context 由其创建时即定型）；真正生效的边缘平滑
+    // 是下方离屏 RT 的 MSAA samples。这里保留语义一致性：画质增强档下低配也置 true（无副作用）。
+    const wantAntialias = !lowEnd || this.qualityBoost;
     try {
       this.renderer = new THREE.WebGLRenderer({
         context: gl,
-        antialias: !lowEnd,
+        antialias: wantAntialias,
         alpha: true,
-        powerPreference: lowEnd ? 'low-power' : 'high-performance',
+        powerPreference: lowEnd && !this.qualityBoost ? 'low-power' : 'high-performance',
       });
     } catch (err) {
       // WebGL 上下文不兼容（如 three r163+ 不再支持 WebGL 1）时，把错误抛给上层
@@ -634,8 +653,9 @@ export class MapScene {
       return;
     }
     // 像素比封顶：retina 屏 dpr=2/3 时片元量按平方放大，是弱 GPU 拖动掉帧的主因之一。
-    // 非低配封顶到 1.5（较 2 大幅削减片元量、换取更跟手；肉眼清晰度几乎无感差异），低配封顶 1。
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, lowEnd ? 1 : 1.5));
+    // 老路径：非低配 1.5 / 低配 1；画质增强档：低配也放宽到 1.5（弱机可能掉帧，可用 ?q=low 回退）。
+    const pixelCap = lowEnd && !this.qualityBoost ? 1 : 1.5;
+    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, pixelCap));
     this.renderer.setSize(width, height, false);
     this.renderer.autoClear = false;
     // 场景内全部材质均为不透明（已在加载时把半透明/透射玻璃降级为 opaque），
@@ -1038,7 +1058,8 @@ export class MapScene {
         // 仅当确为「软件光栅(SwiftShader)且贴图极大」时，再温和降一次尺寸以压低逐帧填充率；
         // 保留 mipmap 与过滤方式，不伤观感。32 位/老内核 UA 强制的低配（如 360极速）不在此列——
         // 其瓶颈在 AMap 自身逐帧重绘，降纹理无效且会改观感，故跳过。
-        if (this.lowEnd && this.softwareRender) {
+        // 画质增强档：跳过这次降级、保留 2048 原图（细节不减半），代价是填充率上升；?q=low 可回退。
+        if (this.lowEnd && this.softwareRender && !this.qualityBoost) {
           await this.runChunked(textures, '优化贴图', (tex) => {
             if (this.reduceTextureForLowEnd(tex)) textureReduced++;
           });
@@ -1084,9 +1105,11 @@ export class MapScene {
         // eslint-disable-next-line no-console
         console.info(
           `[MapScene] GLB 加载完成：isWebGL2=${caps?.isWebGL2 ?? '?'}，MAX_TEXTURE_SIZE=${caps?.maxTextureSize ?? '?'}，` +
-            `低配=${this.lowEnd}，阴影=${shadowState}，`
+            `低配=${this.lowEnd}，画质增强=${this.qualityBoost ? '开' : '关/?q=low'}，像素比上限=${this.renderer?.getPixelRatio() ?? '?'}，阴影=${shadowState}，`
             + `超限缩放=${clampedCount} 张，NPOT 材质降级=${npotFixed} 张，黑图替换=${materialFixed} 张，低配贴图降级=${textureReduced} 张，`
-            + `各向异性=${anisoLevel}x（${anisoCount} 张贴图）`,
+            + `各向异性=${anisoLevel}x（${anisoCount} 张贴图），`
+            + `离屏超采样=${this.lowEnd && this.qualityBoost && !caps?.isWebGL2 ? MapScene.QUALITY_SS + 'x' : '关'}，`
+            + `锐化=${this.qualityBoost ? MapScene.QUALITY_SHARP : '关'}`,
         );
 
         this.callbacks.onModelStage?.('准备渲染');
@@ -4097,7 +4120,7 @@ export class MapScene {
       if (this.contentDirty) {
         // 内容变化（高亮/选型/房间/校准等）：渲染进离屏 RT 后贴图，与空闲帧同一 blit 路径，
         // 从根上避免「直绘↔贴图」两路切换导致的悬停整模型闪一下。
-        this.renderToRt(this.frameRt!, bufW, bufH);
+        this.renderToRt(this.frameRt!);
         this.contentDirty = false;
         this.rtStale = false; // RT 已含最新内容，后续空闲帧可直接贴图
         // 落到下方 blit 把新 RT 贴到屏幕
@@ -4115,7 +4138,7 @@ export class MapScene {
         this.renderer.setRenderTarget(null);
         this.renderer.clearDepth();
         this.renderer.render(this.scene, this.camera);
-        this.renderToRt(this.frameRt!, bufW, bufH);
+        this.renderToRt(this.frameRt!);
         this.rtStale = false;
         return;
       }
@@ -4138,9 +4161,17 @@ export class MapScene {
     this.renderer.render(this.scene, this.camera);
   }
 
+  /** 计算离屏 RT 的实际物理尺寸（含画质增强档的 WebGL1 超采样倍率）；与 rebuildFrameRt 共用，保证 key 一致 */
+  private frameRtSize(bufW: number, bufH: number): { w: number; h: number } {
+    const isWebGL2 = !!this.renderer?.capabilities?.isWebGL2;
+    const ss = this.lowEnd && this.qualityBoost && !isWebGL2 ? MapScene.QUALITY_SS : 1;
+    return { w: Math.max(1, Math.round(bufW * ss)), h: Math.max(1, Math.round(bufH * ss)) };
+  }
+
   /** 懒初始化离屏缓存：首次或尺寸变化时构建 RT 与全屏贴图场景；返回是否可用 */
   private ensureFrameCache(bufW: number, bufH: number): boolean {
-    if (!this.frameRt || this.frameRtKey !== `${bufW}x${bufH}`) {
+    const rtSize = this.frameRtSize(bufW, bufH);
+    if (!this.frameRt || this.frameRtKey !== `${rtSize.w}x${rtSize.h}`) {
       this.rebuildFrameRt(bufW, bufH);
     }
     // 交互期低分辨率 RT 随全分辨率 RT 同步构建/重建
@@ -4153,8 +4184,13 @@ export class MapScene {
   private rebuildFrameRt(w: number, h: number): void {
     this.frameRt?.dispose();
     const isWebGL2 = !!this.renderer?.capabilities?.isWebGL2;
-    // 低配/软件渲染下关 MSAA：RT 仅在视角/内容变化时重渲染，多重采样的多次采样在弱机上反而拖慢移动帧
-    const samples = this.lowEnd || this.softwareRender ? 0 : (isWebGL2 ? 4 : 0);
+    // 低配/软件渲染下默认关 MSAA：RT 仅在视角/内容变化时重渲染，多重采样在弱机上反而拖慢移动帧。
+    // 画质增强档：低配也开 4x（仅 WebGL2），边缘/细线抗锯齿是这里真正生效的（renderer 的 antialias 对共享 context 无效）。
+    const samples = isWebGL2 && (!this.lowEnd || this.qualityBoost) ? 4 : 0;
+    // 超采样：WebGL1 低配机无法用 MSAA，画质增强档下改为放大离屏 RT、再在 blit 时缩回屏幕，
+    // 由纹理的 LinearFilter 完成 downsample 抗锯齿。WebGL2 已有 4x MSAA，无需再放大、避免双重开销。
+    // 尺寸计算与 ensureFrameCache 共用 frameRtSize()，保证 key 与实际尺寸严格一致。
+    const { w: rtW, h: rtH } = this.frameRtSize(w, h);
     const opts: THREE.RenderTargetOptions = {
       minFilter: THREE.LinearFilter,
       magFilter: THREE.LinearFilter,
@@ -4164,12 +4200,12 @@ export class MapScene {
       samples,
     };
     try {
-      this.frameRt = new THREE.WebGLRenderTarget(Math.max(1, w), Math.max(1, h), opts);
+      this.frameRt = new THREE.WebGLRenderTarget(rtW, rtH, opts);
       this.frameCacheBroken = false;
     } catch {
       // 多重采样 RT 创建失败（极少见）→ 退化为无采样，仍走缓存路径
       try {
-        this.frameRt = new THREE.WebGLRenderTarget(Math.max(1, w), Math.max(1, h), { ...opts, samples: 0 });
+        this.frameRt = new THREE.WebGLRenderTarget(rtW, rtH, { ...opts, samples: 0 });
         this.frameCacheBroken = false;
       } catch {
         this.frameRt = null;
@@ -4184,7 +4220,11 @@ export class MapScene {
       this.blitMat.map = this.frameRt.texture;
       this.blitMat.needsUpdate = true;
     }
-    this.frameRtKey = `${w}x${h}`;
+    // 超采样改变了 RT 物理尺寸 → 同步锐化 shader 的 texel（1/像素），否则锐化半径按旧尺寸算会糊。
+    if (this.blitSharpUniforms && this.frameRt) {
+      this.blitSharpUniforms.uTexel.value.set(1 / this.frameRt.width, 1 / this.frameRt.height);
+    }
+    this.frameRtKey = `${rtW}x${rtH}`;
   }
 
   /** 构建全屏贴图场景（正交相机 + 一个 quad 采样离屏纹理） */
@@ -4200,6 +4240,35 @@ export class MapScene {
       depthWrite: false,
       toneMapped: false,
     });
+    // 画质增强档：给全屏贴图注入轻度锐化（unsharp mask）。放在 map_fragment 之后、colorspace_fragment 之前，
+    // 即在「线性空间、已采样 RT 纹理」的 diffuseColor 上做锐化，three 的 sRGB 编码照常执行 → 不会变色。
+    // uTexel=1/RT像素尺寸，锐化半径随超采样后的 RT 物理尺寸自适应（rebuildFrameRt 里更新）。
+    if (this.qualityBoost) {
+      const rt = this.frameRt!;
+      mat.onBeforeCompile = (shader) => {
+        const texel = { value: new THREE.Vector2(1 / rt.width, 1 / rt.height) };
+        const sharp = { value: MapScene.QUALITY_SHARP };
+        shader.uniforms.uTexel = texel;
+        shader.uniforms.uSharp = sharp;
+        this.blitSharpUniforms = { uTexel: texel, uSharp: sharp };
+        shader.fragmentShader = 'uniform vec2 uTexel;\nuniform float uSharp;\n' + shader.fragmentShader;
+        shader.fragmentShader = shader.fragmentShader.replace(
+          '#include <map_fragment>',
+          `#include <map_fragment>
+           #ifdef USE_MAP
+             // 4 邻域均值作为模糊底图，与原像做差得到高频细节，按 uSharp 叠加（轻度、不产生光晕）
+             vec3 sharpSum = texture2D(map, vMapUv + vec2(uTexel.x, 0.0)).rgb
+                           + texture2D(map, vMapUv - vec2(uTexel.x, 0.0)).rgb
+                           + texture2D(map, vMapUv + vec2(0.0, uTexel.y)).rgb
+                           + texture2D(map, vMapUv - vec2(0.0, uTexel.y)).rgb;
+             vec3 sharpBlur = sharpSum * 0.25;
+             diffuseColor.rgb += uSharp * (diffuseColor.rgb - sharpBlur);
+           #endif`,
+        );
+      };
+      // 让不同 uniform 值的材质各自编译（避免 three 复用缓存 program 导致锐化强度串台）
+      mat.customProgramCacheKey = () => 'blit-sharp-' + MapScene.QUALITY_SHARP;
+    }
     this.blitMat = mat;
     const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), mat);
     quad.frustumCulled = false;
@@ -4209,8 +4278,8 @@ export class MapScene {
     this.frameCacheDirty = true;
   }
 
-  /** 把场景渲染进指定离屏 RT（按给定尺寸设视口/裁剪，透明清空） */
-  private renderToRt(rt: THREE.WebGLRenderTarget, w: number, h: number): void {
+  /** 把场景渲染进指定离屏 RT（视口由 setRenderTarget 自动设为 RT 全尺寸，透明清空） */
+  private renderToRt(rt: THREE.WebGLRenderTarget): void {
     if (!this.renderer || !this.scene || !this.camera) return;
     const r = this.renderer;
     // ⚠️ setClearColor 是 renderer 的**持久全局状态**，而这里的 WebGL context 与高德底图共享。
@@ -4219,10 +4288,11 @@ export class MapScene {
     // 故先保存、用完立即还原，绝不把临时清屏色留给底图渲染器。
     const prevColor = r.getClearColor(new THREE.Color()).clone();
     const prevAlpha = r.getClearAlpha();
+    // ⚠️ super采样修正：不要在这里手动 setViewport/setScissor(0,0,w,h)。
+    // three 的 setViewport 会再乘 pixelRatio，而本函数收到的 w/h 是 drawingBuffer 物理像素，
+    // 非 1 的 pixelRatio 下会被重复放大；且超采样后 RT 物理尺寸=w*SS，和传入的 w 不一致。
+    // setRenderTarget(rt) 已自动把视口/裁剪设为 RT 的完整物理尺寸（WebGLRenderer.js 2274 行），直接用即可。
     r.setRenderTarget(rt);
-    r.setViewport(0, 0, w, h);
-    r.setScissor(0, 0, w, h);
-    r.setScissorTest(false);
     r.setClearColor(0x000000, 0);
     r.clear(true, true, false);
     r.render(this.scene, this.camera);
@@ -4241,7 +4311,8 @@ export class MapScene {
     if (this.frameRtLow && this.lowRtW === lw && this.lowRtH === lh) return;
     this.frameRtLow?.dispose();
     const isWebGL2 = !!this.renderer?.capabilities?.isWebGL2;
-    const samples = this.lowEnd || this.softwareRender ? 0 : (isWebGL2 ? 4 : 0);
+    // 与全分辨率 RT 同一画质策略：画质增强档下低配也开 4x MSAA（仅 WebGL2）。
+    const samples = isWebGL2 && (!this.lowEnd || this.qualityBoost) ? 4 : 0;
     const opts: THREE.RenderTargetOptions = {
       minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter,
       generateMipmaps: false, depthBuffer: true, stencilBuffer: false, samples,
@@ -4334,6 +4405,8 @@ export class MapScene {
     });
     this.blitScene = null;
     this.blitCam = null;
+    this.blitMat = null;
+    this.blitSharpUniforms = null;
     this.highlightMatCache.forEach((m) => m.dispose());
     this.highlightMatCache.clear();
     try {

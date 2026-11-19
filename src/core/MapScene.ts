@@ -1266,9 +1266,11 @@ export class MapScene {
     // 取 0.11：参考图里模型重心约在画面 60% 高度处，且偏前（近处建筑贴近下缘），故较之前 0.08 加大。
     const MODEL_SHIFT_DOWN_FRAC = 0.11;
     const shiftDownPx = MODEL_SHIFT_DOWN_FRAC * H;
-    // 默认取景在「刚好填满」基础上额外放大一点点（zoom 等级），让模型显得更大些。
-    // 注意：放大过多会与左移叠加导致左侧被画面边缘裁切，故保持与左移相匹配的小值。
-    const ZOOM_BONUS = 0.14;
+    // 默认取景在「刚好填满」基础上额外放大（zoom 等级），让模型显得更大、首屏贴图观感更清晰。
+    // 本版 0.45（约在填满基础上再放大 37%）：用户反馈放大后不再糊，但过大又怕裁切，
+    // 取中等值——比旧的 0.14 明显更大，仍留出余量。与 refineFitStep 的 done() 中的字面量保持一致。
+    // 放大过多会与左移叠加导致左侧被画面边缘裁切，此处已与左移量(0.12)权衡过。
+    const ZOOM_BONUS = 0.45;
 
     // 解析试验相机：在指定俯仰角 pitchDeg（高德约定 0=正上方俯视，越大越平视）、
     // 视中心与距离下透视投影全部角点，检查是否都落在屏幕边距内。
@@ -1321,16 +1323,12 @@ export class MapScene {
       return { d: hi, w: bxMax - bxMin, h: byMax - byMin };
     };
 
-    // 3) 俯仰角自适应：找一个俯仰角使「最大放大时建筑群投影的高宽比 == 屏幕高宽比」，
-    //    此时最大放大会同时贴满横竖四边（模型刚好填满整个屏幕）。
-    //    投影高宽比随俯仰角增大（越平视）而单调减小；搜索范围夹在 [PITCH_MIN, PITCH_MAX]
-    //    保持「从上俯视」观感（俯角 30°–45°，pitch 60–45），不出现视角过低。
-    //    PITCH_MIN=PITCH_MAX=35（对应俯角 55°）：本版按用户参考图把加载视角钉在 55° 高空俯瞰，
-    //    比上一版 40°（pitch=50）更俯视、地面更平、模型「往面前倾斜」的观感明显减弱（接近平放）。
-    //    钉死后 fit 不会为「填满屏幕」再调俯仰，保证默认俯角严格 55°。
+    // 3) 俯仰角自适应：找一个俯仰角使「最大放大时建筑群投影的高宽比 == 屏幕高宽比」。
+    //    PITCH_MIN=PITCH_MAX=73（俯角约17°，与 config.pitch 一致）：把加载视角钉在此值，
+    //    fit 不会为「填满屏幕」再改俯仰，保证默认严格平视到 73°；本版比旧的 70° 更平视一点。
     //    手动拖动上限仍由 config.maxPitch=75 控制（可拖到更平/更斜），不影响加载默认值。
-    const PITCH_MIN = 70;
-    const PITCH_MAX = 70;
+    const PITCH_MIN = 73;
+    const PITCH_MAX = 73;
     // 俯仰角匹配目标：可见区（避开顶 / 底悬浮 UI）的高宽比，而非整屏
     const screenRatio = (H - padTop - padBottom) / Math.max(W - 2 * padX, 1);
     let pitch = THREE.MathUtils.clamp(this.config.pitch, PITCH_MIN, PITCH_MAX);
@@ -1578,8 +1576,8 @@ export class MapScene {
     const fY = availH / Math.max(hy - ly, 1e-6);
     const err = Math.log2(Math.min(fX, fY));
     const done = (reason: string): void => {
-      // 在「刚好填满」基础上额外放大一点点（ZOOM_BONUS），让模型显得更大些
-      const zEnd = Number(this.map.getZoom?.() ?? zoomNow) + 0.14;
+      // 在「刚好填满」基础上额外放大（与 fitToBuildings 的 ZOOM_BONUS=0.45 保持一致）
+      const zEnd = Number(this.map.getZoom?.() ?? zoomNow) + 0.45;
       this.map.setZoomAndCenter(+zEnd.toFixed(3), v.center, true);
       this.endFitRefine(); // 结束微调并恢复模型显示
       // eslint-disable-next-line no-console

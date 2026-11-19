@@ -35,7 +35,7 @@ import { persistence } from '../utils/persist';
 import { isRoomFieldComplete } from '../utils/roomFields';
 import { cleanName } from '../utils/roomName';
 import { fitLabelText, type FitResult } from '../utils/labelFit';
-import { unassignedArea, formatUnassignedArea } from '../utils/roomArea';
+import { unassignedArea, formatUnassignedArea, isAreaOrderValid } from '../utils/roomArea';
 import { polygonArea } from '../utils/geometry';
 import type { Floor, InspectStatus, ParsedRoom, Room, RoomGridSpan, UseStatus } from '../types/cad';
 import FpvTip from './FpvTip.vue';
@@ -2253,6 +2253,7 @@ watch(popMode, (m) => {
   if (m === 'edit' && liveRoom.value) {
     const r = liveRoom.value;
     roomNoError.value = false; // s503: 每次进入编辑态清除上次的校验错误
+    areaOrderError.value = false; // 每次进入编辑态清除上次的面积校验错误
     editRoom.code = r.code;
     editRoom.number = displayRoomNo(r);
     // s492: 名称栏与只读态「名称」信息行完全同口径——都走 cleanName(r.name)，
@@ -2392,6 +2393,8 @@ const editRoom = reactive({
 });
 /** s503: 房间号必填校验——保存时房间号为空则阻止保存并高亮该栏；用户重新输入后自动清除。 */
 const roomNoError = ref(false);
+/** 面积大小校验——填了使用面积却没填建筑、或建筑<使用时阻止保存并高亮两栏；用户改动任一面积后自动清除。 */
+const areaOrderError = ref(false);
 
 /** 部门下拉候选：当前数据里所有房间已出现过的部门（去重排序）。
  *  用 el-select 的 filterable + allow-create：既能从已有部门里选、统一命名，也允许填新部门不锁死。 */
@@ -2428,6 +2431,7 @@ watch(
   liveRoom,
   (r) => {
     if (!r || popMode.value === 'edit') return;
+    areaOrderError.value = false; // 切换到别的房间时清掉上一间的面积校验错误
     editRoom.code = r.code;
     editRoom.number = displayRoomNo(r);
     // s492: 同 popMode 载入处，名称栏与只读态同口径走 cleanName（面积脏值→「（未命名）」照常显示，不清空）
@@ -2481,6 +2485,16 @@ function saveRoomAll(): void {
     return;
   }
   roomNoError.value = false;
+  // 面积大小校验：填了使用面积就必须填不小于它的建筑面积——「未分配 = 建筑 − 使用」不能为负。
+  // 只填了使用、建筑留空(0)同样拦截，提示用户补填，避免存进「使用 50 / 建筑 0」这种脏数据。
+  if (!isAreaOrderValid(editRoom.useArea, editRoom.buildArea)) {
+    areaOrderError.value = true;
+    const use = Number(editRoom.useArea) || 0;
+    const build = Number(editRoom.buildArea) || 0;
+    ElMessage.warning(`建筑面积不能小于使用面积（当前使用 ${use}㎡、建筑 ${build}㎡），请修改后再保存`);
+    return;
+  }
+  areaOrderError.value = false;
   const real = isRealRoom(r) && !!currentFloor.value;
   saveEdit(false);
   popMode.value = null;
@@ -3582,8 +3596,15 @@ function enterEdit(): void {
                   </el-select>
                 </div>
                 <div class="fpv-edit__row"><label>用途</label><el-input v-model="editRoom.usePurpose" size="small" /></div>
-                <div class="fpv-edit__row"><label>使用面积</label><el-input v-model="editRoom.useArea" size="small" type="number" /></div>
-                <div class="fpv-edit__row"><label>建筑面积</label><el-input v-model="editRoom.buildArea" size="small" type="number" /></div>
+                <div class="fpv-edit__row" :class="{ 'fpv-edit__row--error': areaOrderError }">
+                  <label>使用面积</label>
+                  <el-input v-model="editRoom.useArea" size="small" type="number" @update:modelValue="areaOrderError = false" />
+                </div>
+                <div class="fpv-edit__row" :class="{ 'fpv-edit__row--error': areaOrderError }">
+                  <label>建筑面积</label>
+                  <el-input v-model="editRoom.buildArea" size="small" type="number" @update:modelValue="areaOrderError = false" />
+                  <span v-if="areaOrderError" class="fpv-edit__err">建筑面积不能小于使用面积</span>
+                </div>
 
                 <!-- 返回查看由卡片底部统一按钮承担，表单内不再重复放一个 -->
                 <div class="fpv-info__actions">

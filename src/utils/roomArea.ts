@@ -21,3 +21,19 @@ export function unassignedArea(useArea: number, buildArea: number): number | nul
 export function formatUnassignedArea(v: number | null, digits = 2): string {
   return v === null ? '' : `未分配 ${v.toFixed(digits)}㎡`;
 }
+
+/**
+ * 面积大小关系校验：填了使用面积时，建筑面积必须 ≥ 使用面积。
+ * 因为「未分配 = 建筑 − 使用」，建筑 < 使用会让差额变成负数、口径不成立。
+ *
+ * 规则（容差 0.01㎡ 滤掉四舍五入噪声）：
+ * - 两者都没填（≤0）或只填了建筑：合法。
+ * - 只填了使用、建筑没填（0）：非法——必须补填不小于使用面积的建筑，否则差额无从谈起。
+ * - 两者都填、使用 > 建筑：非法。
+ */
+export function isAreaOrderValid(useArea: number | string, buildArea: number | string): boolean {
+  const use = Number(useArea) || 0;
+  const build = Number(buildArea) || 0;
+  if (use <= 0) return true; // 没填使用面积就无从比较
+  return use <= build + 0.01;
+}

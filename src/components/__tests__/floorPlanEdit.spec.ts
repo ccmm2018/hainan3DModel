@@ -832,6 +832,62 @@ describe('FloorPlan2D 房间编辑/隐藏/重新显示', () => {
     wrapper.unmount();
   });
 
+  it('面积大小：使用面积>建筑面积阻止保存并标红，改回合法后可保存', async () => {
+    const store = useBuildingStore();
+    const parsed = parseDxfToResult(SAMPLE_DXF, '教学楼', 1);
+    parsed.rooms.forEach((r) => { r.selected = true; r.name = '原名称'; });
+    const fid = store.importFloor({
+      buildingName: '教学楼', floorNo: 1, fileName: 's505.dxf', parsed,
+      coordSource: 'local',
+      transform: { offset: [440000, 4100000] as [number, number], rotation: 0, scale: 0.001 },
+    });
+    const target = store.roomsOfFloor(fid)[0];
+    const beforeUse = target.useArea;
+
+    const wrapper = mountPlan('教学楼', pinia);
+    await nextTick();
+    await wrapper.findAll('.fpv-room')[0].trigger('click');
+    await nextTick();
+    const editBtn = wrapper.findAll('button').find((b) => b.text().includes('编辑本房间'));
+    await editBtn!.trigger('click');
+    await nextTick();
+
+    const form = wrapper.find('.fpv-pop__form--all');
+    const rowInput = (label: string) =>
+      form.findAll('.fpv-edit__row').find((row) => row.find('label')?.text().includes(label))!.find('input');
+    const nameInput = rowInput('名称');
+    const useInput = rowInput('使用面积');
+    const buildInput = rowInput('建筑面积');
+    const saveBtn = wrapper.findAll('button').find((b) => b.text().includes('保存资料'))!;
+
+    // 使用 80 / 建筑 50 → 非法，整次保存被拦截（名称也不写入）
+    await nameInput.setValue('面积非法测试');
+    await useInput.setValue('80');
+    await buildInput.setValue('50');
+    await saveBtn.trigger('click');
+    await nextTick();
+    expect(wrapper.find('.fpv-pop__form--all').exists()).toBe(true); // 仍停在编辑态
+    expect(form.text()).toContain('建筑面积不能小于使用面积');
+    expect(wrapper.findAll('.fpv-edit__row--error').length).toBeGreaterThanOrEqual(1);
+    const blocked = store.roomsOfFloor(fid).find((r) => r.id === target.id)!;
+    expect(blocked.name).toBe('原名称');
+    expect(blocked.useArea).toBe(beforeUse);
+
+    // 建筑面积改成 100 → 错误态清除，可正常保存
+    await buildInput.setValue('100');
+    await nextTick();
+    expect(form.text()).not.toContain('建筑面积不能小于使用面积');
+    await saveBtn.trigger('click');
+    await nextTick();
+    await nextTick();
+    const saved = store.roomsOfFloor(fid).find((r) => r.id === target.id)!;
+    expect(saved.name).toBe('面积非法测试');
+    expect(saved.useArea).toBe(80);
+    expect(saved.buildArea).toBe(100);
+
+    wrapper.unmount();
+  });
+
   it('未分配面积：建筑>使用时详情卡显示派生行，相等/未填/建筑<使用时不显示', async () => {
     const store = useBuildingStore();
     const parsed = parseDxfToResult(SAMPLE_DXF, '教学楼', 1);

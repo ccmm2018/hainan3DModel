@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { unassignedArea, formatUnassignedArea } from '../roomArea';
+import { unassignedArea, formatUnassignedArea, isAreaOrderValid } from '../roomArea';
 
 describe('unassignedArea', () => {
   it('建筑>使用且都填写：返回正差额', () => {
@@ -43,5 +43,42 @@ describe('formatUnassignedArea', () => {
 
   it('支持自定义小数位', () => {
     expect(formatUnassignedArea(4.756, 1)).toBe('未分配 4.8㎡');
+  });
+});
+
+describe('isAreaOrderValid', () => {
+  it('建筑>使用：合法', () => {
+    expect(isAreaOrderValid(45, 50)).toBe(true);
+    expect(isAreaOrderValid(90, 100)).toBe(true);
+  });
+
+  it('两者相等：合法', () => {
+    expect(isAreaOrderValid(50, 50)).toBe(true);
+  });
+
+  it('使用>建筑：非法（避免未分配为负）', () => {
+    expect(isAreaOrderValid(60, 50)).toBe(false);
+    expect(isAreaOrderValid(51, 50.5)).toBe(false);
+  });
+
+  it('只填使用、建筑留空(0)：非法，需补填建筑', () => {
+    expect(isAreaOrderValid(50, 0)).toBe(false);
+  });
+
+  it('只填建筑、使用留空：合法（无从比较）', () => {
+    expect(isAreaOrderValid(0, 100)).toBe(true);
+  });
+
+  it('两者都未填：合法', () => {
+    expect(isAreaOrderValid(0, 0)).toBe(true);
+  });
+
+  it('0.01㎡ 内四舍五入噪声：合法', () => {
+    expect(isAreaOrderValid(50, 49.995)).toBe(true);
+  });
+
+  it('接受字符串输入（表单 v-model 是字符串）', () => {
+    expect(isAreaOrderValid('60', '50')).toBe(false);
+    expect(isAreaOrderValid('45.5', '50.25')).toBe(true);
   });
 });

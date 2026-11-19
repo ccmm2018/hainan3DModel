@@ -976,6 +976,56 @@ describe('FloorPlan2D 房间编辑/隐藏/重新显示', () => {
 
     wrapper.unmount();
   });
+
+  it('多选后再次纯点击某间→只取消该间；拖动已选房间→不取消；点空白→清空全部', async () => {
+    const store = useBuildingStore();
+    const parsed = parseDxfToResult(SAMPLE_DXF, '教学楼', 1);
+    parsed.rooms.forEach((r) => { r.selected = true; });
+    store.importFloor({
+      buildingName: '教学楼', floorNo: 1, fileName: 'sel.dxf', parsed,
+      coordSource: 'local', transform: { offset: [440000, 4100000] as [number, number], rotation: 0, scale: 0.001 },
+    });
+
+    const wrapper = mountPlan('教学楼', pinia);
+    await nextTick();
+    const editBtn = wrapper.findAll('button').find((b) => b.text().includes('编辑结构'));
+    await editBtn!.trigger('click');
+    await nextTick();
+    const vm = wrapper.vm as any;
+    const rooms = wrapper.findAll('.fpv-room');
+    expect(rooms.length).toBeGreaterThanOrEqual(2);
+
+    // 多选前两间（编辑态选中走 mousedown，确保语义累积）
+    await rooms[0].trigger('mousedown');
+    await rooms[1].trigger('mousedown');
+    await nextTick();
+    const sel = vm.selectedIds as string[];
+    expect(sel.length).toBe(2);
+    const second = sel[1]!;
+
+    // ① 再次纯点击第一间（未拖动）→ 只取消它，第二间仍选中
+    await rooms[0].trigger('mousedown');
+    (vm as any).dragMoved = false;
+    window.dispatchEvent(new MouseEvent('mouseup'));
+    await nextTick();
+    expect(vm.selectedIds).toEqual([second]);
+
+    // ② 拖动已选中的第二间（dragMoved=true）→ 保持选中不取消
+    await rooms[1].trigger('mousedown');
+    (vm as any).dragMoved = true;
+    window.dispatchEvent(new MouseEvent('mouseup'));
+    await nextTick();
+    expect(vm.selectedIds).toContain(second);
+
+    // ③ 点画布空白（未拖动）→ 清空全部选中
+    await wrapper.find('.fpv-stage').trigger('mousedown');
+    (vm as any).dragMoved = false;
+    window.dispatchEvent(new MouseEvent('mouseup'));
+    await nextTick();
+    expect(vm.selectedIds.length).toBe(0);
+
+    wrapper.unmount();
+  });
 });
 
 /** 从弹窗信息格里取出指定 label 的值文本 */

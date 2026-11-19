@@ -197,6 +197,11 @@ let dragStartPitch = 55;
 let downOnRoom = false;
 /** 拖动房间（move）结束后浏览器仍会触发一次 click，用此标记抑制该次 click 的选中切换 */
 let suppressClickSelect = false;
+/** 本次 mousedown 命中的房间 id：供 mouseup 判断「纯点击已选房间 → 单独取消」（多选时逐个剔除） */
+let downRoomId: string | null = null;
+/** mousedown 按下前该房间是否已选中。必须在 onSelectRoom（确保选中）之前记录，否则信息被覆盖。
+ *  标注模式下置 false，避免「点房间刷状态」时误触发取消。 */
+let downRoomWasSelected = false;
 function onStageMouseDown(e: MouseEvent): void {
   const t = e.target as Element | null;
   // 记录按下点是否落在某个房间上：落在房间上的点击由 onSelect 处理（保留/切换弹窗），不要在此处关闭
@@ -275,6 +280,20 @@ function onStageMouseMove(e: MouseEvent): void {
   }
 }
 function onStageMouseUp(e?: MouseEvent): void {
+  // 编辑态多选「逐个剔除」：纯点击一个按下前就已选中的房间 → 只取消这一间，其余保持选中。
+  // 用 dragMoved 区分意图：拖动已选房间是为了挪位置，不能取消（否则一拖就丢选中）。
+  // downRoomWasSelected 在 onRoomDown（mousedown）里捕获，标注模式下为 false 不会误触发。
+  if (editMode.value && downRoomId && downRoomWasSelected && !dragMoved.value) {
+    selectedIds.value = selectedIds.value.filter((id) => id !== downRoomId);
+    // 若取消的正是详情卡跟随的那间，改指向剩余最后一间（无剩余则空），与既有多选约定一致
+    if (selectedId.value === downRoomId) {
+      selectedId.value = selectedIds.value.length ? selectedIds.value[selectedIds.value.length - 1]! : null;
+    }
+  }
+  // 每次松手都清零本次按下记录，避免下一次「点空白」时残留的 downRoomId 误触发取消
+  downRoomId = null;
+  downRoomWasSelected = false;
+
   const kind = dragKind.value;
   if (kind === 'pan') {
     isDragging.value = false;
@@ -2641,6 +2660,9 @@ function onRoomDown(room: RoomLike, ev: MouseEvent): void {
   // 本函数已设置 dragRoomId 触发 dragTopBlocks 重排、会把房间 <g> 在 DOM 中挪位，
   // 浏览器在此场景下常吞掉 click，导致「点了没反应、不选中」。改在 mousedown 选中最稳。
   // 若已选业务状态（图例即状态选择器），则同时把该状态赋给房间，实现「逐个点房间快速标注」。
+  // 记录「按下前是否已选中」，供 mouseup 判断纯点击已选房间是否取消；必须在 onSelectRoom 之前捕获
+  downRoomId = room.id;
+  downRoomWasSelected = armedStatus.value === null && isSelected(room.id);
   if (armedStatus.value !== null) applyUseStatusToRoom(room, armedStatus.value);
   onSelectRoom(room, ev);
   if (activeTool.value !== 'select') return;
@@ -2866,7 +2888,7 @@ const canSplit = computed(() => editMode.value && selectedIds.value.length === 1
 const splitHint = computed(() => {
   if (!editMode.value) return '先点「编辑结构」进入结构调整';
   if (selectedIds.value.length === 0) return '先点选 1 间房间，再点「拆分」';
-  if (selectedIds.value.length > 1) return `当前已选 ${selectedIds.value.length} 间：拆分每次只处理 1 间，点「清空选中」后重新选 1 间`;
+  if (selectedIds.value.length > 1) return `当前已选 ${selectedIds.value.length} 间：拆分每次只处理 1 间，再次点击多余的房间可逐个取消，或点「清空选中」全清后重选`;
   return '把选中的这间房等分成 2~4 间';
 });
 /** 清空编辑态多选：累积选中会让「拆分」（要求恰好 1 间）一直置灰，给一个显式出口 */
@@ -3178,7 +3200,7 @@ const GUIDE_HTML = `
   <p style="margin:0 0 6px">② <b>图例</b>：说明每种颜色代表什么。浏览时只读；<b>编辑结构 + 使用状态</b>时，先点色块再点房间即可批量标注状态；只改一间房的状态，直接在它的详情卡里点色块。</p>
   <p style="margin:0 0 6px">③ <b>楼层</b>：点 1F / 2F 切换楼层，标题里显示本层房间数与面积。</p>
   <p style="margin:0 0 6px">④ <b>视图工具</b>：源对齐（把图纸转正）、导入图纸、放大 / 缩小 / 复位；画布也支持滚轮缩放、按住拖拽平移。</p>
-  <p style="margin:0 0 6px">⑤ <b>房间结构</b>：只管「有哪些房间、怎么摆」。点「编辑结构」才出现新增 / 合并 / 拆分 / 删除 / 拖动；<b>恰好选中 1 间</b>再点「拆分」，可把它等分成 2~4 间——会先弹出表单给每间子房设定房号/名称/部门/状态，确认后才真正拆分（面积按份数平分，本层房间数不受限制）；点房间是<b>累积多选</b>，多选时拆分会置灰，点画布空白处或「清空选中」即可重新单选；<b>完成</b>保存、<b>取消·回滚</b>撤销本次全部改动；拆出的子房排布与拖动位置也会一起保存，刷新页面后仍保持。<b>改单间房资料不需要进这里</b>：浏览时点房间，在详情卡里点「编辑本房间」，房间号 / 名称 / 部门 / 用途 / 面积一次填好保存（部门可从下拉选或输入新值）。</p>
+  <p style="margin:0 0 6px">⑤ <b>房间结构</b>：只管「有哪些房间、怎么摆」。点「编辑结构」才出现新增 / 合并 / 拆分 / 删除 / 拖动；<b>恰好选中 1 间</b>再点「拆分」，可把它等分成 2~4 间——会先弹出表单给每间子房设定房号/名称/部门/状态，确认后才真正拆分（面积按份数平分，本层房间数不受限制）；点房间是<b>累积多选</b>，多选时拆分会置灰；<b>再次点击某个已选中的房间即可单独取消它</b>（想一次全删就点画布空白处或「清空选中」）；<b>完成</b>保存、<b>取消·回滚</b>撤销本次全部改动；拆出的子房排布与拖动位置也会一起保存，刷新页面后仍保持。<b>改单间房资料不需要进这里</b>：浏览时点房间，在详情卡里点「编辑本房间」，房间号 / 名称 / 部门 / 用途 / 面积一次填好保存（部门可从下拉选或输入新值）。</p>
   <p style="margin:0">⑥ <b>其它</b>：被隐藏的房间在这里恢复；点「?」可随时重看本说明。</p>
 </div>`;
 
@@ -3405,7 +3427,7 @@ function enterEdit(): void {
                   <i :style="{ background: armedColor }"></i>标注中：{{ statusLabelOf(armedStatus) }}<b>×</b>
                 </span>
                 <!-- 多选时放在本组靠前位置：工具栏内容较多会横向滚动，放最右会看不见 -->
-                <el-button v-if="selectedIds.length > 1" size="small" text title="点房间是累积多选，清空后可重新只选 1 间（拆分需要）" @click="clearRoomSelection">清空选中</el-button>
+                <el-button v-if="selectedIds.length > 1" size="small" text title="再次点击某个已选房间可单独取消它；本按钮一次清空全部（拆分需要只留 1 间时用）" @click="clearRoomSelection">清空选中</el-button>
                 <el-button size="small" :disabled="!canAddRoom" @click="doAddRoom"><el-icon><Plus /></el-icon>新增</el-button>
                 <el-button size="small" :disabled="selectedIds.length < 2" @click="doMerge"><el-icon><Connection /></el-icon>合并</el-button>
                 <el-button size="small" type="primary" plain :disabled="!canSplit" :title="splitHint" @click="doSplit">拆分</el-button>

@@ -441,9 +441,10 @@ export const useBuildingStore = defineStore('building', () => {
    * 每房优先取已填面积，未填（≤0）时回退该房轮廓的几何面积，保证合并值 = 原各房之和。
    * 房号 / 名称留空：由用户在合并后弹出的信息表单中自行填写，不再默认继承第一个房间的「101」。
    */
-  /** 合并/拆分时可由弹窗预填的房间资料字段（几何字段仍由 store 计算，不接受外部覆盖）。 */
+  /** 合并/拆分时可由弹窗预填的房间资料字段。
+   *  轮廓/中心点等几何字段仍由 store 计算；面积允许弹窗覆盖（拆分时可逐间重设使用/建筑面积）。 */
   type RoomInfoPatch = Partial<
-    Pick<Room, 'code' | 'number' | 'name' | 'dept' | 'usePurpose' | 'useStatus'>
+    Pick<Room, 'code' | 'number' | 'name' | 'dept' | 'usePurpose' | 'useStatus' | 'useArea' | 'buildArea'>
   >;
 
   function mergeRooms(fid: string, ids: string[], info?: RoomInfoPatch): string | null {
@@ -513,8 +514,9 @@ export const useBuildingStore = defineStore('building', () => {
         name: info?.name ?? (src.name ? `${src.name}${suffix}` : ''),
         dept: info?.dept ?? src.dept,
         usePurpose: info?.usePurpose ?? src.usePurpose,
-        useArea: src.useArea > 0 ? src.useArea / n : area,
-        buildArea: src.buildArea > 0 ? src.buildArea / n : area,
+        // 弹窗逐间填写的面积优先；未填（undefined）仍按原来的平分逻辑，向后兼容。
+        useArea: info?.useArea && info.useArea > 0 ? info.useArea : (src.useArea > 0 ? src.useArea / n : area),
+        buildArea: info?.buildArea && info.buildArea > 0 ? info.buildArea : (src.buildArea > 0 ? src.buildArea / n : area),
         outline,
         centroid: polygonCentroid(outline),
         inspectStatus: src.inspectStatus,

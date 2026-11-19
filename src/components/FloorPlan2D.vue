@@ -2753,15 +2753,20 @@ interface SplitPartForm {
   dept: string;
   usePurpose: string;
   useStatus: UseStatus;
+  useArea: string;
+  buildArea: string;
 }
 const splitForms = ref<SplitPartForm[]>([]);
 const splitNoError = ref(false);
-/** 按当前份数重建子房表单默认值：房号 -1/-2 后缀、名称加后缀，部门/用途/状态沿用原房 */
+/** 按当前份数重建子房表单默认值：房号 -1/-2 后缀、名称加后缀，部门/用途/状态沿用原房，
+ *  面积按原房面积 ÷ 份数预填（原房没填面积则留空，由 store 回退到轮廓几何面积）。 */
 function rebuildSplitForms(): void {
   const id = splitTargetId.value;
   const src = id ? displayedRooms.value.find((r) => r.id === id) : null;
   const base = src?.code || src?.number || '新房间';
   const n = splitParts.value;
+  const perUse = src && src.useArea > 0 ? (src.useArea / n).toFixed(2) : '';
+  const perBuild = src && src.buildArea > 0 ? (src.buildArea / n).toFixed(2) : '';
   splitForms.value = Array.from({ length: n }, (_, i) => {
     const suffix = `-${i + 1}`;
     const no = `${base}${suffix}`;
@@ -2772,6 +2777,8 @@ function rebuildSplitForms(): void {
       dept: src?.dept ?? '',
       usePurpose: src?.usePurpose ?? '',
       useStatus: (src?.useStatus ?? '') as UseStatus,
+      useArea: perUse,
+      buildArea: perBuild,
     };
   });
   splitNoError.value = false;
@@ -2857,6 +2864,8 @@ function confirmSplit(): void {
       dept: fm.dept.trim(),
       usePurpose: fm.usePurpose.trim(),
       useStatus: fm.useStatus,
+      useArea: Number(fm.useArea) || 0,
+      buildArea: Number(fm.buildArea) || 0,
     })),
   );
   splitVisible.value = false;
@@ -3544,6 +3553,7 @@ function enterEdit(): void {
     title="合并房间 · 设定新房参数"
     width="420px"
     append-to-body
+    draggable
     :close-on-click-modal="false"
     class="fpv-struct-dialog"
   >
@@ -3591,6 +3601,7 @@ function enterEdit(): void {
     title="拆分房间 · 设定各间参数"
     width="480px"
     append-to-body
+    draggable
     :close-on-click-modal="false"
     class="fpv-struct-dialog"
   >
@@ -3628,6 +3639,10 @@ function enterEdit(): void {
             </el-select>
           </div>
           <div class="fpv-struct__row"><label>用途</label><el-input v-model="fm.usePurpose" size="small" /></div>
+          <div class="fpv-struct__row fpv-struct__row--areas">
+            <div class="fpv-struct__area"><label>使用面积(㎡)</label><el-input v-model="fm.useArea" size="small" type="number" min="0" /></div>
+            <div class="fpv-struct__area"><label>建筑面积(㎡)</label><el-input v-model="fm.buildArea" size="small" type="number" min="0" /></div>
+          </div>
           <div class="fpv-struct__row fpv-struct__row--status">
             <label>状态</label>
             <div class="fpv-pop__status-btns">
@@ -3645,7 +3660,7 @@ function enterEdit(): void {
         </div>
       </div>
       <p v-if="splitNoError" class="fpv-struct__err fpv-struct__err--block">每间子房的房号都要填写</p>
-      <p class="fpv-split__hint">面积按份数平分；房号/名称已按原房预填后缀，可直接改。部门、用途、状态可逐间设定。</p>
+      <p class="fpv-split__hint">使用/建筑面积已按原房÷份数预填，可逐间改为实际值（留空则自动按轮廓算）。房号/名称已按原房预填后缀，部门、用途、状态可逐间设定。</p>
     </div>
     <template #footer>
       <el-button @click="splitVisible = false">取消</el-button>
@@ -4215,6 +4230,9 @@ function enterEdit(): void {
 .fpv-struct__row > label i { color: #e11d48; font-style: normal; }
 .fpv-struct__row--status { align-items: flex-start; }
 .fpv-struct__row--status > label { padding-top: 4px; }
+.fpv-struct__row--areas { gap: 10px; }
+.fpv-struct__area { flex: 1; min-width: 0; }
+.fpv-struct__area > label { display: block; flex: none; font-size: 11px; color: #6b7280; margin-bottom: 3px; }
 .fpv-struct__err { color: #e11d48; font-size: 11px; }
 .fpv-struct__err--block { display: block; margin: 4px 0 0; }
 .fpv-struct__row--error :deep(.el-input__wrapper) { box-shadow: 0 0 0 1px #e11d48 inset; }

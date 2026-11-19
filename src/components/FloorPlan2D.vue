@@ -4016,57 +4016,58 @@ function enterEdit(): void {
 
 /* 顶部一排工具栏：6 个带中文标题的分区，横向不换行；极窄窗口才横向滚动 */
 .fpv-toolbar {
-  display: flex; align-items: stretch; gap: 10px; flex-wrap: nowrap;
-  flex-shrink: 0; padding: 8px 10px;
+  display: flex; align-items: stretch; gap: 12px; flex-wrap: nowrap;
+  flex-shrink: 0; padding: 9px 12px;
   border: 1px solid #e2e8f0; border-radius: 10px; background: #f8fafc;
   overflow-x: auto; overflow-y: hidden; scrollbar-width: thin;
 }
-.fpv-tgroup { display: flex; flex-direction: column; gap: 5px; flex-shrink: 0; min-width: 0; }
-.fpv-tgroup__label { font-size: 11px; line-height: 1.25; color: #64748b; white-space: nowrap; }
-.fpv-tgroup__label em { font-style: normal; color: #94a3b8; margin-left: 4px; }
+.fpv-tgroup { display: flex; flex-direction: column; gap: 6px; flex-shrink: 0; min-width: 0; }
+.fpv-tgroup__label { font-size: 13px; line-height: 1.25; color: #475569; white-space: nowrap; }
+.fpv-tgroup__label em { font-style: normal; color: #64748b; margin-left: 5px; font-size: 11.5px; }
 .fpv-tgroup__label.is-action { color: #7c3aed; font-weight: 700; }
 .fpv-tgroup__label.is-warn { color: #b45309; }
-.fpv-tgroup__row { display: flex; align-items: center; gap: 4px; white-space: nowrap; }
+.fpv-tgroup__row { display: flex; align-items: center; gap: 6px; white-space: nowrap; }
 .fpv-toolbar__sep { width: 1px; align-self: stretch; background: #e2e8f0; flex-shrink: 0; }
-.fpv-tgroup__select { width: 156px; flex-shrink: 0; }
-.fpv-toolbar .el-button { padding: 5px 8px; font-size: 12px; height: 26px; }
-.fpv-toolbar .el-button.is-circle { width: 26px; padding: 5px; }
-.fpv-toolbar .el-button .el-icon { margin-right: 2px; }
-.fpv-toolbar .el-checkbox { height: 26px; margin-right: 2px; }
-.fpv-toolbar .el-checkbox__label { font-size: 12px; }
-.fpv-toolbar .fpv-legend { gap: 8px; font-size: 12px; align-items: center; min-height: 26px; }
-.fpv-toolbar .fpv-legend__item { gap: 4px; white-space: nowrap; }
+.fpv-tgroup__select { width: 168px; flex-shrink: 0; }
+.fpv-toolbar .el-button { padding: 6px 10px; font-size: 13px; height: 30px; }
+.fpv-toolbar .el-button.is-circle { width: 30px; padding: 6px; }
+.fpv-toolbar .el-button .el-icon { margin-right: 3px; }
+.fpv-toolbar .el-checkbox { height: 30px; margin-right: 2px; }
+.fpv-toolbar .el-checkbox__label { font-size: 13px; }
+.fpv-toolbar .fpv-legend { gap: 10px; font-size: 13px; align-items: center; min-height: 30px; }
+.fpv-toolbar .fpv-legend__item { gap: 5px; white-space: nowrap; }
 .fpv-legend--action {
   background: #f5f3ff; border: 1px dashed #c4b5fd; border-radius: 8px;
-  padding: 1px 6px; min-height: 26px; align-items: center;
+  padding: 2px 8px; min-height: 30px; align-items: center;
 }
-.fpv-tfloor { display: flex; align-items: center; gap: 4px; min-height: 26px; }
+.fpv-tfloor { display: flex; align-items: center; gap: 5px; min-height: 30px; }
 .fpv-tfloor__btn {
-  display: inline-flex; align-items: center; gap: 4px; white-space: nowrap;
-  height: 26px; padding: 0 8px; border: 1px solid #d0d5dd; border-radius: 7px;
-  background: #fff; color: #1f2937; font-size: 12px; font-weight: 700; cursor: pointer;
+  display: inline-flex; align-items: center; gap: 5px; white-space: nowrap;
+  height: 30px; padding: 0 10px; border: 1px solid #d0d5dd; border-radius: 7px;
+  background: #fff; color: #1f2937; font-size: 13px; font-weight: 700; cursor: pointer;
 }
-.fpv-tfloor__btn span { font-size: 10px; font-weight: 400; color: #94a3b8; }
+.fpv-tfloor__btn span { font-size: 11px; font-weight: 400; color: #64748b; }
 .fpv-tfloor__btn:hover { border-color: #93c5fd; }
 .fpv-tfloor__btn.active { background: #eff6ff; border-color: #2563eb; color: #1d4ed8; box-shadow: 0 0 0 2px rgba(37,99,235,.12); }
 .fpv-tfloor__btn.is-bad::after { content: '!'; color: #b45309; font-weight: 800; }
 .fpv-tgroup--editing .fpv-tgroup__label { color: #4338ca; font-weight: 700; }
-.fpv-toolbar .fpv-armed { font-size: 11px; padding: 1px 8px; height: 24px; }
+.fpv-toolbar .fpv-armed { font-size: 12px; padding: 2px 10px; height: 28px; }
 /* 窄屏：收紧间距 / 隐藏副说明，尽量让「一排」在常见分辨率下不必横向滚动；
-   实在放不下时 .fpv-toolbar 的 overflow-x:auto 兜底（仍保持同一行，不会换行打散分区）。 */
-@media (max-width: 1400px) {
-  .fpv-toolbar { gap: 6px; padding: 7px 8px; }
+   字号整体放大后把紧凑断点从 1400 提到 1680（覆盖 1600px 屏），靠隐藏副说明 + 收紧间距
+   抵消增宽，保证放大后主按钮/文字仍一排放得下；实在放不下仍有 overflow-x:auto 兜底。 */
+@media (max-width: 1680px) {
+  .fpv-toolbar { gap: 8px; padding: 8px 9px; }
   .fpv-tgroup__label em { display: none; }
-  .fpv-tgroup__select { width: 132px; }
-  .fpv-toolbar .el-button { padding: 5px 5px; font-size: 11px; }
-  .fpv-toolbar .fpv-legend { gap: 6px; }
+  .fpv-tgroup__select { width: 140px; }
+  .fpv-toolbar .el-button { padding: 6px 7px; font-size: 12px; }
+  .fpv-toolbar .fpv-legend { gap: 7px; }
 }
 @media (max-width: 1120px) {
-  .fpv-toolbar { gap: 5px; }
+  .fpv-toolbar { gap: 6px; }
   .fpv-toolbar__sep { display: none; }
-  .fpv-tgroup__label { font-size: 10px; }
-  .fpv-tgroup__select { width: 120px; }
-  .fpv-toolbar .fpv-legend { gap: 4px; }
+  .fpv-tgroup__label { font-size: 11px; }
+  .fpv-tgroup__select { width: 124px; }
+  .fpv-toolbar .fpv-legend { gap: 5px; }
 }
 .fpv-sec { display: flex; flex-direction: column; gap: 8px; }
 .fpv-sec__title { margin: 0; font-size: 13px; font-weight: 700; color: #374151; }

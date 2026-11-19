@@ -1348,10 +1348,10 @@ const roomBlocks = computed<RoomBlock[]>(() => {
     // 部门 / 用途模式一律浅底深字；其余模式按填充亮度自动取深/白字
     const textColor = isLight(fill) ? '#1b2733' : '#ffffff';
     const number = displayRoomNo(room) || `房${idx + 1}`;
-    // 子房间格子窄，只显示房号（如 101-1），完整资料点详情卡查看
-    const name = isSub ? '' : cleanName(room.name);
-    const dept = isSub ? '' : room.dept || '—';
-    const area = isSub ? '' : `${room.useArea > 0 ? room.useArea.toFixed(2) : '—'}㎡ / ${room.buildArea > 0 ? room.buildArea.toFixed(2) : '—'}㎡`;
+    // 子房也显示完整四行（名称/部门/面积只要填了就显示）；字号已按 isSub 缩小，窄格内可读。
+    const name = cleanName(room.name);
+    const dept = room.dept || '—';
+    const area = `${room.useArea > 0 ? room.useArea.toFixed(2) : '—'}㎡ / ${room.buildArea > 0 ? room.buildArea.toFixed(2) : '—'}㎡`;
 
     // 前缘（底部）色带：沿顶面「朝观察者前缘」(t3→t2) 画一条细带。
     // 取前缘中点相对房间中心的内法线方向，向内推 thk 像素，得到一条贴边的细色带（画在顶面之下，仅露出贴边部分）。
@@ -1937,11 +1937,10 @@ const roomFills = computed<RoomFill[]>(() => {
     // 顶面填充色：跟随「着色」模式（业务=使用状态 / 审图=审图状态 / 部门 / 用途），使状态修改即时体现在图层上
     const fill = roomFill(room);
     const useStyle = useStrokeStyle(room);
-    // 拆出的子房立体盒子很窄：只留房号，避免 4 行文字糊成一团
+    // 拆出的子房：也显示完整四行（名称/部门/面积填了就显示），副行字号温和缩小避免窄格糊成一团。
     const isSubFill = !!gridPos[room.id]?.rect;
-    const labelLines = isSubFill ? buildLabelLines(room, fill).slice(0, 1) : buildLabelLines(room, fill);
-    const baseLines = labelLines.map((ln, i) =>
-      i === 0 ? { ...ln, size: sizeNumber } : { ...ln, size: sizeOther },
+    const baseLines = buildLabelLines(room, fill).map((ln, i) =>
+      i === 0 ? { ...ln, size: sizeNumber } : { ...ln, size: isSubFill ? Math.max(7, sizeOther * 0.86) : sizeOther },
     );
     const startY = c[1] - ((baseLines.length - 1) * gap) / 2;
     const lines: LabelLine[] = baseLines.map((ln, i) => ({ ...ln, y: startY + i * gap }));

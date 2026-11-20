@@ -1938,9 +1938,10 @@ onMounted(async () => {
           else scene?.highlightRoom(null, 0);
           return;
         }
-        // 场景模式：悬停建筑（未选中时才应用）
+        // 场景模式：悬停建筑（未选中时才应用）。悬停只高亮该楼的楼顶，不改整栋外观；
+        // 点击选中（onSelect）仍高亮整栋，保持选中态的辨识度。
         if (!selected.value) {
-          if (result && !result.isRoom) scene?.highlight(result.target, config.hoverColor);
+          if (result && !result.isRoom) scene?.highlight(result.target, config.hoverColor, true);
           else scene?.clearHighlight();
         }
       },

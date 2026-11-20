@@ -221,6 +221,8 @@ export class MapScene {
 
   /** 当前高亮对象（用于 clearHighlight 还原） */
   private highlightedObject: THREE.Object3D | null = null;
+  /** 当前高亮是否为「仅楼顶」模式（悬停用）：幂等判断需带上，避免从整栋高亮切到仅楼顶时被误跳过 */
+  private highlightRoofOnly = false;
 
   // —— 悬停拾取节流相关字段 ——
   /** 由 mousemove 写入的最新待拾取坐标。
@@ -2782,14 +2784,20 @@ export class MapScene {
   }
 
   /**
-   * 高亮对象（整棵子树）。
+   * 高亮对象。
    * 采用「克隆原材质 + 叠加 emissive 发光」策略（而非替换为单一纯色材质）：
    *  - 保留原材质的 side / 透明度 / 贴图，避免开口外壳在 FrontSide 下漏出内部导致「空心」；
    *  - 保留建筑原有外观细节，仅叠加高亮色发光，选中/悬停反馈清晰且不空洞。
+   *
+   * @param roofOnly 仅高亮「楼顶」。GLB 里每栋楼的屋顶是独立材质槽（Roof_Tier_* /
+   *                 CampusRoof_Brown 等，材质名含 Roof），墙面/门窗是另外的槽。
+   *                 开启后只克隆屋顶槽、其余槽保持原样，实现「鼠标移入只亮楼顶」。
+   *                 点击选中等其它调用不传，仍高亮整栋楼。
    */
-  highlight(obj: THREE.Object3D | null, color: string): void {
-    // 幂等：已是同一对象则跳过克隆/还原，避免每次 mousemove 都重复重建材质（高亮 churn 是悬停 CPU 的次要来源）。
-    if (obj && obj === this.highlightedObject) return;
+  highlight(obj: THREE.Object3D | null, color: string, roofOnly = false): void {
+    // 幂等：已是同一对象且高亮范围相同则跳过，避免每次 mousemove 都重复重建材质。
+    // 范围不同（整栋 ↔ 仅屋顶）必须重做，否则「选中整栋后悬停切换楼顶」会被误跳过。
+    if (obj && obj === this.highlightedObject && roofOnly === this.highlightRoofOnly) return;
     this.clearHighlight();
     if (!obj) return;
     const tint = new THREE.Color(color);
@@ -2799,9 +2807,16 @@ export class MapScene {
       if (!mesh.userData.__origMaterial) mesh.userData.__origMaterial = mesh.material;
       const orig = mesh.userData.__origMaterial;
       const origArr = Array.isArray(orig) ? orig : [orig];
+      // 仅屋顶模式：材质数组里只有名字含 Roof 的槽参与高亮，其余槽保持原材质。
+      // 若整栋楼的材质并非数组（单材质），则按该材质名判断——不含 Roof 就整块不高亮。
+      const highlightIdx = roofOnly
+        ? origArr.map((m, i) => (/roof/i.test((m as THREE.Material).name || '') ? i : -1)).filter((i) => i >= 0)
+        : origArr.map((_, i) => i);
+      if (highlightIdx.length === 0) return;
       // 材质克隆缓存：同一（原材质, 高亮色）组合只克隆一次，跨悬停/跨楼栋复用。
       // 低配机器上 mousemove 扫过楼群时每栋楼都要克隆整套材质，缓存后复用零克隆开销。
-      const cloned = origArr.map((m) => {
+      const cloned = origArr.map((m, i) => {
+        if (highlightIdx.indexOf(i) < 0) return m; // 非屋顶槽：原样返回
         const cacheKey = `${color}|${(m as THREE.Material).uuid}`;
         let c = this.highlightMatCache.get(cacheKey);
         if (!c) {
@@ -2818,6 +2833,7 @@ export class MapScene {
       mesh.material = Array.isArray(orig) ? cloned : cloned[0];
     });
     this.highlightedObject = obj;
+    this.highlightRoofOnly = roofOnly;
     this.markDirty();
   }
 
@@ -2832,6 +2848,7 @@ export class MapScene {
       }
     });
     this.highlightedObject = null;
+    this.highlightRoofOnly = false;
     this.markDirty();
   }
 

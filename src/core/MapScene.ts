@@ -321,7 +321,7 @@ export class MapScene {
   private lowRtH = 0;
   /** 交互期渲染分辨率倍率（0.6 = 填充率降至 36%）：拖动本就在动，略糊可接受，静止恢复全清 */
   private static readonly INTERACT_SCALE = 0.6;
-  /** 画质增强档下、WebGL1 低配机的离屏超采样倍率：放大 RT 渲染再 downsample 到屏幕，替代不可用的 MSAA */
+  /** 画质增强档下、WebGL1 机器的离屏超采样倍率：放大 RT 渲染再 downsample 到屏幕，替代不可用的 MSAA */
   private static readonly QUALITY_SS = 1.35;
   /** 画质增强档的轻度锐化强度（unsharp mask 系数）：抵消 downsample 与低 PPI 带来的发糊 */
   private static readonly QUALITY_SHARP = 0.25;
@@ -652,10 +652,19 @@ export class MapScene {
       this.callbacks.onMapError?.(err);
       return;
     }
-    // 像素比封顶：retina 屏 dpr=2/3 时片元量按平方放大，是弱 GPU 拖动掉帧的主因之一。
-    // 老路径：非低配 1.5 / 低配 1；画质增强档：低配也放宽到 1.5（弱机可能掉帧，可用 ?q=low 回退）。
+    // 像素比策略（画质增强档默认开）：
+    // - 老写法 min(dpr, cap) 是「只降不升」：retina 屏 dpr=2/3 压到 1.5 没问题，
+    //   但低端显示器 dpr=1 时 min(1,1.5)=1，drawingBuffer 被死死钉在 1:1 物理像素，
+    //   模型细线 / 砖纹 / 窗框只占几个像素 → 这才是「低端显示器下模糊」的主因。
+    // - 新写法对低 DPI 屏主动抬到 1.35x：更大的 drawingBuffer 缩回屏幕 = 全屏 SSAA，
+    //   低 PPI 屏也能拿到接近高 DPI 的细节与平滑边缘；高 DPI 仍封顶 1.5 控填充率。
+    // - ?q=low 关闭画质增强 → 完全回到老的 min(dpr, cap) 回退路径，不改变老行为。
+    const deviceDpr = window.devicePixelRatio || 1;
     const pixelCap = lowEnd && !this.qualityBoost ? 1 : 1.5;
-    this.renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, pixelCap));
+    const effPr = this.qualityBoost
+      ? Math.min(Math.max(deviceDpr, 1.35), pixelCap)
+      : Math.min(deviceDpr, pixelCap);
+    this.renderer.setPixelRatio(effPr);
     this.renderer.setSize(width, height, false);
     this.renderer.autoClear = false;
     // 场景内全部材质均为不透明（已在加载时把半透明/透射玻璃降级为 opaque），
@@ -1105,11 +1114,11 @@ export class MapScene {
         // eslint-disable-next-line no-console
         console.info(
           `[MapScene] GLB 加载完成：isWebGL2=${caps?.isWebGL2 ?? '?'}，MAX_TEXTURE_SIZE=${caps?.maxTextureSize ?? '?'}，` +
-            `低配=${this.lowEnd}，画质增强=${this.qualityBoost ? '开' : '关/?q=low'}，像素比上限=${this.renderer?.getPixelRatio() ?? '?'}，阴影=${shadowState}，`
+            `低配=${this.lowEnd}，画质增强=${this.qualityBoost ? '开' : '关/?q=low'}，设备DPR=${window.devicePixelRatio || 1}→渲染像素比=${this.renderer?.getPixelRatio() ?? '?'}，阴影=${shadowState}，`
             + `超限缩放=${clampedCount} 张，NPOT 材质降级=${npotFixed} 张，黑图替换=${materialFixed} 张，低配贴图降级=${textureReduced} 张，`
             + `各向异性=${anisoLevel}x（${anisoCount} 张贴图），`
-            + `离屏超采样=${this.lowEnd && this.qualityBoost && !caps?.isWebGL2 ? MapScene.QUALITY_SS + 'x' : '关'}，`
-            + `锐化=${this.qualityBoost ? MapScene.QUALITY_SHARP : '关'}`,
+            + `离屏超采样=${this.needsRtPath() ? this.supersampleFactor().toFixed(2) + 'x(相对屏幕)' : '关'}，`
+            + `锐化=${this.qualityBoost ? this.effectiveSharp().toFixed(2) : '关'}` + (this.qualityBoost && this.supersampleFactor() <= 1 ? '(无downsample自动关)' : ''),
         );
 
         this.callbacks.onModelStage?.('准备渲染');
@@ -4106,8 +4115,12 @@ export class MapScene {
     // 同步直绘也会走本函数，而它发生在 AMap 帧之外 —— 在那里 resetState 会打乱高德
     // 底图渲染器的 GL 状态缓存，造成底图丢帧 / 背景白闪。状态同步只允许在 AMap 回调内做。
 
-    // ── 低配/软件渲染：离屏 RT 合成（空闲帧只贴图压 CPU；拖拽直绘保跟手；内容变化走同源 blit 防闪烁）──
-    if (this.lowEnd && !this.frameCacheBroken) {
+    // ── 低配/软件渲染，或 WebGL1+画质增强：离屏 RT 合成 ──
+    // 空闲帧只贴图压 CPU；拖拽直绘保跟手；内容变化走同源 blit 防闪烁。
+    // WebGL1 无硬件 MSAA，且高德共享 context 下 renderer 的 antialias 参数无效，
+    // 唯一能抗锯齿的就是离屏超采样 + downsample + 锐化。因此 WebGL1 只要开了画质增强，
+    // 无论是否低配都必须走这条路径，否则「近看锯齿、远看糊」（见 needsRtPath）。
+    if (this.needsRtPath()) {
       if (!this.ensureFrameCache(bufW, bufH)) {
         // 缓存不可用 → 退化直绘，保证模型始终可见
         this.renderer.setRenderTarget(null);
@@ -4159,10 +4172,49 @@ export class MapScene {
     this.renderer.render(this.scene, this.camera);
   }
 
+  /**
+   * 是否需要走离屏 RT 合成路径。
+   * - 低配/软件渲染：为省 CPU（空闲帧只贴图）。
+   * - WebGL1 + 画质增强：为拿到「超采样 + downsample + 锐化」这一唯一的抗锯齿手段
+   *   （WebGL1 没有硬件 MSAA，且高德共享 context 下 renderer 的 antialias 参数无效）。
+   *   若不走此路径，WebGL1 非低配机会完全没有任何抗锯齿 → 近看锯齿、远看糊。
+   */
+  private needsRtPath(): boolean {
+    if (this.frameCacheBroken) return false;
+    if (this.lowEnd) return true;
+    const isWebGL2 = !!this.renderer?.capabilities?.isWebGL2;
+    return this.qualityBoost && !isWebGL2;
+  }
+
+  /**
+   * 离屏 RT 相对 drawingBuffer 的超采样倍率（1 = 不超采样）。
+   * WebGL1 无硬件 MSAA，靠放大 RT 再 downsample 抗锯齿。但低 DPI 屏的 pixelRatio 已主动抬到 1.35
+   * （全屏 SSAA），再叠一层 1.35x 会翻倍填充率；故「相对 CSS 的总超采样」封顶 QUALITY_SS：
+   * pr 已抬多少，RT 就少叠多少。pr 未抬升（老路径 / ?q=low）时退化为原样 QUALITY_SS。
+   */
+  private supersampleFactor(): number {
+    const isWebGL2 = !!this.renderer?.capabilities?.isWebGL2;
+    if (!this.qualityBoost || isWebGL2) return 1;
+    const deviceDpr = window.devicePixelRatio || 1;
+    const pr = this.renderer?.getPixelRatio() ?? 1;
+    return Math.max(1, MapScene.QUALITY_SS / Math.max(1, pr / deviceDpr));
+  }
+
+  /**
+   * 实际注入的锐化强度。锐化的初衷是补偿「超采样 downsample 造成的模糊」——
+   * 只有当 RT 比 drawingBuffer 大（ss>1，确实发生了 downsample）时才有blur可补偿。
+   * 若 ss=1（如 dpr=1 的低端显示器：DPR 提升已吃掉超采样份额，RT 与屏幕等大、无 downsample），
+   * 锐化就是无补偿的纯锐化，会放大边缘高频 → 近看锯齿。故按超采样比例线性缩放：ss=1 时归零。
+   */
+  private effectiveSharp(): number {
+    const ss = this.supersampleFactor();
+    const ratio = Math.min(1, Math.max(0, (ss - 1) / (MapScene.QUALITY_SS - 1)));
+    return MapScene.QUALITY_SHARP * ratio;
+  }
+
   /** 计算离屏 RT 的实际物理尺寸（含画质增强档的 WebGL1 超采样倍率）；与 rebuildFrameRt 共用，保证 key 一致 */
   private frameRtSize(bufW: number, bufH: number): { w: number; h: number } {
-    const isWebGL2 = !!this.renderer?.capabilities?.isWebGL2;
-    const ss = this.lowEnd && this.qualityBoost && !isWebGL2 ? MapScene.QUALITY_SS : 1;
+    const ss = this.supersampleFactor();
     return { w: Math.max(1, Math.round(bufW * ss)), h: Math.max(1, Math.round(bufH * ss)) };
   }
 
@@ -4219,8 +4271,10 @@ export class MapScene {
       this.blitMat.needsUpdate = true;
     }
     // 超采样改变了 RT 物理尺寸 → 同步锐化 shader 的 texel（1/像素），否则锐化半径按旧尺寸算会糊。
+    // 同时同步强度：ss 变化时（如窗口/dpr 变化）无 downsample 时须归零，否则会对等大 RT 做纯锐化→锯齿。
     if (this.blitSharpUniforms && this.frameRt) {
       this.blitSharpUniforms.uTexel.value.set(1 / this.frameRt.width, 1 / this.frameRt.height);
+      this.blitSharpUniforms.uSharp.value = this.effectiveSharp();
     }
     this.frameRtKey = `${rtW}x${rtH}`;
   }
@@ -4245,7 +4299,7 @@ export class MapScene {
       const rt = this.frameRt!;
       mat.onBeforeCompile = (shader) => {
         const texel = { value: new THREE.Vector2(1 / rt.width, 1 / rt.height) };
-        const sharp = { value: MapScene.QUALITY_SHARP };
+        const sharp = { value: this.effectiveSharp() };
         shader.uniforms.uTexel = texel;
         shader.uniforms.uSharp = sharp;
         this.blitSharpUniforms = { uTexel: texel, uSharp: sharp };
@@ -4265,7 +4319,7 @@ export class MapScene {
         );
       };
       // 让不同 uniform 值的材质各自编译（避免 three 复用缓存 program 导致锐化强度串台）
-      mat.customProgramCacheKey = () => 'blit-sharp-' + MapScene.QUALITY_SHARP;
+      mat.customProgramCacheKey = () => 'blit-sharp-' + this.effectiveSharp().toFixed(3);
     }
     this.blitMat = mat;
     const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), mat);

@@ -2339,12 +2339,13 @@ export class MapScene {
     style.textContent =
       '.bld-label{position:absolute;transform:translate(-50%,-100%);pointer-events:none;' +
       'font-size:12px;line-height:1;padding:3px 7px;border-radius:6px;white-space:nowrap;' +
-      'background:rgba(17,24,39,.78);color:#fff;border:1px solid rgba(255,255,255,.15);' +
-      'box-shadow:0 1px 4px rgba(0,0,0,.35);user-select:none;will-change:transform;' +
+      'background:rgba(255,255,255,.94);color:#111827;border:1px solid rgba(17,24,39,.18);' +
+      'box-shadow:0 1px 5px rgba(17,24,39,.28);user-select:none;will-change:transform;' +
       'transition:opacity .12s ease;z-index:5;font-family:inherit}' +
       '.bld-label::after{content:"";position:absolute;left:50%;top:100%;transform:translateX(-50%);' +
-      'border:5px solid transparent;border-top-color:rgba(17,24,39,.78)}' +
-      '.bld-label--active{background:rgba(37,99,235,.92);border-color:#fff;font-weight:600}' +
+      'border:5px solid transparent;border-top-color:rgba(255,255,255,.94)}' +
+      '.bld-label--active{background:rgba(37,99,235,.94);border-color:#fff;color:#fff;font-weight:600}' +
+      '.bld-label--active::after{border-top-color:rgba(37,99,235,.94)}' +
       '.bld-label--hidden{display:none}';
     document.head.appendChild(style);
     this.labelStyleInjected = true;

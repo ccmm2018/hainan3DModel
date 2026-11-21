@@ -54,6 +54,12 @@ export interface SceneConfig {
    * 若确实需要周边建筑的立体感，可把 'building' 加回数组（代价是平移/缩放时 CPU 占用回升）。
    */
   mapFeatures: string[];
+  /**
+   * 是否在低配环境下仍强制保留 mapFeatures 指定的全部要素（含 building 3D 白模）。
+   * 默认 false = 低配时自动去掉 building 省 CPU；
+   * 项目明确要求周边建筑/POI/文字必须可见时设为 true（低配过滤不再生效）。
+   */
+  forceShowMapFeatures?: boolean;
   /** 是否显示地图文字注记（地名 / 路名等）。底图降噪时设为 false */
   showLabel: boolean;
   /** GLB 模型文件路径（相对 public 目录） */
@@ -214,7 +220,7 @@ export const DEFAULT_SCENE_CONFIG: SceneConfig = {
   maxPitch: 75,
   minPitch: 0,
   // 数字孪生底色：浅灰白底图，周边建筑以浅灰「白模」呈现，路网/绿地/水系清晰可见
-  mapStyle: 'amap://styles/whitesmoke',
+  mapStyle: 'amap://styles/normal',
   // 末尾的 ?v= 缓存破坏参数：强制浏览器丢弃旧版 GLB 缓存、重新下载。
   // 背景：模型里曾有一块「琴剑楼旁的小方块」（仅存在于本地 Blender 源，从未进网页 GLB），
   // 但部分浏览器缓存了更早含该方块的旧导出，导致刷新后仍显示。模型文件本身已干净，
@@ -293,10 +299,16 @@ export const DEFAULT_SCENE_CONFIG: SceneConfig = {
     'B_C0_New_01': '教学楼',
     'NewBox_O1_SW': '教学楼',
   },
-  // 性能优先：关闭周边 3D 楼块（building）。它们是高德底图平移/缩放时逐帧重绘的最重图层，
-  // 弱机拖拽/缩放 CPU 80%+ 的首要来源。仅保留 bg(地面轮廓) + road(路网)。需要周边立体感时可加回 'building'。
-  mapFeatures: ['bg', 'road'],
-  showLabel: false,
+  // 周边要素全开：让模型所在地与真实地图融合（用户要求"其余要和周边融合在一起"）。
+  // ⚠️ 高德 setFeatures 只支持 4 种取值：bg(区域面) / point(兴趣点) / road(道路及路名) / building(建筑物)。
+  //    没有 'label' 这一项——文字标注由地图构造参数 showLabel 控制，不归 setFeatures。
+  // 全部开满：building 周边白模 + point POI 图标 + road 路网路名 + bg 底图。
+  // 代价：平移/缩放时高德要重绘这些矢量要素，CPU 比原来（仅 bg+road）略高。
+  // 低配环境默认会二次剔除 building；这里用 forceShowMapFeatures=true 强制保留，
+  // 因为"周边融合"是本次的核心诉求，不能被低配策略悄悄关掉。
+  mapFeatures: ['bg', 'road', 'building', 'point'],
+  forceShowMapFeatures: true,
+  showLabel: true,
   // 隐藏 Blender 一并导出的辅助几何（女儿墙/廊架/骨架/空物体），只留楼本体可见；
   // 具体的「可点击 / 可选中」范围由 buildingNodeNames 单独控制（数字 0–25 才是建筑）。
   modelNodeFilter: {

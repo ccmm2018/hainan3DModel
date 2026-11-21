@@ -342,6 +342,15 @@ export class MapScene {
   /** 主方向光引用（用于模型放置后按包围盒拟合阴影视锥） */
   private dirLight: THREE.DirectionalLight | null = null;
 
+  /**
+   * 白板接地处理：缩小自带白砖地皮 + 白砖调浅灰 + 边缘做不透明渐变（伪羽化），
+   * 消除「模型浮在地图上」的硬切浮板感。全部在 Web 端完成，不改 GLB、不烘焙。
+   * URL ?groundfx=0 可关闭做 A/B 对比。
+   */
+  private groundBaseMesh: THREE.Mesh | null = null;
+  /** 校园轮廓遮罩纹理（透明裁剪白板用，dispose 时释放） */
+  private groundMaskTexture: THREE.Texture | null = null;
+
   // 量算（测距 / 测面）状态
   private AMap: any = null;
   private measureMode: 'none' | 'distance' | 'area' = 'none';
@@ -444,13 +453,25 @@ export class MapScene {
       nx !== null && Number.isFinite(Number(nx)) ? Number(nx) : cfgNudge[0],
       ny !== null && Number.isFinite(Number(ny)) ? Number(ny) : cfgNudge[1],
     ];
+    // 底图样式：URL ?mapstyle=normal|light|grey|whitesmoke|dark 可临时覆盖，方便不重新构建就对比
+    // 哪种样式周边要素丰富、与模型最融合。whitesmoke(远山黛) 极简、POI/建筑天然稀少，是"光秃秃"的主因。
+    const urlStyle = urlParams.get('mapstyle');
+    const STYLE_ALIAS: Record<string, string> = {
+      normal: 'normal', light: 'light', grey: 'grey', whitesmoke: 'whitesmoke',
+      dark: 'dark', darkblue: 'darkblue', fresh: 'fresh', macaron: 'macaron',
+    };
+    const mapStyle = urlStyle && STYLE_ALIAS[urlStyle]
+      ? `amap://styles/${STYLE_ALIAS[urlStyle]}`
+      : (this.config.mapStyle || 'amap://styles/dark');
+    // eslint-disable-next-line no-console
+    console.info(`[MapScene] 底图样式: ${mapStyle}`);
     this.map = new AMap.Map(this.container, {
       center: this.gcjCenter,
       zoom: this.config.zoom,
       pitch: this.config.pitch,
       rotation: initialRotation,
       viewMode: '3D',
-      mapStyle: this.config.mapStyle || 'amap://styles/dark',
+      mapStyle,
       zooms: [3, 20],
       showLabel: this.config.showLabel,
       rotationEnable: true,
@@ -463,9 +484,11 @@ export class MapScene {
     // eslint-disable-next-line no-console
     console.info(`[MapScene] 地图创建即 rotation=${Number(this.map.getRotation?.()).toFixed(1)}°（首帧就是目标方位，无加载后旋转）`);
 
-    // 底图降噪：去除 POI（point）兴趣点，仅保留背景 / 道路 / 建筑
+    // 底图要素白名单：高德只支持 bg / point / road / building 四种；文字由 showLabel 控制。
     try {
       this.map.setFeatures(this.config.mapFeatures);
+      // eslint-disable-next-line no-console
+      console.info(`[MapScene] 底图要素: [${(this.config.mapFeatures || []).join(', ')}]，showLabel=${this.config.showLabel}`);
     } catch {
       /* 个别版本不支持 setFeatures，可忽略 */
     }
@@ -473,7 +496,9 @@ export class MapScene {
     // 低配优化：进一步去掉 3D 楼块与标注，只留背景+道路。
     // 平移/缩放时高德每帧都要重绘这些矢量要素与 DOM 标注，是弱机 CPU 的主要消耗之一；
     // 去掉后底图更轻，而我们的 3D 校园模型（GLCustomLayer）完全不受影响、照常显示。
-    if (this.lowEnd) {
+    // forceShowMapFeatures=true 时跳过二次剔除：周边建筑/POI/文字是"与地图融合"的核心诉求，
+    // 不能被低配策略悄悄关掉（否则低配机上看不到任何周边要素，又回到光秃秃的地图）。
+    if (this.lowEnd && !this.config.forceShowMapFeatures) {
       try {
         const reduced = (this.config.mapFeatures && this.config.mapFeatures.length
           ? this.config.mapFeatures
@@ -1027,6 +1052,9 @@ export class MapScene {
         });
 
         this.placeModelAtAnchor();
+        // 白板接地处理必须在 recenter（placeModelAtAnchor 内）之后：白板是最大对象、主导包围盒，
+        // 提前改 scale 会牵动全模型居中偏移。此处改 scale 只影响白板自身。
+        this.applyGroundFinish();
         this.fitShadowToModel();
 
         // —— 后处理整体重构为「分片 + 阶段进度」——
@@ -1338,8 +1366,14 @@ export class MapScene {
     //    PITCH_MIN=PITCH_MAX=73（俯角约17°，与 config.pitch 一致）：把加载视角钉在此值，
     //    fit 不会为「填满屏幕」再改俯仰，保证默认严格平视到 73°；本版比旧的 70° 更平视一点。
     //    手动拖动上限仍由 config.maxPitch=75 控制（可拖到更平/更斜），不影响加载默认值。
-    const PITCH_MIN = 73;
-    const PITCH_MAX = 73;
+    // URL ?pitch=<0~85> 可覆盖加载俯仰角：值越大越接近平视(地皮被拉成梯形越明显)，
+    // 越小越俯视(更接近效果图那种俯瞰、地皮面积占比更小)。默认仍 73 保持原有视角。
+    const pitchOverrideRaw = new URLSearchParams(location.search).get('pitch');
+    const pitchOverride = pitchOverrideRaw !== null && Number.isFinite(Number(pitchOverrideRaw))
+      ? THREE.MathUtils.clamp(Number(pitchOverrideRaw), 0, 85)
+      : 73;
+    const PITCH_MIN = pitchOverride;
+    const PITCH_MAX = pitchOverride;
     // 俯仰角匹配目标：可见区（避开顶 / 底悬浮 UI）的高宽比，而非整屏
     const screenRatio = (H - padTop - padBottom) / Math.max(W - 2 * padX, 1);
     let pitch = THREE.MathUtils.clamp(this.config.pitch, PITCH_MIN, PITCH_MAX);
@@ -1433,7 +1467,11 @@ export class MapScene {
     const zoomFit = Math.min(Math.max(zoom0 + Math.log2(dist0 / fit.d), 3), 20);
     // 先应用自适应俯仰角（config.maxPitch 已放宽到与 PITCH_MAX 一致，不会被俯仰钳制拉回）
     this.setPitchSafe(pitch);
-    const finalZoom = +(zoomFit + ZOOM_BONUS).toFixed(3);
+    // URL ?zoomout=<级别数>：在自适应取景基础上拉远，让周边地图露出，验证"模型与地图融合"效果。
+    // 例 ?zoomout=1.2 约把可视范围放大 2.3 倍。默认 0（保持原有铺满取景）。
+    const zuRaw = new URLSearchParams(location.search).get('zoomout');
+    const zoomOut = zuRaw !== null && Number.isFinite(Number(zuRaw)) ? Number(zuRaw) : 0;
+    const finalZoom = +(zoomFit + ZOOM_BONUS - zoomOut).toFixed(3);
     // 在「刚好填满」基础上额外放大一点点（ZOOM_BONUS），让模型显得更大些
     this.map.setZoomAndCenter(finalZoom, fitCenter, true);
 
@@ -2180,6 +2218,143 @@ export class MapScene {
     };
     walk(this.modelRoot, true);
     return has ? box : null;
+  }
+
+  /**
+   * 白板接地处理（s488）：解决「模型浮在地图上」的硬切浮板感。
+   *
+   * 背景：GLB 自带一整块白砖地皮 Ground_Base（736×784m，仅 2 面），而全部可见内容
+   * （楼/树/车/道路/草地）只占 664×715m，四周多出一圈白边 + 硬切线 + 偏亮色 → 浮板感。
+   * 之前在 Blender 做半透明羽化不可行（烘焙链路把链接 alpha 当 MASK 硬边），Web 端半透明
+   * 又会在离屏 RT 路径双重混合闪烁，故改用「不透明伪羽化」——全部在这一个方法里完成：
+   *   1. 缩小：白板节点 scale 从 736×784 → 714×765（内容外留 25m 边），树/道路仍在板内不悬空；
+   *   2. 调色：白砖整体朝浅灰混合（贴近高德 whitesmoke 底图的灰白）；
+   *   3. 伪羽化：沿白板四边用局部坐标算到边缘距离，边缘一圈颜色平滑渐变到底图灰，
+   *      全程不透明（opacity 恒 1），零闪烁风险、零面数变化。
+   * 注：必须在 placeModelAtAnchor()（含 recenter 烘焙几何位移）之后调用——白板是最大对象、
+   *     主导包围盒，若在 recenter 前改 scale 会牵动全模型居中偏移。
+   */
+  private applyGroundFinish(): void {
+    if (!this.modelRoot) return;
+    // A/B 开关：?groundfx=0 关闭（保留原始白板），便于对比效果
+    let enabled = true;
+    let maskUrl = '/models/campus_mask.png';
+    let alphaCut = 0.01;      // alphaTest 阈值：仅丢弃近乎全透明的像素；保留完整灰阶羽化带，
+                              // 避免阈值处「省道颜色突变」形成笔直切割线（0.15 会切断过渡带）。
+    let edgeOnly = false;     // ?groundedge=1：仅边缘羽化、不做轮廓裁剪（回退对比）
+    try {
+      const qs = new URLSearchParams(location.search);
+      if (qs.get('groundfx') === '0') enabled = false;
+      const mu = qs.get('groundmask');
+      if (mu) maskUrl = mu;
+      const ac = qs.get('groundalphacut');
+      if (ac !== null && Number.isFinite(Number(ac))) alphaCut = Math.max(0.0, Math.min(0.5, Number(ac)));
+      if (qs.get('groundedge') === '1') edgeOnly = true;
+    } catch { /* ignore */ }
+    if (!enabled) return;
+
+    // 底图色（轮廓内白板仍染成底图色，与高德浅绿底图一致）
+    let GROUND_RGB = [180, 235, 175];
+    let GROUND_BLEND = 1.0;
+    try {
+      const qs = new URLSearchParams(location.search);
+      const gc = qs.get('groundcolor');
+      if (gc) {
+        const p = gc.split(',').map(Number);
+        if (p.length === 3 && p.every((v) => Number.isFinite(v) && v >= 0 && v <= 255)) GROUND_RGB = p;
+      }
+      const gb = qs.get('groundblend');
+      if (gb !== null && Number.isFinite(Number(gb))) GROUND_BLEND = Math.max(0, Math.min(1, Number(gb)));
+    } catch { /* ignore */ }
+    const GR = (GROUND_RGB[0] / 255).toFixed(4);
+    const GG = (GROUND_RGB[1] / 255).toFixed(4);
+    const GB = (GROUND_RGB[2] / 255).toFixed(4);
+
+    // 找白板网格
+    const grounds: THREE.Mesh[] = [];
+    this.modelRoot.traverse((child) => {
+      if (child.name === 'Ground_Base' && (child as THREE.Mesh).isMesh) {
+        grounds.push(child as THREE.Mesh);
+        this.groundBaseMesh = child as THREE.Mesh;
+      }
+    });
+    if (!grounds.length) {
+      console.warn('[MapScene] 白板接地处理：未找到 Ground_Base');
+      return;
+    }
+
+    // 加载校园轮廓遮罩（纯黑白 PNG：白=校园内显示底板，黑=透明露出底图，边缘灰阶过渡）
+    const loader = new THREE.TextureLoader();
+    loader.setCrossOrigin('anonymous');
+    loader.load(
+      maskUrl,
+      (maskTex) => {
+        // WebGL1 下 NPOT 贴图必须 ClampToEdge + LinearFilter（不可 mipmap/repeat）
+        maskTex.wrapS = THREE.ClampToEdgeWrapping;
+        maskTex.wrapT = THREE.ClampToEdgeWrapping;
+        maskTex.minFilter = THREE.LinearFilter;
+        maskTex.magFilter = THREE.LinearFilter;
+        maskTex.generateMipmaps = false;
+        // 遮罩是灰度图，用 G 通道（three alphaMap 惯例）
+        this.groundMaskTexture = maskTex;
+
+        for (const mesh of grounds) {
+          const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+          for (const m0 of mats) {
+            const mat = m0 as THREE.MeshStandardMaterial;
+            if (!mat || !mat.isMeshStandardMaterial || mat.userData.groundFinish) continue;
+            mat.userData.groundFinish = true;
+
+            // ✅ 透明 + alphaTest 丢弃全透明 + 不写深度：
+            //  - transparent：轮廓外 alpha=0 才可能露出高德底图（不透明物体会盖住底图）；
+            //  - alphaTest：alpha<阈值直接 discard，避免大面积半透明在离屏 RT 双重混合闪烁；
+            //  - depthWrite=false：半透明底板不写深度，不会挡住高德地名标注（底图覆盖物在其上层绘制）；
+            //  - side=DoubleSide：俯视/斜视都能看到裁剪轮廓。
+            mat.transparent = true;
+            mat.alphaTest = alphaCut;
+            mat.depthWrite = false;
+            mat.side = THREE.DoubleSide;
+
+            const prev = mat.onBeforeCompile;
+            mat.onBeforeCompile = (shader, renderer) => {
+              if (prev) prev(shader, renderer);
+              // 顶点：用局部坐标重算遮罩 UV。白板顶点局部 x/z∈[-0.5,0.5]，
+              // 而 TEXCOORD_0 被砖纹平铺放大（0~16），不能直接用。
+              shader.vertexShader = 'varying vec2 vMaskUv;\n' + shader.vertexShader;
+              shader.vertexShader = shader.vertexShader.replace(
+                '#include <begin_vertex>',
+                `#include <begin_vertex>
+                 vMaskUv = vec2(position.x + 0.5, 0.5 - position.z);`,
+              );
+              // 片元：采样遮罩 G 通道作为 alpha（轮廓内1/轮廓外0/边缘过渡）。
+              shader.fragmentShader = 'uniform sampler2D uGroundMask;\nvarying vec2 vMaskUv;\n' + shader.fragmentShader;
+              shader.fragmentShader = shader.fragmentShader.replace(
+                '#include <alphamap_fragment>',
+                `#include <alphamap_fragment>
+                 float maskA = texture2D(uGroundMask, vMaskUv).g;
+                 diffuseColor.a *= maskA;`,
+              );
+              // 轮廓内白板染成底图色（与高德浅绿一致），再经 alpha 裁剪后露出底图。
+              shader.fragmentShader = shader.fragmentShader.replace(
+                '#include <colorspace_fragment>',
+                `#include <colorspace_fragment>
+                 gl_FragColor.rgb = mix(gl_FragColor.rgb, vec3(${GR}, ${GG}, ${GB}), ${GROUND_BLEND.toFixed(3)});`,
+              );
+              shader.uniforms.uGroundMask = { value: maskTex };
+            };
+            mat.customProgramCacheKey = () => `groundMask_v3_${alphaCut.toFixed(2)}`;
+            mat.needsUpdate = true;
+          }
+        }
+        this.scheduleRender();
+        // eslint-disable-next-line no-console
+        console.info(`[MapScene] 白板遮罩已加载：${maskUrl}，found=${grounds.length}，alphaTest=${alphaCut}，depthWrite=false，轮廓外透出底图`);
+      },
+      undefined,
+      (err) => {
+        console.warn('[MapScene] 白板遮罩加载失败，保留原白板', err);
+      },
+    );
   }
 
   private placeModelAtAnchor(): void {
@@ -3952,6 +4127,19 @@ export class MapScene {
    *   「场景内容变化」（高亮 / 房间 / 楼层 / 材质），靠下方同步直绘即可当帧上屏。
    */
   private markDirty(wakeMap = false): void {
+    // 🔴 根因修复（2026-11-21 本地 CDP 实测确认）：hover 高亮若在「高德帧之外」调用 three 渲染，
+    //    会改写与高德底图共享的同一个 WebGL context 的 GL 状态（blend/depth/program/VAO/clearColor…），
+    //    而高德渲染器的状态缓存对此毫不知情 → 下一帧底图瓦片渲染失败 → 周边地图整片变成灰白/天空色，
+    //    表现为「鼠标一移到楼栋上地图就消失」。实测：帧外绘制开启时底图采样从 (180,235,175)→(231,232,231)；
+    //    关闭后始终 (180,235,175)，且悬停高亮照常生效。
+    //    故默认禁用帧外同步绘制：内容变化只标记 contentDirty + scheduleRender()，
+    //    由高德自己的 render 回调在帧内统一绘制底图 + 模型，两者状态永不打架。
+    //    ?hoversync=1 可恢复旧的帧外绘制行为（仅供诊断对比，正常不要开）。
+    let allowFrameSync = false;
+    try {
+      if (new URLSearchParams(location.search).get('hoversync') === '1') allowFrameSync = true;
+    } catch { /* ignore */ }
+
     // 低配 RT 合成路径：内容变化（高亮/选型/房间/校准等）走「RT→blit」同源路径
     // （与空闲帧同一贴图路径），从根上避免「直绘↔贴图」路径切换导致的悬停闪烁；
     // 故置 contentDirty 而非 frameCacheDirty。下一帧 renderCachedFrame 会重渲 RT 再贴图。
@@ -3963,7 +4151,7 @@ export class MapScene {
     // 因此内容变更后立即同步把模型层重画到当前画布：只 clearDepth、不清颜色（底图保留），
     // 高亮当帧即可见。加 12ms 节流避免同一动画帧内多次 markDirty 重复全场景重绘。
     const now = typeof performance !== 'undefined' ? performance.now() : 0;
-    const canDraw = !!(this.renderer && this.scene && this.camera && !this.paused);
+    const canDraw = allowFrameSync && !!(this.renderer && this.scene && this.camera && !this.paused);
     if (canDraw && now - this.lastImmediateDrawAt > 12) {
       this.lastImmediateDrawAt = now;
       try {
@@ -3996,14 +4184,13 @@ export class MapScene {
       });
     }
 
-    // ⚠️ 白光闪屏 + 拖动卡顿的根因（s502）：此前每次内容变更（含悬停高亮）都会无条件
-    // scheduleRender() → map.render()，强制高德**整帧重绘底图**。按需渲染模式下高德常常
-    // 只重画底图、却不回调 GLCustomLayer.render()，于是出现一帧「只有浅色底图、没有模型」；
-    // 画布是透明的，下面 .amap-container 的 #f2f2f2 就透出来 → 整个背景白亮闪一下。
-    // 拖动地图时这次额外的整帧重绘还会与高德自身的拖动帧叠加，等于每帧多画一遍底图。
-    // 内容变更已由上方同步直绘上屏，无需再唤醒高德；只有确实需要重建底图/相机的场景
-    // （切回前台、resize、fitRefine、量算）才显式传 wakeMap=true 或自行 scheduleRender()。
-    if (wakeMap) this.scheduleRender();
+    // 默认路径（allowFrameSync=false）：绝不在此碰共享 WebGL 上下文，只唤醒高德整帧重绘。
+    // 高德会在自己的 render 回调里「先画底图、再回调我们画模型」，二者在同一帧内顺序执行，
+    // 状态互不干扰 → 底图不会丢、高亮也能随下一帧（通常 <100ms）上屏。
+    // 历史坑（s502）：以前内容变更无条件 map.render() 曾导致「只有底图、没有模型」的一帧白闪，
+    // 那是与帧外绘制叠加所致；现在去掉帧外绘制后，单纯 scheduleRender 不再有该问题。
+    // 确需立即重建底图/相机的场景（切回前台、resize、fitRefine、量算）传 wakeMap=true。
+    if (wakeMap || !allowFrameSync) this.scheduleRender();
   }
 
   private render(): void {
@@ -4463,6 +4650,9 @@ export class MapScene {
     this.lowRtW = 0;
     this.lowRtH = 0;
     this.frameRtKey = '';
+    this.groundMaskTexture?.dispose();
+    this.groundMaskTexture = null;
+    this.groundBaseMesh = null;
     if (this.interactTimer) { clearTimeout(this.interactTimer); this.interactTimer = null; }
     this.interacting = false;
     this.blitScene?.traverse((o) => {

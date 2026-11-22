@@ -22,6 +22,18 @@ import { ROOM_STATUS_CONFIG, type Room } from '../data/roomData';
 /** 首屏性能量算基准：模块脚本执行时刻（≈页面交互起点），用于把各阶段耗时统一到「距页面加载」 */
 const SCENE_T0 = performance.now();
 
+/**
+ * 淡雾（大气透视）配置：让远处楼栋略微发白、融入灰白底图，弱化"贴纸感"。
+ * - FOG_COLOR 取浅灰白，与 whitesmoke 底图同色系，远处才自然衔接而非蒙一层雾蓝；
+ * - 雾的 near/far 不写死：模型尺度 ~700m，而相机随缩放/俯仰在 200~2300m 间大幅变化，
+ *   固定值会"拉近没雾、拉远全白"。故每帧按相机到模型包围盒的实际距离自适应（见 refreshFog）。
+ * - 强度按「最远角点处的雾因子」控制：0.45 = 最远处混入约 45% 雾色，远处明显发白但楼体仍清晰可辨
+ *   （实测 0.34 太淡几乎看不出、0.60 偏浓会糊掉远处楼栋，0.45 是"轻微淡雾"平衡点）。
+ *   URL ?fog=0 关闭；?fogamount=0.5 调强度（0~1）。
+ */
+const FOG_COLOR = '#e9ecee';
+const FOG_AMOUNT_DEFAULT = 0.45;
+
 /** 常驻楼栋名称标签的数据结构 */
 interface BuildingLabel {
   node: string; // GLB 节点名（数字主键，0–25）
@@ -350,6 +362,14 @@ export class MapScene {
   private groundBaseMesh: THREE.Mesh | null = null;
   /** 校园轮廓遮罩纹理（透明裁剪白板用，dispose 时释放） */
   private groundMaskTexture: THREE.Texture | null = null;
+
+  // —— 淡雾（大气透视）——
+  /** 是否启用淡雾；URL ?fog=0 关闭。低配下依然启用：three 雾是逐片元一次 mix，开销可忽略 */
+  private fogEnabled = true;
+  /** 雾强度（最远角点处雾因子），URL ?fogamount= 覆盖 */
+  private fogAmount = FOG_AMOUNT_DEFAULT;
+  /** 模型包围盒（8 个世界角点，缓存），用于按相机距离自适应雾 near/far */
+  private fogCorners: THREE.Vector3[] | null = null;
 
   // 量算（测距 / 测面）状态
   private AMap: any = null;
@@ -711,6 +731,21 @@ export class MapScene {
     this.renderer.shadowMap.autoUpdate = false;
 
     this.scene = new THREE.Scene();
+    // 淡雾：near/far 先给占位值，模型就绪后由 refreshFog() 按相机实际距离自适应。
+    // three 的雾在片元着色器里把颜色 mix 向雾色，对透明像素只改 rgb 不改 alpha，
+    // 故不会破坏白板遮罩的透明裁剪（轮廓外仍透出底图）。
+    // URL 调试开关：?fog=0 关闭，?fogamount=0.5 调强度。
+    try {
+      const qs = new URLSearchParams(location.search);
+      if (qs.get('fog') === '0') this.fogEnabled = false;
+      const fa = Number(qs.get('fogamount'));
+      if (Number.isFinite(fa) && qs.get('fogamount') !== null) {
+        this.fogAmount = Math.max(0, Math.min(1, fa));
+      }
+    } catch { /* ignore */ }
+    if (this.fogEnabled) {
+      this.scene.fog = new THREE.Fog(FOG_COLOR, 1, 1 << 20);
+    }
     this.camera = new THREE.PerspectiveCamera(60, width / height, 1, 1 << 30);
 
     // 色调映射：
@@ -1057,6 +1092,9 @@ export class MapScene {
         // 提前改 scale 会牵动全模型居中偏移。此处改 scale 只影响白板自身。
         this.applyGroundFinish();
         this.fitShadowToModel();
+        // 淡雾：缓存模型包围盒角点（首帧相机可能还没同步，near/far 会在 render 里继续刷新）
+        this.fogCorners = null;
+        this.refreshFog();
 
         // —— 后处理整体重构为「分片 + 阶段进度」——
         // 旧实现虽有 yield，但每段本身仍是一个整块同步循环（108 张贴图逐张处理），
@@ -2460,6 +2498,48 @@ export class MapScene {
   }
 
   /**
+   * 按相机到模型的实时距离自适应淡雾的 near/far。
+   *
+   * 为什么不能写死：模型水平尺度 ~700m，但相机随缩放/俯仰在 200~2300m 间大幅移动（实测 default 629m、
+   * 俯视 692m、近景 228m、远景 1799m）。固定雾距会出现「拉近完全没雾、拉远整片白」的跳变。
+   * 这里每次视角变化都用模型包围盒 8 角点到相机的真实距离重算：
+   *   near = 最近角点距离（最近处完全无雾，保证眼前楼栋清晰）
+   *   far  = 最近 + 纵深/amount（最远角点处雾因子 = amount，只是略微发白）
+   * 于是不论怎么缩放/俯仰，雾始终从"眼前清晰"平滑过渡到"远处略白"。
+   *
+   * 用 three 线性雾（Fog）：片元 shader 把颜色 mix 向雾色，只改 rgb、不改 alpha，
+   * 因此白板遮罩轮廓外（alpha=0）仍透出底图，不被雾封死。
+   */
+  private refreshFog(): void {
+    if (!this.scene || !this.camera || !this.scene.fog || !this.modelRoot) return;
+    // 模型包围盒角点缓存一次即可（模型放置后形状固定，校准只改 modelRoot 变换）
+    if (!this.fogCorners) {
+      const box = this.visibleModelBox() ?? new THREE.Box3().setFromObject(this.modelRoot);
+      if (box.isEmpty()) return;
+      const corners: THREE.Vector3[] = [];
+      for (const x of [box.min.x, box.max.x]) {
+        for (const y of [box.min.y, box.max.y]) {
+          for (const z of [box.min.z, box.max.z]) corners.push(new THREE.Vector3(x, y, z));
+        }
+      }
+      this.fogCorners = corners;
+    }
+    let dMin = Infinity;
+    let dMax = 0;
+    const cam = this.camera.position;
+    for (const c of this.fogCorners) {
+      const d = c.distanceTo(cam);
+      if (d < dMin) dMin = d;
+      if (d > dMax) dMax = d;
+    }
+    if (!Number.isFinite(dMin) || dMax <= dMin) return;
+    const fog = this.scene.fog as THREE.Fog;
+    const near = Math.max(1, dMin - (dMax - dMin) * 0.08); // 最近处留一点余量，确保零雾
+    fog.near = near;
+    fog.far = near + (dMax - near) / Math.max(0.01, this.fogAmount);
+  }
+
+  /**
    * 冻结模型子树的本地矩阵自动更新：GLB 放置完成后变换永不变化（校准只改 modelRoot 自身），
    * 关闭子节点的 matrixAutoUpdate 后，每帧 updateMatrixWorld 只遍历、不再对每个节点做
    * 四元数→矩阵的合成运算——几百个节点的场景上这是每帧一笔可观的纯 CPU 开销。
@@ -2500,6 +2580,7 @@ export class MapScene {
     this.modelRoot.scale.setScalar(this.config.modelScale * c.scale);
     this.modelRoot.updateMatrixWorld(true);
     this.refreshBuildingBoxes(); // 校准后重建建筑 AABB，保证悬停粗筛与模型位置同步
+    this.fogCorners = null; // 模型变换变了：淡雾角点缓存失效，下次渲染重算
     this.markDirty();
   }
 
@@ -4246,6 +4327,8 @@ export class MapScene {
       this.camera.up.set(up[0], up[1], up[2]);
       this.camera.lookAt(lookAt[0], lookAt[1], lookAt[2]);
       this.camera.updateProjectionMatrix();
+      // 视角变了：按新相机到模型的距离刷新淡雾 near/far（远近渐变始终一致，不随缩放失效）
+      this.refreshFog();
       // 视角变了：缓存帧已过期，本帧需要重新渲染场景
       this.frameCacheDirty = true;
     }
@@ -4673,6 +4756,8 @@ export class MapScene {
     this.groundMaskTexture?.dispose();
     this.groundMaskTexture = null;
     this.groundBaseMesh = null;
+    this.fogCorners = null;
+    if (this.scene) this.scene.fog = null;
     if (this.interactTimer) { clearTimeout(this.interactTimer); this.interactTimer = null; }
     this.interacting = false;
     this.blitScene?.traverse((o) => {

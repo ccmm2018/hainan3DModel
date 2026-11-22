@@ -2253,9 +2253,15 @@ export class MapScene {
     } catch { /* ignore */ }
     if (!enabled) return;
 
-    // 底图色（轮廓内白板仍染成底图色，与高德浅绿底图一致）
+    // 底图色（轮廓内白板染成底图色，与高德浅绿底图协调）
     let GROUND_RGB = [180, 235, 175];
-    let GROUND_BLEND = 1.0;
+    // 染色强度：默认 0（不染色），白板保留模型自带的原始白砖铺装。
+    // 历程：曾 1.0 把白板 100% 染成纯绿→琴剑楼底部裸露带成「绿光晕」；
+    // 0.5 → 白砖透出但仍带浅绿底；用户要「去掉绿底、恢复白砖且不能盖过道路区域」，
+    // 故默认归 0：白板原样显示白砖（道路/草地/铺装/建筑都是独立几何盖在其上，不受影响），
+    // 轮廓外仍由遮罩裁掉透出省道，满足「白砖不超过所有道路区域」。
+    // 注意：草地/铺装/建筑都是独立模型、不受此值影响，只有白板裸露区（无其它几何覆盖处）会变。
+    let GROUND_BLEND = 0.0;
     try {
       const qs = new URLSearchParams(location.search);
       const gc = qs.get('groundcolor');
@@ -2266,9 +2272,15 @@ export class MapScene {
       const gb = qs.get('groundblend');
       if (gb !== null && Number.isFinite(Number(gb))) GROUND_BLEND = Math.max(0, Math.min(1, Number(gb)));
     } catch { /* ignore */ }
-    const GR = (GROUND_RGB[0] / 255).toFixed(4);
-    const GG = (GROUND_RGB[1] / 255).toFixed(4);
-    const GB = (GROUND_RGB[2] / 255).toFixed(4);
+    // sRGB → linear：染色将注入到 <colorspace_fragment> 之前（线性空间），
+    // 这样「离屏 RT 贴图帧」与「直绘帧」在同一空间染色，避免两条路径颜色不一致导致闪烁。
+    const srgb2lin = (c8: number) => {
+      const c = c8 / 255;
+      return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+    };
+    const GR = srgb2lin(GROUND_RGB[0]).toFixed(5);
+    const GG = srgb2lin(GROUND_RGB[1]).toFixed(5);
+    const GB = srgb2lin(GROUND_RGB[2]).toFixed(5);
 
     // 找白板网格
     const grounds: THREE.Mesh[] = [];
@@ -2335,10 +2347,17 @@ export class MapScene {
                  diffuseColor.a *= maskA;`,
               );
               // 轮廓内白板染成底图色（与高德浅绿一致），再经 alpha 裁剪后露出底图。
+              // 🔴 关键：必须注入在 <colorspace_fragment> 【之前】的线性空间。
+              //   之前注入在其后（sRGB 空间）时：离屏 RT 默认 NoColorSpace，场景渲进 RT 时
+              //   <colorspace_fragment> 是 no-op，sRGB 染色值被当线性值存进 RT；静止帧 blit 时
+              //   才做 linear→sRGB 编码 → 0.706 被提亮成 0.859(219)，而活动帧直绘直接输出 180。
+              //   静止「贴图帧」与活动「直绘帧」交替 → 琴剑楼底部大片地面绿光闪烁。
+              //   改到线性空间染色后，两条路径都用同一线性目标色，各自的颜色空间转换由各自
+              //   路径完成，最终 sRGB 输出一致 → 不再闪。
               shader.fragmentShader = shader.fragmentShader.replace(
                 '#include <colorspace_fragment>',
-                `#include <colorspace_fragment>
-                 gl_FragColor.rgb = mix(gl_FragColor.rgb, vec3(${GR}, ${GG}, ${GB}), ${GROUND_BLEND.toFixed(3)});`,
+                `gl_FragColor.rgb = mix(gl_FragColor.rgb, vec3(${GR}, ${GG}, ${GB}), ${GROUND_BLEND.toFixed(3)});
+                 #include <colorspace_fragment>`,
               );
               shader.uniforms.uGroundMask = { value: maskTex };
             };

@@ -453,8 +453,9 @@ export class MapScene {
       nx !== null && Number.isFinite(Number(nx)) ? Number(nx) : cfgNudge[0],
       ny !== null && Number.isFinite(Number(ny)) ? Number(ny) : cfgNudge[1],
     ];
-    // 底图样式：URL ?mapstyle=normal|light|grey|whitesmoke|dark 可临时覆盖，方便不重新构建就对比
-    // 哪种样式周边要素丰富、与模型最融合。whitesmoke(远山黛) 极简、POI/建筑天然稀少，是"光秃秃"的主因。
+    // 底图样式：URL ?mapstyle=normal|light|grey|whitesmoke|dark 可临时覆盖，方便不重新构建就对比。
+    // 默认已切 whitesmoke(远山黛) 浅灰白：低饱和、素雅，与模型白砖地皮衔接；
+    // 配上 mapFeatures 只留 bg+road，POI(民宿等) 与周边白模不再出现，正是当前要求的"只保留道路和水系"。
     const urlStyle = urlParams.get('mapstyle');
     const STYLE_ALIAS: Record<string, string> = {
       normal: 'normal', light: 'light', grey: 'grey', whitesmoke: 'whitesmoke',

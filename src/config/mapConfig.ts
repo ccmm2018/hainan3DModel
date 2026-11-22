@@ -219,8 +219,11 @@ export const DEFAULT_SCENE_CONFIG: SceneConfig = {
   // 下限 0 = 正上方俯视。
   maxPitch: 75,
   minPitch: 0,
-  // 数字孪生底色：浅灰白底图，周边建筑以浅灰「白模」呈现，路网/绿地/水系清晰可见
-  mapStyle: 'amap://styles/normal',
+  // 浅色素雅底图（用户要求）：whitesmoke「远山黛」为高德内置灰白风格，底色/空地/省道
+  // 均为低饱和灰白，与模型自带的白砖地皮自然衔接，不再有 normal 样式的大片亮绿草地。
+  // 历史：曾用 normal（亮绿底）配「周边要素全开」追求融合感，但底图太花、POI 标注
+  // （民宿/酒店之类）突兀；现按新要求改为浅色素雅 + 底图降噪。
+  mapStyle: 'amap://styles/whitesmoke',
   // 末尾的 ?v= 缓存破坏参数：强制浏览器丢弃旧版 GLB 缓存、重新下载。
   // 背景：模型里曾有一块「琴剑楼旁的小方块」（仅存在于本地 Blender 源，从未进网页 GLB），
   // 但部分浏览器缓存了更早含该方块的旧导出，导致刷新后仍显示。模型文件本身已干净，
@@ -299,15 +302,16 @@ export const DEFAULT_SCENE_CONFIG: SceneConfig = {
     'B_C0_New_01': '教学楼',
     'NewBox_O1_SW': '教学楼',
   },
-  // 周边要素全开：让模型所在地与真实地图融合（用户要求"其余要和周边融合在一起"）。
-  // ⚠️ 高德 setFeatures 只支持 4 种取值：bg(区域面) / point(兴趣点) / road(道路及路名) / building(建筑物)。
-  //    没有 'label' 这一项——文字标注由地图构造参数 showLabel 控制，不归 setFeatures。
-  // 全部开满：building 周边白模 + point POI 图标 + road 路网路名 + bg 底图。
-  // 代价：平移/缩放时高德要重绘这些矢量要素，CPU 比原来（仅 bg+road）略高。
-  // 低配环境默认会二次剔除 building；这里用 forceShowMapFeatures=true 强制保留，
-  // 因为"周边融合"是本次的核心诉求，不能被低配策略悄悄关掉。
-  mapFeatures: ['bg', 'road', 'building', 'point'],
-  forceShowMapFeatures: true,
+  // 底图降噪（用户要求"只保留道路和水系、隐藏民宿之类无关标注"）：
+  // ⚠️ 高德 setFeatures 只支持 4 种取值：bg(区域面，含水系/绿地) / point(兴趣点 POI) /
+  //    road(道路及路名) / building(建筑物白模)。没有 'label'——文字由 showLabel 单独控制。
+  // - 保留 bg：水系、空地区域面，是"只保留道路和水系"里的水系来源；
+  // - 保留 road：省道/路名，"民宿"等无关 POI 文字标注属于 point，关掉后不再出现；
+  // - 去掉 point：隐藏民宿/酒店/商铺等全部兴趣点图标与文字；
+  // - 去掉 building：周边 3D 白模既抢眼又费 CPU，关掉后底图更素雅、弱机平移更流畅。
+  // showLabel 仍为 true：路名（220 省道等）属于道路，需要保留。
+  mapFeatures: ['bg', 'road'],
+  forceShowMapFeatures: false,
   showLabel: true,
   // 隐藏 Blender 一并导出的辅助几何（女儿墙/廊架/骨架/空物体），只留楼本体可见；
   // 具体的「可点击 / 可选中」范围由 buildingNodeNames 单独控制（数字 0–25 才是建筑）。

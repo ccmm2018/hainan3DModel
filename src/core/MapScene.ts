@@ -799,7 +799,7 @@ export class MapScene {
     const deviceDpr = window.devicePixelRatio || 1;
     const pixelCap = lowEnd && !this.qualityBoost ? 1 : 1.5;
     const effPr = this.qualityBoost
-      ? Math.min(Math.max(deviceDpr, 1.35), pixelCap)
+      ? Math.min(Math.max(deviceDpr, MapScene.QUALITY_SS), pixelCap)
       : Math.min(deviceDpr, pixelCap);
     this.renderer.setPixelRatio(effPr);
     this.renderer.setSize(width, height, false);
@@ -4690,23 +4690,28 @@ export class MapScene {
 
   /**
    * 离屏 RT 相对 drawingBuffer 的超采样倍率（1 = 不超采样）。
-   * WebGL1 无硬件 MSAA，靠放大 RT 再 downsample 抗锯齿。但低 DPI 屏的 pixelRatio 已主动抬到 1.35
-   * （全屏 SSAA），再叠一层 1.35x 会翻倍填充率；故「相对 CSS 的总超采样」封顶 QUALITY_SS：
-   * pr 已抬多少，RT 就少叠多少。pr 未抬升（老路径 / ?q=low）时退化为原样 QUALITY_SS。
+   * WebGL1 无硬件 MSAA，靠放大 RT 再 downsample 抗锯齿——这是高德共享 context 下唯一真正能落地的抗锯齿手段。
+   *
+   * ⚠️ 修正：旧逻辑用「名义 pixelRatio / deviceDpr」抵扣超采样（ss = QUALITY_SS / (pr / dpr)），
+   * 低分屏 dpr=1 时 pixelRatio 名义抬到 1.35，恰好把 1.35 抵扣成 1.00x。但高德托管画布的真实
+   * drawingBuffer 由地图控制，renderer.setPixelRatio(1.35) 往往落不到实际像素上（名义抬升、实际未变），
+   * 若据此把 RT 倍率算成 1.00 就等于完全没超采样、锐化也被判「无 downsample」自动关 → 依然糊。
+   * 故 WebGL1 + 画质增强档下直接返回档位倍率 QUALITY_SS（与像素比共用同一档位值），真正放大 RT
+   * 再由 LinearFilter downsample 缩回屏幕，锐化随之按倍率自动生效。
    */
   private supersampleFactor(): number {
     const isWebGL2 = !!this.renderer?.capabilities?.isWebGL2;
     if (!this.qualityBoost || isWebGL2) return 1;
-    const deviceDpr = window.devicePixelRatio || 1;
-    const pr = this.renderer?.getPixelRatio() ?? 1;
-    return Math.max(1, MapScene.QUALITY_SS / Math.max(1, pr / deviceDpr));
+    return MapScene.QUALITY_SS;
   }
 
   /**
    * 实际注入的锐化强度。锐化的初衷是补偿「超采样 downsample 造成的模糊」——
-   * 只有当 RT 比 drawingBuffer 大（ss>1，确实发生了 downsample）时才有blur可补偿。
-   * 若 ss=1（如 dpr=1 的低端显示器：DPR 提升已吃掉超采样份额，RT 与屏幕等大、无 downsample），
-   * 锐化就是无补偿的纯锐化，会放大边缘高频 → 近看锯齿。故按超采样比例线性缩放：ss=1 时归零。
+   * 只有当 RT 比 drawingBuffer 大（ss>1，确实发生了 downsample）时才有 blur 可补偿，
+   * 此时按超采样比例给出强度（ss=QUALITY_SS → 满强度 QUALITY_SHARP）。
+   * 若 ss=1（WebGL2 走硬件 MSAA / ?q=low 关闭画质增强：无 downsample），锐化就是无补偿的
+   * 纯锐化，会放大边缘高频 → 近看锯齿，故归零。低分屏 WebGL1 + 画质增强下 ss 现在恒为
+   * QUALITY_SS（见 supersampleFactor 修正），锐化不再被误判「无 downsample」关掉。
    */
   private effectiveSharp(): number {
     const ss = this.supersampleFactor();

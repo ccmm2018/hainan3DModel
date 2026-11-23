@@ -23,6 +23,16 @@ import { ROOM_STATUS_CONFIG, type Room } from '../data/roomData';
 const SCENE_T0 = performance.now();
 
 /**
+ * 地图缩放级别范围。默认自适应取景 zoom≈18.65；原先下限放到 3，用户滚轮一直缩小
+ * 会让模型缩成一个小点直到看不见。下限抬到 18.3（非常接近默认取景，只低约 0.35 级，
+ * 缩到最小模型仍几乎占满画面，同时给取景计算留一点余量、避免正常取景被钳到此值），
+ * 上限维持 20（高德最大值，放大看细节不受影响）。
+ * 可用 URL ?minzoom= 覆盖下限（排查/自定义时用）。
+ */
+const MIN_ZOOM_DEFAULT = 18.3;
+const MAX_ZOOM = 20;
+
+/**
  * 淡雾（大气透视）配置：让远处楼栋略微发白、融入灰白底图，弱化"贴纸感"。
  * - FOG_COLOR 取浅灰白，与 whitesmoke 底图同色系，远处才自然衔接而非蒙一层雾蓝；
  * - 雾的 near/far 不写死：模型尺度 ~700m，而相机随缩放/俯仰在 200~2300m 间大幅变化，
@@ -170,6 +180,8 @@ export class MapScene {
   private map: any = null;
   private customCoords: any = null;
   private glLayer: any = null;
+  /** 地图缩放下限（阻止模型被缩成小点消失）；URL ?minzoom= 可覆盖，默认 MIN_ZOOM_DEFAULT */
+  private minZoom = MIN_ZOOM_DEFAULT;
 
   private renderer: THREE.WebGLRenderer | null = null;
   private lowEnd = false; // 低配设备标记：用于降低渲染负载（关阴影 / 跳过 PMREM / 像素比封顶）
@@ -473,6 +485,11 @@ export class MapScene {
       nx !== null && Number.isFinite(Number(nx)) ? Number(nx) : cfgNudge[0],
       ny !== null && Number.isFinite(Number(ny)) ? Number(ny) : cfgNudge[1],
     ];
+    // 缩放下限：URL ?minzoom= 可临时覆盖（须 < MAX_ZOOM），防止模型被缩成小点消失。
+    const mz = urlParams.get('minzoom');
+    if (mz !== null && Number.isFinite(Number(mz))) {
+      this.minZoom = Math.min(MAX_ZOOM - 0.5, Math.max(1, Number(mz)));
+    }
     // 底图样式：URL ?mapstyle=normal|light|grey|whitesmoke|dark 可临时覆盖，方便不重新构建就对比。
     // 默认已切 whitesmoke(远山黛) 浅灰白：低饱和、素雅，与模型白砖地皮衔接；
     // 配上 mapFeatures 只留 bg+road，POI(民宿等) 与周边白模不再出现，正是当前要求的"只保留道路和水系"。
@@ -493,7 +510,7 @@ export class MapScene {
       rotation: initialRotation,
       viewMode: '3D',
       mapStyle,
-      zooms: [3, 20],
+      zooms: [this.minZoom, MAX_ZOOM],
       showLabel: this.config.showLabel,
       rotationEnable: true,
     });
@@ -1502,15 +1519,15 @@ export class MapScene {
     const [wlng, wlat] = this.worldToWgs84(look);
     let fitCenter: [number, number] = wgs84ToGcj02(wlng, wlat);
 
-    // 距离 → 缩放级别：d ∝ 2^(-zoom)，以实测 (zoom0, dist0) 为基准换算；夹在地图缩放范围 [3, 20] 内
-    const zoomFit = Math.min(Math.max(zoom0 + Math.log2(dist0 / fit.d), 3), 20);
+    // 距离 → 缩放级别：d ∝ 2^(-zoom)，以实测 (zoom0, dist0) 为基准换算；夹在地图缩放范围 [minZoom, MAX_ZOOM] 内
+    const zoomFit = Math.min(Math.max(zoom0 + Math.log2(dist0 / fit.d), this.minZoom), MAX_ZOOM);
     // 先应用自适应俯仰角（config.maxPitch 已放宽到与 PITCH_MAX 一致，不会被俯仰钳制拉回）
     this.setPitchSafe(pitch);
     // URL ?zoomout=<级别数>：在自适应取景基础上拉远，让周边地图露出，验证"模型与地图融合"效果。
     // 例 ?zoomout=1.2 约把可视范围放大 2.3 倍。默认 0（保持原有铺满取景）。
     const zuRaw = new URLSearchParams(location.search).get('zoomout');
     const zoomOut = zuRaw !== null && Number.isFinite(Number(zuRaw)) ? Number(zuRaw) : 0;
-    const finalZoom = +(zoomFit + ZOOM_BONUS - zoomOut).toFixed(3);
+    const finalZoom = +Math.min(Math.max(zoomFit + ZOOM_BONUS - zoomOut, this.minZoom), MAX_ZOOM).toFixed(3);
     // 在「刚好填满」基础上额外放大一点点（ZOOM_BONUS），让模型显得更大些
     this.map.setZoomAndCenter(finalZoom, fitCenter, true);
 

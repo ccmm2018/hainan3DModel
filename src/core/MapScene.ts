@@ -51,6 +51,20 @@ const DRAG_ENABLE_DEFAULT = true;
 const PAN_LIMIT_METERS_DEFAULT = 80;
 
 /**
+ * 地图视野扩张：把模型 scale 乘 2^n 放大（n=MAP_ZOOM_OUT_DEFAULT）。
+ * 自适应取景会以放大后的模型重算——取景距离变大（实测 686→954m）、zoom 自动减小约 n 级，
+ * 于是"地图瓦片覆盖范围变大、模型屏幕大小不变"，四周露出更多真实地图（省道、空地），
+ * 远景不再"模型直接顶到天际线"，解决"地图显示区域很小"的视觉错觉。
+ * pitch=73 的天际线位置由俯仰角决定、与 zoom 无关，单纯缩地图不改变天际线位置；
+ * 此方案是在保持模型主体大小不变的前提下拉开地图视野。
+ *
+ * ⚠️ 不要在 finalZoom 里再手动减 n：模型放大已令取景自动拉远，重复会双重拉远让模型变小。
+ * 配套：地图 zooms 下限放宽 n 级（MIN_ZOOM_DEFAULT - n），否则自动算出的 zoom 被 clamp 回下限。
+ * URL ?mapzoomout=<n> 覆盖（0=关闭，回到取景即贴天际线的旧观感）。
+ */
+const MAP_ZOOM_OUT_DEFAULT = 0.5;
+
+/**
  * 淡雾（大气透视）配置：让远处楼栋略微发白、融入灰白底图，弱化"贴纸感"。
  * - FOG_COLOR 取浅灰白，与 whitesmoke 底图同色系，远处才自然衔接而非蒙一层雾蓝；
  * - 雾的 near/far 不写死：模型尺度 ~700m，而相机随缩放/俯仰在 200~2300m 间大幅变化，
@@ -202,6 +216,8 @@ export class MapScene {
   private dragEnable = DRAG_ENABLE_DEFAULT;
   /** 拖动范围半幅（米）；URL ?panrange= 可覆盖，0 = 不限制 */
   private panRangeMeters = PAN_LIMIT_METERS_DEFAULT;
+  /** 地图视野扩张：取景 zoom 再减多少级、模型 scale 乘 2^n 补偿；URL ?mapzoomout= 可覆盖，0=关闭 */
+  private mapZoomOut = MAP_ZOOM_OUT_DEFAULT;
   /** 当前拖动边界的锚点中心 [lng, lat]（GCJ-02）；取景/定位完成后由 map.getCenter() 记录 */
   private panAnchor: [number, number] | null = null;
   /** 定位动画落位后重建边界的防抖定时器：连续定位只以最后一次的中心为准 */
@@ -515,11 +531,20 @@ export class MapScene {
       nx !== null && Number.isFinite(Number(nx)) ? Number(nx) : cfgNudge[0],
       ny !== null && Number.isFinite(Number(ny)) ? Number(ny) : cfgNudge[1],
     ];
-    // 缩放下限：URL ?minzoom= 可临时覆盖（须 < MAX_ZOOM），防止模型被缩成小点消失。
-    const mz = urlParams.get('minzoom');
-    if (mz !== null && Number.isFinite(Number(mz))) {
-      this.minZoom = Math.min(MAX_ZOOM - 0.5, Math.max(1, Number(mz)));
+    // 地图视野扩张：?mapzoomout=<n> 取景 zoom 再减 n 级、模型 scale ×2^n 补偿（保持屏幕大小）。
+    // 需在缩放下限之前解析：因为取景 zoom 减小后，下限也要相应放宽，否则被 clamp 回下限而失效。
+    const mzoRaw = urlParams.get('mapzoomout');
+    if (mzoRaw !== null && Number.isFinite(Number(mzoRaw))) {
+      this.mapZoomOut = Math.max(0, Math.min(2, Number(mzoRaw)));
     }
+    // 缩放下限：URL ?minzoom= 可临时覆盖（须 < MAX_ZOOM），防止模型被缩成小点消失。
+    // 减去 mapZoomOut：取景 zoom 被主动降低了 n 级，下限同步放宽 n 级才不会把取景 clamp 回去。
+    // 视觉上模型 scale 也放大了 2^n，故最小缩放时模型的视觉大小与调整前一致。
+    const mz = urlParams.get('minzoom');
+    this.minZoom = mz !== null && Number.isFinite(Number(mz))
+      ? Math.min(MAX_ZOOM - 0.5, Math.max(1, Number(mz)))
+      : MIN_ZOOM_DEFAULT;
+    this.minZoom = Math.max(1, this.minZoom - this.mapZoomOut);
     // 拖拽平移：默认允许（小范围拖动）；URL ?drag=0 禁用（锁死居中），?drag=1 显式允许。
     const dragRaw = urlParams.get('drag');
     if (dragRaw === '1') this.dragEnable = true;
@@ -1574,6 +1599,9 @@ export class MapScene {
     // 例 ?zoomout=1.2 约把可视范围放大 2.3 倍。默认 0（保持原有铺满取景）。
     const zuRaw = new URLSearchParams(location.search).get('zoomout');
     const zoomOut = zuRaw !== null && Number.isFinite(Number(zuRaw)) ? Number(zuRaw) : 0;
+    // 注意：mapZoomOut 不在这里手动减。模型 scale 已乘 2^mapZoomOut 放大，自适应取景会
+    // 自动把 zoom 拉远相应级数（实测放大 1.414× → 取景距离 686→954m → zoom 自动 -0.5），
+    // 于是"地图视野变大 + 模型屏幕大小不变"自动成立；这里再减会双重拉远导致模型变小。
     const finalZoom = +Math.min(Math.max(zoomFit + ZOOM_BONUS - zoomOut, this.minZoom), MAX_ZOOM).toFixed(3);
     // 在「刚好填满」基础上额外放大一点点（ZOOM_BONUS），让模型显得更大些
     this.map.setZoomAndCenter(finalZoom, fitCenter, true);
@@ -2531,7 +2559,8 @@ export class MapScene {
     );
 
     this.modelRoot.position.set(this.anchorWorld.x, this.anchorWorld.y, this.anchorWorld.z);
-    this.modelRoot.scale.setScalar(this.config.modelScale);
+    // 地图 zoom 减小 n 级 → 模型 scale ×2^n 补偿，保持模型屏幕大小不变
+    this.modelRoot.scale.setScalar(this.config.modelScale * this.modelScaleComp);
     this.modelRoot.updateMatrixWorld(true);
 
     // 应用（叠加）校准微调量
@@ -2644,8 +2673,8 @@ export class MapScene {
       this.anchorWorld.z + c.elevation,
     );
 
-    // 缩放：config.modelScale × 校准倍率
-    this.modelRoot.scale.setScalar(this.config.modelScale * c.scale);
+    // 缩放：config.modelScale × 校准倍率 × 地图视野补偿（zoom 减小 n 级 → ×2^n，保持屏幕大小）
+    this.modelRoot.scale.setScalar(this.config.modelScale * c.scale * this.modelScaleComp);
     this.modelRoot.updateMatrixWorld(true);
     this.refreshBuildingBoxes(); // 校准后重建建筑 AABB，保证悬停粗筛与模型位置同步
     this.fogCorners = null; // 模型变换变了：淡雾角点缓存失效，下次渲染重算
@@ -4051,6 +4080,11 @@ export class MapScene {
   // -------------------------------------------------------------------------
   // 坐标与飞行定位
   // -------------------------------------------------------------------------
+
+  /** 地图视野扩张的模型补偿倍率：zoom 减小 n 级 → 模型放大 2^n 级，保持屏幕大小不变 */
+  private get modelScaleComp(): number {
+    return Math.pow(2, this.mapZoomOut);
+  }
 
   /**
    * 设置/重建拖动软边界的锚点：以「当前取景中心 / 定位后中心」为圆心，

@@ -65,6 +65,23 @@ const PAN_LIMIT_METERS_DEFAULT = 80;
 const MAP_ZOOM_OUT_DEFAULT = 0.5;
 
 /**
+ * 建筑外墙 / 窗格贴图的 mipmap LOD bias（负值）。
+ * 远糊主因是拉远时引擎自动切到低清 mip 层，窗格纹理被压成几像素；负 bias 强制多用一层更高清的 mip，
+ * 远看墙面立刻清楚一档。各向异性(8x)只救斜视发虚、救不了正对远看的窗格粘连，故需要 bias 补这一刀。
+ *
+ * three r162 的 Texture 没有 bias 属性（设了无效），真正落地方式是改 shader：
+ * 对目标材质的 map 采样从 texture2D(map,vMapUv) 改成 texture2D(map,vMapUv,uMipBias)。
+ * WebGL1 下三参数采样是 GLSL ES 1.00 标准；WebGL2 下 three 会把 texture2D 宏替换成 texture，
+ * texture(map,uv,bias) 同样合法，故两端通用。
+ *
+ * 取值范围 -0.5~-1.0：从 -0.5 试起，不够再往 -1；不要 < -1.5（远处会出噪点和闪烁）。
+ * 仅作用于建筑外墙/窗格材质（BK_Facade_* / M_GymWall / M_TeachBase / 食堂 / *Porch*），
+ * 不动地面/道路/树木/水面/天空等（这些锐化会放大噪点或产生摩尔纹）。
+ * URL ?mipbias=<值> 覆盖（0=关闭）；?mipbias=-1 加强。
+ */
+const MIP_BIAS_DEFAULT = -0.5;
+
+/**
  * 淡雾（大气透视）配置：让远处楼栋略微发白、融入灰白底图，弱化"贴纸感"。
  * - FOG_COLOR 取浅灰白，与 whitesmoke 底图同色系，远处才自然衔接而非蒙一层雾蓝；
  * - 雾的 near/far 不写死：模型尺度 ~700m，而相机随缩放/俯仰在 200~2300m 间大幅变化，
@@ -218,6 +235,8 @@ export class MapScene {
   private panRangeMeters = PAN_LIMIT_METERS_DEFAULT;
   /** 地图视野扩张：取景 zoom 再减多少级、模型 scale 乘 2^n 补偿；URL ?mapzoomout= 可覆盖，0=关闭 */
   private mapZoomOut = MAP_ZOOM_OUT_DEFAULT;
+  /** 建筑外墙贴图 mipmap LOD bias（负值=拉远时多用高清 mip）；URL ?mipbias= 可覆盖，0=关闭 */
+  private mipBias = MIP_BIAS_DEFAULT;
   /** 当前拖动边界的锚点中心 [lng, lat]（GCJ-02）；取景/定位完成后由 map.getCenter() 记录 */
   private panAnchor: [number, number] | null = null;
   /** 定位动画落位后重建边界的防抖定时器：连续定位只以最后一次的中心为准 */
@@ -536,6 +555,11 @@ export class MapScene {
     const mzoRaw = urlParams.get('mapzoomout');
     if (mzoRaw !== null && Number.isFinite(Number(mzoRaw))) {
       this.mapZoomOut = Math.max(0, Math.min(2, Number(mzoRaw)));
+    }
+    // 外墙贴图 mipmap LOD bias：?mipbias=-0.5 默认；?mipbias=0 关闭；不要 < -1.5（远处噪点/闪烁）。
+    const mibRaw = urlParams.get('mipbias');
+    if (mibRaw !== null && Number.isFinite(Number(mibRaw))) {
+      this.mipBias = Math.max(-1.5, Math.min(0, Number(mibRaw)));
     }
     // 缩放下限：URL ?minzoom= 可临时覆盖（须 < MAX_ZOOM），防止模型被缩成小点消失。
     // 减去 mapZoomOut：取景 zoom 被主动降低了 n 级，下限同步放宽 n 级才不会把取景 clamp 回去。
@@ -1261,6 +1285,11 @@ export class MapScene {
           }
         }
 
+        // ---- 建筑外墙 / 窗格贴图 mipmap LOD bias：治「拉远后墙面/窗格糊」----
+        // 远糊主因是 mip 自动切低清层，负 bias 强制多用一层高清 mip。three r162 无 Texture.bias
+        // 属性，故走 shader 注入（见 applyMipBiasToBuildings）。仅命中建筑材质，不动地面/树木等。
+        const mipBiasCount = this.applyMipBiasToBuildings(mapPairs);
+
         // 所有贴图处理完成后再挂入场景：避免在「让出帧」期间 AMap 提前渲染、把全分辨率贴图先上传一遍 GPU
         // （那样低配机器仍会先承受一次 450MB 上传峰值）。挂入后 AMap 第一次渲染拿到的就是已降级的贴图。
         this.scene!.add(this.modelRoot);
@@ -1275,6 +1304,7 @@ export class MapScene {
             `低配=${this.lowEnd}，画质增强=${this.qualityBoost ? '开' : '关/?q=low'}，设备DPR=${window.devicePixelRatio || 1}→渲染像素比=${this.renderer?.getPixelRatio() ?? '?'}，阴影=${shadowState}，`
             + `超限缩放=${clampedCount} 张，NPOT 材质降级=${npotFixed} 张，黑图替换=${materialFixed} 张，低配贴图降级=${textureReduced} 张，`
             + `各向异性=${anisoLevel}x（${anisoCount} 张贴图），`
+            + `外墙mipBias=${this.mipBias.toFixed(2)}（${mipBiasCount} 个建筑材质），`
             + `离屏超采样=${this.needsRtPath() ? this.supersampleFactor().toFixed(2) + 'x(相对屏幕)' : '关'}，`
             + `锐化=${this.qualityBoost ? this.effectiveSharp().toFixed(2) : '关'}` + (this.qualityBoost && this.supersampleFactor() <= 1 ? '(无downsample自动关)' : ''),
         );
@@ -1885,6 +1915,74 @@ export class MapScene {
   }
 
   /** 收集（材质, baseColor 贴图）去重对：黑图检测按纹理去重（同一纹理在楼栋间共享材质时只处理一次） */
+  /**
+   * 给建筑外墙 / 窗格材质的 map 采样注入 mipmap LOD bias，治「拉远后墙面/窗格糊」。
+   *
+   * 为什么改 shader 而不是设 texture.bias：three r162 的 Texture 没有 bias 属性（设了被忽略）。
+   * 唯一可靠的方式是在 onBeforeCompile 里把 map_fragment 的 texture2D(map,vMapUv)
+   * 换成带第三参数 bias 的 texture2D(map,vMapUv,uMipBias)：
+   *  - WebGL1：GLSL ES 1.00 的 texture2D(sampler,uv,bias) 是标准写法；
+   *  - WebGL2：three 会把 texture2D 宏替换成 texture，texture(sampler,uv,bias) 同样合法。
+   * 两端通用。bias 是「采样时额外加到 LOD 上的偏移」，负值→选更高清的 mip 层。
+   *
+   * 筛选：只对建筑外墙 / 窗格材质生效（BK_Facade_* / M_GymWall / M_TeachBase / 食堂 / *Porch*），
+   * 且贴图必须启用了 mipmap（NPOT 降级为 LinearFilter 的贴图没有 mip 层，bias 无意义）。
+   * 地面 / 道路 / 树木 / 水面 / 天空 / 家具不动——这些锐化会放大噪点或摩尔纹。
+   *
+   * @returns 实际注入的材质数量（用于日志确认生效）
+   */
+  private applyMipBiasToBuildings(
+    pairs: Array<{ mat: THREE.MeshStandardMaterial; tex: THREE.Texture }>,
+  ): number {
+    if (this.mipBias >= 0 || !Number.isFinite(this.mipBias)) return 0; // ≥0 = 关闭，不改任何 shader
+    // 只命中建筑外墙 / 窗格（立面砖墙、格栅、窗带、门廊墙、体育馆/教学楼墙、中文楼名材质）
+    const isFacade = (name: string): boolean =>
+      /facade|gymwall|teachbase|食堂|porch/i.test(name);
+    // 贴图是否启用了 mipmap（只有这几种 minFilter 有 mip 层；LinearFilter 是 NPOT 降级后的无 mip）
+    const hasMipmap = (tex: THREE.Texture): boolean => {
+      const mf = tex.minFilter;
+      return mf === THREE.LinearMipmapLinearFilter || mf === THREE.LinearMipmapNearestFilter
+        || mf === THREE.NearestMipmapLinearFilter || mf === THREE.NearestMipmapNearestFilter;
+    };
+
+    const patched = new Set<THREE.MeshStandardMaterial>();
+    for (const { mat, tex } of pairs) {
+      if (patched.has(mat) || !isFacade(mat.name || '') || !hasMipmap(tex)) continue;
+      patched.add(mat);
+
+      const bias = this.mipBias;
+      const prev = mat.onBeforeCompile;
+      mat.onBeforeCompile = (shader, renderer) => {
+        // 先链式执行已有的 onBeforeCompile（如地面遮罩等），避免覆盖其它注入
+        if (prev) prev.call(mat, shader, renderer);
+        // 注入 uniform；统一用 uMipBias 名，多个材质各自编译、互不影响
+        (shader.uniforms as Record<string, { value: number }>).uMipBias = { value: bias };
+        if (!shader.fragmentShader.includes('uniform float uMipBias;')) {
+          shader.fragmentShader = 'uniform float uMipBias;\n' + shader.fragmentShader;
+        }
+        // ⚠️ onBeforeCompile 阶段 #include 尚未展开（three 在之后才 resolveIncludes），
+        // 所以必须替换 include 指令本身，而不是展开后的 `vec4 sampledDiffuseColor = ...` 文本。
+        // 下面是 three r162 map_fragment.glsl.js 的等价展开（去掉仅 video texture 才用的 DECODE_VIDEO_TEXTURE 分支），
+        // 唯一改动是给 texture2D 加第三参数 uMipBias。
+        const mapInclude = '#include <map_fragment>';
+        if (shader.fragmentShader.includes(mapInclude)) {
+          shader.fragmentShader = shader.fragmentShader.replace(
+            mapInclude,
+            `#ifdef USE_MAP
+               vec4 sampledDiffuseColor = texture2D( map, vMapUv, uMipBias );
+               diffuseColor *= sampledDiffuseColor;
+             #endif`,
+          );
+        }
+      };
+      // 明确区分带 bias 的 program，避免与其它 onBeforeCompile 注入的材质共用 cache key 串台
+      mat.customProgramCacheKey = () => 'mipBias_' + bias;
+      // onBeforeCompile 变了要重编译（材质可能在之前已编译过一次）
+      mat.needsUpdate = true;
+    }
+    return patched.size;
+  }
+
   private collectMatMapPairs(
     root: THREE.Object3D,
   ): Array<{ mat: THREE.MeshStandardMaterial; tex: THREE.Texture }> {

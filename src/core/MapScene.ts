@@ -33,6 +33,24 @@ const MIN_ZOOM_DEFAULT = 18.3;
 const MAX_ZOOM = 20;
 
 /**
+ * 地图拖拽平移开关。默认允许拖拽（dragEnable=true），但用「自管理软边界」把地图中心
+ * 限制在以「实际取景中心 / 定位后中心」为锚点、半径 PAN_LIMIT_METERS_DEFAULT 的圆内：
+ * 可在圈内自由上下左右移动，到边界就拖不动（逐帧钳回、无弹跳），模型基本保持居中又不会被拖丢。
+ *
+ * 为什么不用高德 setLimitBounds：实测在 3D 斜视（pitch=73）下它对鼠标拖拽是「硬锁中心」——
+ * 连边界内的几米都一动不动（诊断：拖 500px 后 center 完全不变），做不到"小范围拖动"。
+ * 早期另一失败方案把边界中心设成「模型地理中心」，而取景中心因 viewNudge 偏了约 200m，
+ * 加载时中心贴边 → 弹簧回弹。自管理方案锚点一律取「setZoomAndCenter 后 map.getCenter() 的真实中心」。
+ *
+ * 实现：监听地图 move 事件，中心偏离锚点超过半径时用 setCenter 逐帧钳回边界圆（防重入）；
+ * flyTo / 室内 / 测量等程序化定位期间先 disablePanGuard，落位后再以新中心重建锚点并启用。
+ * URL ?drag=0 完全禁用拖拽（回退到锁死居中）；?panrange=<米> 调整半径，0 = 不限制。
+ */
+const DRAG_ENABLE_DEFAULT = true;
+/** 拖动半径（米）：地图中心可偏离锚点的最大地面距离，默认 80m（小范围、模型基本居中） */
+const PAN_LIMIT_METERS_DEFAULT = 80;
+
+/**
  * 淡雾（大气透视）配置：让远处楼栋略微发白、融入灰白底图，弱化"贴纸感"。
  * - FOG_COLOR 取浅灰白，与 whitesmoke 底图同色系，远处才自然衔接而非蒙一层雾蓝；
  * - 雾的 near/far 不写死：模型尺度 ~700m，而相机随缩放/俯仰在 200~2300m 间大幅变化，
@@ -180,6 +198,18 @@ export class MapScene {
   private map: any = null;
   private customCoords: any = null;
   private glLayer: any = null;
+  /** 是否允许拖拽平移地图；默认 true（小范围拖动），URL ?drag=0 可禁用（锁死居中） */
+  private dragEnable = DRAG_ENABLE_DEFAULT;
+  /** 拖动范围半幅（米）；URL ?panrange= 可覆盖，0 = 不限制 */
+  private panRangeMeters = PAN_LIMIT_METERS_DEFAULT;
+  /** 当前拖动边界的锚点中心 [lng, lat]（GCJ-02）；取景/定位完成后由 map.getCenter() 记录 */
+  private panAnchor: [number, number] | null = null;
+  /** 定位动画落位后重建边界的防抖定时器：连续定位只以最后一次的中心为准 */
+  private panLimitTimer: number | null = null;
+  /** 软边界钳制：程序化定位动画期间暂停，避免逐帧钳回把定位截断 */
+  private panGuardSuspended = false;
+  /** 软边界钳制重入锁：setCenter 会派发 move 事件，钳回期间屏蔽重复处理 */
+  private panGuardBusy = false;
   /** 地图缩放下限（阻止模型被缩成小点消失）；URL ?minzoom= 可覆盖，默认 MIN_ZOOM_DEFAULT */
   private minZoom = MIN_ZOOM_DEFAULT;
 
@@ -490,6 +520,15 @@ export class MapScene {
     if (mz !== null && Number.isFinite(Number(mz))) {
       this.minZoom = Math.min(MAX_ZOOM - 0.5, Math.max(1, Number(mz)));
     }
+    // 拖拽平移：默认允许（小范围拖动）；URL ?drag=0 禁用（锁死居中），?drag=1 显式允许。
+    const dragRaw = urlParams.get('drag');
+    if (dragRaw === '1') this.dragEnable = true;
+    else if (dragRaw === '0') this.dragEnable = false;
+    // 拖动范围半幅（米）：?panrange=120 放宽、?panrange=40 收紧、?panrange=0 不限制。
+    const prRaw = urlParams.get('panrange');
+    if (prRaw !== null && Number.isFinite(Number(prRaw))) {
+      this.panRangeMeters = Math.max(0, Number(prRaw));
+    }
     // 底图样式：URL ?mapstyle=normal|light|grey|whitesmoke|dark 可临时覆盖，方便不重新构建就对比。
     // 默认已切 whitesmoke(远山黛) 浅灰白：低饱和、素雅，与模型白砖地皮衔接；
     // 配上 mapFeatures 只留 bg+road，POI(民宿等) 与周边白模不再出现，正是当前要求的"只保留道路和水系"。
@@ -513,7 +552,15 @@ export class MapScene {
       zooms: [this.minZoom, MAX_ZOOM],
       showLabel: this.config.showLabel,
       rotationEnable: true,
+      // 拖拽平移默认允许，但中心被软边界限制在取景锚点 panRange 米半径内（见 onMapMoveGuard）：
+      // 可小幅上下左右移动、模型基本居中；滚轮缩放 / 右键旋转 / 点击楼栋 flyTo 不受影响。
+      dragEnable: this.dragEnable,
     });
+    // 自管理软边界：地图移动（拖拽/惯性）时钳回中心到锚点半径内。
+    // 高德 setLimitBounds 在 3D 斜视下会硬锁中心，故不能用它；改用事件监听自己钳。
+    if (this.dragEnable && this.panRangeMeters > 0) {
+      try { this.map.on('mapmove', this.onMapMoveGuard); } catch { /* ignore */ }
+    }
     // 仅当个别高德版本不认构造参数时才补设一次；发生在地图刚创建、加载遮罩尚未揭开时，
     // 用户看不到任何方位变化。构造参数已生效时不会再调用 setRotation。
     if (initialRotation !== 0 && Math.abs(Number(this.map.getRotation?.()) - initialRotation) > 0.01) {
@@ -1571,6 +1618,8 @@ export class MapScene {
     // 破坏「只换朝向、取景不变」。解析取景实测已足够准（不微调时最终 zoom 与收敛值一致）。
     if (this.lowEnd || this.initialRotation !== 0) {
       if (this.modelRoot) this.modelRoot.visible = true;
+      // 取景已定型（含 viewNudge 平移）：以当前真实中心为锚点设拖动边界
+      this.applyPanLimit();
       return; // 不挂 fitRefine → loadModel 中 `if (!this.fitRefine) onFitComplete()` 会照常揭开遮罩
     }
 
@@ -1600,6 +1649,8 @@ export class MapScene {
   private endFitRefine(): void {
     if (!this.fitRefine) return; // 幂等：重复调用不重复回调
     this.fitRefine = null;
+    // 逐帧微调结束，中心已收敛到最终值：以此设拖动边界锚点（必须在微调后，否则锚点是过程值）
+    this.applyPanLimit();
     if (this.loadStartTs && this.onLoadEntryTs) {
       const parseMs = Math.round(this.onLoadEntryTs - this.loadStartTs);
       const postMs = Math.round(performance.now() - this.onLoadEntryTs);
@@ -3386,7 +3437,7 @@ export class MapScene {
     building.getWorldPosition(wp);
     const [lng, lat] = this.worldToWgs84(wp);
     const [glng, glat] = wgs84ToGcj02(lng, lat);
-    this.map.setZoomAndCenter(this.config.indoorZoom, [glng, glat], false, 500);
+    this.setCenterBeyondLimit(this.config.indoorZoom, [glng, glat], false, 500);
     this.setPitchSafe(this.config.indoorPitch);
 
     this.reserveFloorGroups(building, this.config.defaultFloorCount);
@@ -3403,7 +3454,7 @@ export class MapScene {
     this.indoorTarget = null;
     if (this.savedCamera && this.map) {
       const [glng, glat] = this.savedCamera.center;
-      this.map.setZoomAndCenter(this.savedCamera.zoom, [glng, glat], false, 500);
+      this.setCenterBeyondLimit(this.savedCamera.zoom, [glng, glat], false, 500);
       this.setPitchSafe(this.savedCamera.pitch);
       this.map.setRotation(this.savedCamera.rotation);
       this.savedCamera = null;
@@ -3515,7 +3566,7 @@ export class MapScene {
     this.savedCameraForMeasure = null;
     if (!s || !this.map) return;
     const [glng, glat] = s.center;
-    this.map.setZoomAndCenter(s.zoom, [glng, glat], false, 500);
+    this.setCenterBeyondLimit(s.zoom, [glng, glat], false, 500);
     this.setPitchSafe(s.pitch);
     this.map.setRotation(s.rotation);
     this.markDirty();
@@ -4001,6 +4052,94 @@ export class MapScene {
   // 坐标与飞行定位
   // -------------------------------------------------------------------------
 
+  /**
+   * 设置/重建拖动软边界的锚点：以「当前取景中心 / 定位后中心」为圆心，
+   * 之后地图中心只能在半径 panRangeMeters 米内移动（由 onMapMoveGuard 逐帧钳回）。
+   *
+   * 锚点必须用「实际生效的地图中心」（map.getCenter()），而非模型地理中心：
+   * viewNudge 已把取景中心平移约 200m，用模型中心会让加载时中心贴在边界一侧、一拖就弹簧回弹。
+   * 每次取景收敛 / flyTo 落位后都重设一次锚点（跟随定位中心）。
+   *
+   * 不用高德 setLimitBounds：实测 3D 斜视下它对拖拽是硬锁中心（连边界内几米都不动），
+   * 无法实现"小范围拖动"。改为自己监听 move 事件钳回，到边界有阻尼、无弹跳。
+   *
+   * @param center 可选：显式锚点（GCJ-02 [lng,lat]）；不传则取当前 map.getCenter()。
+   */
+  private applyPanLimit(center?: [number, number]): void {
+    if (!this.map || !this.dragEnable || this.panRangeMeters <= 0) return;
+    let anchor: [number, number] | null = null;
+    if (center) {
+      anchor = center;
+    } else {
+      try {
+        const c = this.map.getCenter();
+        anchor = [c.getLng(), c.getLat()];
+      } catch { /* ignore */ }
+    }
+    if (!anchor) return;
+    this.panAnchor = anchor;
+    this.panGuardSuspended = false; // 重建锚点即恢复钳制
+    // eslint-disable-next-line no-console
+    console.info(
+      `[MapScene] 拖动范围：锚点[${anchor[0].toFixed(5)},${anchor[1].toFixed(5)}] 半径 ${this.panRangeMeters}m`,
+    );
+  }
+
+  /** 临时禁用软边界钳制：程序化 flyTo / setZoomAndCenter 期间调用，避免定位过程被逐帧钳回截断。
+   *  落位后须再调 applyPanLimit()（内部会自动恢复钳制）。 */
+  private clearPanLimit(): void {
+    this.panAnchor = null;
+    this.panGuardSuspended = true;
+  }
+
+  /** 地图移动时钳回中心：偏离锚点超过半径就沿连线钳到边界圆上（逐帧、无弹跳）。
+   *  仅在用户拖拽态生效；程序化定位期间 panAnchor=null 或 panGuardSuspended=true 会跳过。 */
+  private onMapMoveGuard = (): void => {
+    if (!this.map || !this.panAnchor || this.panRangeMeters <= 0) return;
+    if (this.panGuardSuspended || this.panGuardBusy) return;
+    let c: any;
+    try { c = this.map.getCenter(); } catch { return; }
+    if (!c) return;
+    const lng = c.getLng(), lat = c.getLat();
+    const [aLng, aLat] = this.panAnchor;
+    // 经纬度差 → 米（局部平面近似，校园 ~700m 尺度足够精确）
+    const dx = (lng - aLng) * R_METERS_PER_DEG * Math.max(Math.cos(aLat * Math.PI / 180), 0.01);
+    const dy = (lat - aLat) * R_METERS_PER_DEG;
+    const dist = Math.hypot(dx, dy);
+    if (dist <= this.panRangeMeters) return; // 在圈内：不干预，自由拖动
+    // 超界：钳回边界圆上（保留方向，只截长度）
+    const scale = this.panRangeMeters / dist;
+    const clng = aLng + (lng - aLng) * scale;
+    const clat = aLat + (lat - aLat) * scale;
+    this.panGuardBusy = true;
+    try {
+      this.map.setCenter([clng, clat]);
+    } catch { /* ignore */ }
+    finally {
+      // setCenter 可能同步派发 move 事件，用微任务解锁避免重入；连续拖拽的下一帧再钳。
+      queueMicrotask(() => { this.panGuardBusy = false; });
+    }
+  };
+
+  /** 动画落位后以新中心重建锚点（防抖）：连续定位只保留最后一次。 */
+  private schedulePanLimit(delay: number): void {
+    if (this.panLimitTimer !== null) window.clearTimeout(this.panLimitTimer);
+    this.panLimitTimer = window.setTimeout(() => {
+      this.panLimitTimer = null;
+      this.applyPanLimit();
+    }, delay);
+  }
+
+  /** 程序化把地图中心设到任意点（可能超出当前拖动边界）的统一封装：
+   *  暂停钳制 → 设中心 → 动画落位后以新中心重建锚点并恢复钳制。
+   *  供室内视角 / 测量视角恢复等不走 flyTo 的定位路径使用。 */
+  private setCenterBeyondLimit(zoom: number, center: [number, number], immediate: boolean, duration: number): void {
+    if (!this.map) return;
+    this.clearPanLimit(); // 内部已 suspend 钳制
+    this.map.setZoomAndCenter(zoom, center, immediate, duration);
+    this.schedulePanLimit((duration || 0) + 160);
+  }
+
   /** 世界坐标（customCoords 空间）→ WGS84 经纬度（反向墨卡托） */
   worldToWgs84(worldPos: THREE.Vector3): [number, number] {
     const dx = worldPos.x - this.anchorWorld.x;
@@ -4046,7 +4185,12 @@ export class MapScene {
     } catch {
       /* ignore */
     }
+    // 程序化定位前先解除边界，否则目标中心若在原锚点 ±panRange 之外会被 clamp，定位失败。
+    this.clearPanLimit();
     this.map.setZoomAndCenter(zoom ?? this.map.getZoom(), [glng, glat], false, 600);
+    // 边界重建走防抖调度（不挂在 moveend 上）：moveend 可能在动画中途触发，
+    // 若那时就设边界，飞行中间帧中心会被 clamp、楼栋定位被截断。固定等动画时长后再设最稳。
+    this.schedulePanLimit(760);
     window.setTimeout(done, 750);
   }
 
@@ -4776,6 +4920,9 @@ export class MapScene {
     this.fogCorners = null;
     if (this.scene) this.scene.fog = null;
     if (this.interactTimer) { clearTimeout(this.interactTimer); this.interactTimer = null; }
+    if (this.panLimitTimer !== null) { window.clearTimeout(this.panLimitTimer); this.panLimitTimer = null; }
+    try { this.map?.off?.('mapmove', this.onMapMoveGuard); } catch { /* ignore */ }
+    this.panAnchor = null;
     this.interacting = false;
     this.blitScene?.traverse((o) => {
       const m = o as THREE.Mesh;

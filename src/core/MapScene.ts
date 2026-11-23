@@ -29,7 +29,7 @@ const SCENE_T0 = performance.now();
  *   固定值会"拉近没雾、拉远全白"。故每帧按相机到模型包围盒的实际距离自适应（见 refreshFog）。
  * - 强度按「最远角点处的雾因子」控制：0.45 = 最远处混入约 45% 雾色，远处明显发白但楼体仍清晰可辨
  *   （实测 0.34 太淡几乎看不出、0.60 偏浓会糊掉远处楼栋，0.45 是"轻微淡雾"平衡点）。
- *   URL ?fog=0 关闭；?fogamount=0.5 调强度（0~1）。
+ *   默认关闭（用户要求去掉迷雾）；需要时 URL ?fog=1 重新开启，?fogamount=0.5 调强度（0~1）。
  */
 const FOG_COLOR = '#e9ecee';
 const FOG_AMOUNT_DEFAULT = 0.45;
@@ -364,8 +364,8 @@ export class MapScene {
   private groundMaskTexture: THREE.Texture | null = null;
 
   // —— 淡雾（大气透视）——
-  /** 是否启用淡雾；URL ?fog=0 关闭。低配下依然启用：three 雾是逐片元一次 mix，开销可忽略 */
-  private fogEnabled = true;
+  /** 是否启用淡雾；默认关闭（用户要求去掉迷雾），URL ?fog=1 可重新开启 */
+  private fogEnabled = false;
   /** 雾强度（最远角点处雾因子），URL ?fogamount= 覆盖 */
   private fogAmount = FOG_AMOUNT_DEFAULT;
   /** 模型包围盒（8 个世界角点，缓存），用于按相机距离自适应雾 near/far */
@@ -734,10 +734,10 @@ export class MapScene {
     // 淡雾：near/far 先给占位值，模型就绪后由 refreshFog() 按相机实际距离自适应。
     // three 的雾在片元着色器里把颜色 mix 向雾色，对透明像素只改 rgb 不改 alpha，
     // 故不会破坏白板遮罩的透明裁剪（轮廓外仍透出底图）。
-    // URL 调试开关：?fog=0 关闭，?fogamount=0.5 调强度。
+    // URL 调试开关：默认无雾；?fog=1 重新开启，?fogamount=0.5 调强度。
     try {
       const qs = new URLSearchParams(location.search);
-      if (qs.get('fog') === '0') this.fogEnabled = false;
+      if (qs.get('fog') === '1') this.fogEnabled = true;
       const fa = Number(qs.get('fogamount'));
       if (Number.isFinite(fa) && qs.get('fogamount') !== null) {
         this.fogAmount = Math.max(0, Math.min(1, fa));

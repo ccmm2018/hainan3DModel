@@ -1,8 +1,18 @@
 <template>
   <div class="csd-mask" @click.self="$emit('close')">
-    <div class="csd-dialog" role="dialog" aria-modal="true" aria-label="校区数据统计">
-      <!-- 顶部：标题 + 校区下拉（两 Tab 共用）+ 关闭 -->
-      <div class="csd-head">
+    <div
+      class="csd-dialog"
+      :class="{ 'csd-dialog--max': maximized }"
+      :style="maximized ? undefined : { transform: `translate(${dragOffset.x}px, ${dragOffset.y}px)` }"
+      role="dialog" aria-modal="true" aria-label="校区数据统计"
+    >
+      <!-- 顶部：标题 + 校区下拉（两 Tab 共用）+ 最大化 / 关闭 -->
+      <div
+        class="csd-head"
+        :class="{ 'csd-head--dragging': dragging, 'csd-head--movable': !maximized }"
+        @pointerdown="onHeadPointerDown"
+        @dblclick="onHeadDoubleClick"
+      >
         <div class="csd-head__title">
           <span class="csd-head__dot"></span>
           <strong>校区数据统计</strong>
@@ -14,6 +24,19 @@
             <option v-for="c in campuses" :key="c" :value="c">{{ c }}</option>
           </select>
         </label>
+        <button
+          class="csd-max"
+          :aria-label="maximized ? '还原窗口' : '最大化窗口'"
+          :title="maximized ? '还原窗口' : '最大化窗口'"
+          @click="toggleMaximized"
+        >
+          <svg v-if="!maximized" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+            <path d="M2 6V2h4M10 2h4v4M14 10v4h-4M6 14H2v-4" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
+          </svg>
+          <svg v-else viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+            <path d="M5.5 2H14v8.5M2 5.5v8H10.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
+          </svg>
+        </button>
         <button class="csd-close" aria-label="关闭" @click="$emit('close')">×</button>
       </div>
 
@@ -215,7 +238,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, reactive, ref, watch } from 'vue';
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
 import {
   BUILDING_CATEGORIES, CAMPUS_ORDER, OTHER_CATEGORY, resolveBizCategory,
   buildModelBuildingStats,
@@ -233,6 +256,70 @@ const props = defineProps<{
   modelBuildingList?: ModelBuildingStat[];
 }>();
 defineEmits<{ (e: 'close'): void }>();
+
+// ---------------------------------------------------------------------------
+// 弹窗窗口化：标题栏拖拽 + 最大化
+// 拖拽用「相对居中位置的偏移」实现，保留原有 flex 居中布局；
+// 最大化时偏移归零并禁用拖拽，退出最大化后回到居中原位。
+// ---------------------------------------------------------------------------
+const maximized = ref(false);
+const dragging = ref(false);
+const dragOffset = reactive({ x: 0, y: 0 });
+let dragStart: { px: number; py: number; ox: number; oy: number } | null = null;
+
+/** 标题栏按下：下拉框/按钮等控件上不启动拖拽，最大化状态下也不可拖 */
+function onHeadPointerDown(e: PointerEvent): void {
+  if (maximized.value) return;
+  const t = e.target as HTMLElement | null;
+  if (t?.closest('button, select, input, label')) return;
+  dragging.value = true;
+  dragStart = { px: e.clientX, py: e.clientY, ox: dragOffset.x, oy: dragOffset.y };
+  e.preventDefault(); // 拖动时不要选中标题文字
+}
+
+function onWindowPointerMove(e: PointerEvent): void {
+  if (!dragging.value || !dragStart) return;
+  // 边界夹取：弹窗中心最多偏到视口边缘留 120px 处，避免整个拖出屏幕找不回来
+  const maxX = Math.max(0, window.innerWidth / 2 - 120);
+  const maxY = Math.max(0, window.innerHeight / 2 - 80);
+  const nx = dragStart.ox + e.clientX - dragStart.px;
+  const ny = dragStart.oy + e.clientY - dragStart.py;
+  dragOffset.x = Math.min(maxX, Math.max(-maxX, nx));
+  dragOffset.y = Math.min(maxY, Math.max(-maxY, ny));
+}
+
+function onWindowPointerUp(): void {
+  dragging.value = false;
+  dragStart = null;
+}
+
+function toggleMaximized(): void {
+  maximized.value = !maximized.value;
+  dragging.value = false;
+  dragStart = null;
+  if (maximized.value) {
+    dragOffset.x = 0;
+    dragOffset.y = 0;
+  }
+}
+
+/** 双击标题栏切换最大化（标准窗口行为）；控件上双击不触发 */
+function onHeadDoubleClick(e: MouseEvent): void {
+  const t = e.target as HTMLElement | null;
+  if (t?.closest('button, select, input, label')) return;
+  toggleMaximized();
+}
+
+onMounted(() => {
+  window.addEventListener('pointermove', onWindowPointerMove);
+  window.addEventListener('pointerup', onWindowPointerUp);
+  window.addEventListener('pointercancel', onWindowPointerUp);
+});
+onUnmounted(() => {
+  window.removeEventListener('pointermove', onWindowPointerMove);
+  window.removeEventListener('pointerup', onWindowPointerUp);
+  window.removeEventListener('pointercancel', onWindowPointerUp);
+});
 
 const tabs = [
   { key: 'overview', label: '校区总览' },
@@ -526,10 +613,18 @@ function statusColor(s: RoomStatus): string { return ROOM_STATUS_CONFIG[s]?.deep
   box-shadow: 0 24px 70px rgba(10, 22, 40, 0.32);
   overflow: hidden;
 }
+/* 最大化：铺满视口（留少量边距），圆角略收；transform 由模板移除，自动归位居中 */
+.csd-dialog--max {
+  width: 96vw; max-width: 96vw; height: 94vh; max-height: 94vh;
+  border-radius: 12px;
+}
 .csd-head {
   display: flex; align-items: center; gap: 16px;
   padding: 14px 18px; border-bottom: 1px solid #eef1f6; color: #16233a;
 }
+/* 标题栏可拖拽：鼠标显示 move，拖动时禁止选中文字 */
+.csd-head--movable { cursor: move; user-select: none; }
+.csd-head--dragging { user-select: none; }
 .csd-head__title { display: flex; align-items: center; gap: 8px; flex: 1; }
 .csd-head__title strong { font-size: 16px; font-weight: 700; }
 .csd-head__dot { width: 9px; height: 9px; border-radius: 50%; background: #1a8f5a; box-shadow: 0 0 0 4px rgba(26,143,90,.13); }
@@ -539,6 +634,12 @@ function statusColor(s: RoomStatus): string { return ROOM_STATUS_CONFIG[s]?.deep
   height: 30px; padding: 0 26px 0 10px; border: 1px solid #cfd8e5; border-radius: 6px;
   color: #1f2a3a; background: #f7f9fc; font-size: 12.5px; font-weight: 600; cursor: pointer;
 }
+.csd-max {
+  width: 28px; height: 28px; border: 0; border-radius: 6px; color: #7c8798;
+  background: transparent; display: flex; align-items: center; justify-content: center;
+  cursor: pointer;
+}
+.csd-max:hover { color: #0b6fb8; background: #eef4fa; }
 .csd-close {
   width: 28px; height: 28px; border: 0; border-radius: 6px; color: #7c8798;
   background: transparent; font-size: 21px; line-height: 1; cursor: pointer;

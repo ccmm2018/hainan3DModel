@@ -328,7 +328,7 @@
       class="property-panel"
       :style="panelPos"
     >
-      <div class="property-panel__head">
+      <div class="property-panel__head property-panel__head--movable" @pointerdown="onPanelDragStart" title="按住标题栏可拖动面板">
         <span class="dot"></span>
         <strong>{{ selectedProps.name }}</strong>
         <span class="property-panel__badge">{{ categoryLabel(selectedProps.category) }}</span>
@@ -1068,7 +1068,49 @@ const panelAnchor = ref<{ x: number; y: number } | null>(null);
 const roomAnchor = ref<{ x: number; y: number } | null>(null);
 
 const panel = createAnchoredPanel(panelEl, panelAnchor);
-const panelPos = panel.style;
+/**
+ * 属性面板拖拽后的自由位置（相对容器像素）。非空时覆盖锚点定位、面板固定在屏幕上，
+ * 不再随地图移动而跟随节点；切换楼栋 / 关闭面板时清空，恢复自动锚定。
+ */
+const panelFreePos = ref<{ left: number; top: number } | null>(null);
+const panelPos = computed(() =>
+  panelFreePos.value ? toStyle(panelFreePos.value) : panel.style.value,
+);
+watch(selected, () => { panelFreePos.value = null; }); // 点新楼：回到锚定位置
+
+// 属性面板标题栏拖拽：以面板当前的真实位置为起点，拖到哪固定在哪，并夹取在容器内。
+// 用 window 级指针事件，鼠标移出标题栏也能继续拖；控件（定位/关闭按钮）上不触发。
+let panelDrag: { sx: number; sy: number; left: number; top: number } | null = null;
+function onPanelDragStart(e: PointerEvent): void {
+  if ((e.target as HTMLElement)?.closest('button')) return;
+  const el = panelEl.value;
+  if (!el) return;
+  panelDrag = { sx: e.clientX, sy: e.clientY, left: el.offsetLeft, top: el.offsetTop };
+  window.addEventListener('pointermove', onPanelDragMove);
+  window.addEventListener('pointerup', onPanelDragEnd);
+  window.addEventListener('pointercancel', onPanelDragEnd);
+  e.preventDefault(); // 拖动时不要选中标题文字
+}
+function onPanelDragMove(e: PointerEvent): void {
+  if (!panelDrag) return;
+  const cw = containerSize.value.w || window.innerWidth;
+  const ch = containerSize.value.h || window.innerHeight;
+  const el = panelEl.value;
+  const w = el?.offsetWidth ?? 322;
+  const h = el?.offsetHeight ?? 240;
+  const m = EDGE_MARGIN;
+  panelFreePos.value = {
+    left: clamp(panelDrag.left + e.clientX - panelDrag.sx, m, Math.max(m, cw - w - m)),
+    top: clamp(panelDrag.top + e.clientY - panelDrag.sy, m, Math.max(m, ch - h - m)),
+  };
+}
+function onPanelDragEnd(): void {
+  panelDrag = null;
+  window.removeEventListener('pointermove', onPanelDragMove);
+  window.removeEventListener('pointerup', onPanelDragEnd);
+  window.removeEventListener('pointercancel', onPanelDragEnd);
+}
+
 const roomDetail = createAnchoredPanel(roomDetailEl, roomAnchor);
 const roomDetailPos = roomDetail.style;
 
@@ -2731,6 +2773,8 @@ onBeforeUnmount(() => {
   color: #16233a;
   border-bottom: 1px solid #eef1f6;
 }
+/* 标题栏可拖拽：move 光标提示；拖动时禁止选中文字（按钮自身的 pointer 光标不受影响） */
+.property-panel__head--movable { cursor: move; user-select: none; }
 .property-panel__head .dot {
   width: 8px; height: 8px; border-radius: 50%;
   background: #1a8f5a; box-shadow: 0 0 0 4px rgba(26, 143, 90, 0.13);

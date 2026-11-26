@@ -177,10 +177,10 @@ export interface MapSceneCallbacks {
   onModelStage?: (label: string, done?: number, total?: number) => void;
   onModelReady?: () => void;
   /**
-   * 自动取景完成（视角已收敛稳定）时触发。
-   * 加载遮罩应保持到本回调之后才揭开——初始取景与迭代微调的视角跳变
-   * 都发生在遮罩后面，用户看到的第一个画面就是最终稳定视角。
-   * （fitToBuildings 未挂微调时也会同步触发一次。）
+   * 取景收敛 + 模型首帧真正渲染完成（shader 编译/贴图上传已就绪）后才触发。
+   * 加载遮罩应保持到本回调之后才揭开：初始取景跳变、首帧渲染的耗时都发生在遮罩后面，
+   * 用户看到的第一个画面就是「模型已画出 + 楼栋标签已定位」的稳定画面，
+   * 避免「先看到孤零零的楼栋标注、停一下才出模型」的观感。
    */
   onFitComplete?: () => void;
   onModelError?: (err: unknown) => void;
@@ -518,6 +518,16 @@ export class MapScene {
   /** 标签重排节流时间戳：拖动时标签 30fps 足够，避免每帧几十次 DOM 写入拖慢渲染 */
   private lastLabelAt = 0;
   private labelStyleInjected = false;
+  /**
+   * 首帧门控：模型第一次真正渲染上屏（着色器编译 + 贴图上传完成）之前，标签层保持隐藏。
+   * 标签是 DOM、模型是 WebGL 两条独立通道——若不门控，遮罩揭开瞬间标签立刻可见、
+   * 而模型要等下一次 render 现编译 shader 才画出，表现为「先标注、停顿、后模型」。
+   * 首帧渲染完成后一次性显示标签层并通知上层揭开遮罩，二者同帧出现。
+   */
+  private labelsPendingFirstFrame = false;
+  private firstFrameNotified = false;
+  /** 取景已收敛，等待首帧渲染完成后再通知上层揭遮罩（onFitComplete 的实际触发点后移到 render 首帧） */
+  private fitReadyPending = false;
 
   /** 模型校准（微调对齐）增量参数，叠加在 config 基础定位之上 */
   private calibration: ModelCalibration = { ...DEFAULT_CALIBRATION };
@@ -1452,7 +1462,8 @@ export class MapScene {
                 `距地图创建合计=${Math.round(performance.now() - this.mapCreateTs)}ms`,
             );
           }
-          this.callbacks.onFitComplete?.();
+          // 不直接揭遮罩：低配/固定朝向路径模型已可见，但仍需等 render() 画出首帧后再揭
+          this.armFirstFrameGate();
         }
         this.modelReadyTs = performance.now();
         this.callbacks.onModelReady?.();
@@ -1795,7 +1806,7 @@ export class MapScene {
       if (this.modelRoot) this.modelRoot.visible = true;
       // 取景已定型（含 viewNudge 平移）：以当前真实中心为锚点设拖动边界
       this.applyPanLimit();
-      return; // 不挂 fitRefine → loadModel 中 `if (!this.fitRefine) onFitComplete()` 会照常揭开遮罩
+      return; // 不挂 fitRefine → loadModel 中 `if (!this.fitRefine)` 会 arm 首帧门控揭开遮罩
     }
 
     // 挂迭代微调：上面的换算若与高德实际相机模型有偏差，会在 render() 里用真实相机
@@ -1836,6 +1847,37 @@ export class MapScene {
       this.modelRoot.visible = true;
       // 揭开加载遮罩前补一帧完整底图，避免首帧只有模型没有底图
       this.markDirty(true);
+    }
+    // 不在这里直接揭遮罩：arm 首帧门控，等 render() 真正画出模型后再通知（见 tryNotifyFirstFrame）
+    this.armFirstFrameGate();
+  }
+
+  /**
+   * 取景完成后的统一出口：不立即揭遮罩，而是等模型首帧真正渲染上屏。
+   * 首帧要现编译所有材质 shader + 把贴图上传 GPU（几百 ms 级，高端机离屏超采样路径更重），
+   * 若此刻就揭遮罩，用户会先看到 DOM 楼栋标注、停顿一下才看到模型。把揭罩后移到首帧完成后，
+   * 这段耗时就留在遮罩后面，用户第一眼即是「模型 + 标注」同帧出现的稳定画面。
+   */
+  private armFirstFrameGate(): void {
+    this.fitReadyPending = true;
+    // 模型可能已可见但尚无渲染帧（低配/固定朝向路径），主动唤醒一次确保门控能被 render() 消费
+    this.scheduleRender();
+  }
+
+  /** 在 render() 画出模型后调用：首帧落地才显示楼栋标签并通知上层揭开遮罩 */
+  private tryNotifyFirstFrame(): void {
+    if (!this.fitReadyPending || this.firstFrameNotified) return;
+    if (!this.modelRoot || !this.modelRoot.visible) return; // 仍在取景微调、模型隐藏中
+    this.fitReadyPending = false;
+    this.firstFrameNotified = true;
+    // 标签与模型同帧出现：此刻模型刚画完，再让隐藏的标签层显示
+    if (this.labelsPendingFirstFrame) {
+      this.labelsPendingFirstFrame = false;
+      if (this.labelLayer) {
+        this.labelLayer.style.visibility = 'visible';
+        this.labelsDirty = true; // 强制重排一次，确保定位是最终相机的结果
+        this.updateBuildingLabels();
+      }
     }
     this.callbacks.onFitComplete?.();
   }
@@ -2948,6 +2990,8 @@ export class MapScene {
     layer.style.overflow = 'hidden';
     layer.style.pointerEvents = 'none';
     layer.style.zIndex = '4';
+    // 首帧门控：初始隐藏，待模型第一次真正渲染上屏后再显示（见 tryNotifyFirstFrame）
+    layer.style.visibility = 'hidden';
     this.container.appendChild(layer);
     this.labelLayer = layer;
   }
@@ -2978,6 +3022,9 @@ export class MapScene {
     this.rebuildLabelAnchors();
     this.labelsDirty = true;
     this.updateBuildingLabels();
+    // 首帧门控：标签层已创建并定位，但等模型首帧真正渲染上屏后才显示（见 tryNotifyFirstFrame）
+    this.labelsPendingFirstFrame = !this.firstFrameNotified;
+    if (this.labelsPendingFirstFrame && this.labelLayer) this.labelLayer.style.visibility = 'hidden';
   }
 
   /**
@@ -4929,6 +4976,10 @@ export class MapScene {
 
     // 逐帧直绘模型到 AMap 已清好的画布（见 renderCachedFrame）。降载靠相机同步节流 + 锚点防抖，而非帧缓存。
     this.renderCachedFrame();
+
+    // 首帧门控：模型刚真正渲染上屏（shader 编译 + 贴图上传已完成）+ 取景已收敛 →
+    // 此刻才显示楼栋标签并揭遮罩，让「模型/标注」同帧出现，首帧耗时全部留在遮罩后面。
+    this.tryNotifyFirstFrame();
 
     // 量算叠加层：主场景（含低配 RT blit）画完后清深度再画，保证线/面永远在模型之上。
     this.drawMeasureOverlay();

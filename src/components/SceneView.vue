@@ -2051,10 +2051,10 @@ onMounted(async () => {
           else scene?.highlightRoom(null, 0);
           return;
         }
-        // 场景模式：悬停建筑（未选中时才应用）。悬停只高亮该楼的楼顶，不改整栋外观；
-        // 选中态不做整栋高亮（用户要求），选中辨识度由标签蓝底白字 + 属性面板体现。
+        // 场景模式：悬停建筑（未选中时才应用）。悬停只高亮该楼的楼顶，不改整栋外观。
+        // 已有选中楼栋时保留其整栋高亮，不被 hover 覆盖；取消选中后 hover 恢复。
         if (!selected.value) {
-          if (result && !result.isRoom) scene?.highlight(result.target, config.hoverColor, true);
+          if (result && !result.isRoom) scene?.highlight(result.target, config.hoverColor, true, 0.45);
           else scene?.clearHighlight();
         }
       },
@@ -2091,8 +2091,8 @@ onMounted(async () => {
             scene?.projectToScreen(result.point) ?? { x: result.screenX, y: result.screenY };
           panel.measure();
           debugAnchor(`点击「${result.name}」`);
-          // 选中不再整栋高亮（用户要求），清掉 hover 屋顶高亮
-          scene?.clearHighlight();
+          // 点击选中：整栋柔和高亮（低强度，只叠加发光、保留原贴图细节，避免过曝发白）
+          scene?.highlight(result.target, config.highlightColor, false, 0.7);
           scene?.setSelectedBuilding(result.name);
         } else {
           selected.value = null;

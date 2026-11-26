@@ -323,6 +323,8 @@ export class MapScene {
   private highlightedObject: THREE.Object3D | null = null;
   /** 当前高亮是否为「仅楼顶」模式（悬停用）：幂等判断需带上，避免从整栋高亮切到仅楼顶时被误跳过 */
   private highlightRoofOnly = false;
+  /** 当前高亮的本色混合比例（0~1）：幂等/缓存键都要带，避免 hover 楼顶与选中整栋串用 */
+  private highlightIntensity = 0;
 
   // —— 悬停拾取节流相关字段 ——
   /** 由 mousemove 写入的最新待拾取坐标。
@@ -3329,19 +3331,26 @@ export class MapScene {
 
   /**
    * 高亮对象。
-   * 采用「克隆原材质 + 叠加 emissive 发光」策略（而非替换为单一纯色材质）：
-   *  - 保留原材质的 side / 透明度 / 贴图，避免开口外壳在 FrontSide 下漏出内部导致「空心」；
-   *  - 保留建筑原有外观细节，仅叠加高亮色发光，选中/悬停反馈清晰且不空洞。
+   * 采用「克隆原材质 + 本色向高亮色混合（color.lerp）」策略（而非 emissive 叠加、也非替换纯色）：
+   *  - 保留原材质的 side / 透明度 / 贴图，建筑细节照常可见，不会变成空洞色块；
+   *  - ⚠️ 不用 emissive：烘焙材质本身多为亮白/亮黄，发光叠加会突破 1.0 被钳成整块过曝发白。
+   *    color.lerp 结果恒在 [0,1]，即使原色很亮也只是「染上一层目标色」，绝不过曝。
    *
    * @param roofOnly 仅高亮「楼顶」。GLB 里每栋楼的屋顶是独立材质槽（Roof_Tier_* /
    *                 CampusRoof_Brown 等，材质名含 Roof），墙面/门窗是另外的槽。
    *                 开启后只克隆屋顶槽、其余槽保持原样，实现「鼠标移入只亮楼顶」。
    *                 点击选中等其它调用不传，仍高亮整栋楼。
+   * @param intensity 本色混合比例 0~1（越大越像目标色）。悬停楼顶用 0.45、选中整栋用 0.4：
+   *                 足够醒目，又不会把建筑染成纯色块。
    */
-  highlight(obj: THREE.Object3D | null, color: string, roofOnly = false): void {
-    // 幂等：已是同一对象且高亮范围相同则跳过，避免每次 mousemove 都重复重建材质。
-    // 范围不同（整栋 ↔ 仅屋顶）必须重做，否则「选中整栋后悬停切换楼顶」会被误跳过。
-    if (obj && obj === this.highlightedObject && roofOnly === this.highlightRoofOnly) return;
+  highlight(obj: THREE.Object3D | null, color: string, roofOnly = false, intensity = 0.45): void {
+    // 幂等：已是同一对象、同一范围、同一强度才跳过，避免每次 mousemove 都重复重建材质。
+    // 范围或强度不同（整栋 ↔ 仅屋顶、hover ↔ 选中）必须重做，否则会被误跳过。
+    if (
+      obj && obj === this.highlightedObject &&
+      roofOnly === this.highlightRoofOnly &&
+      intensity === this.highlightIntensity
+    ) return;
     this.clearHighlight();
     if (!obj) return;
     const tint = new THREE.Color(color);
@@ -3361,15 +3370,18 @@ export class MapScene {
       // 低配机器上 mousemove 扫过楼群时每栋楼都要克隆整套材质，缓存后复用零克隆开销。
       const cloned = origArr.map((m, i) => {
         if (highlightIdx.indexOf(i) < 0) return m; // 非屋顶槽：原样返回
-        const cacheKey = `${color}|${(m as THREE.Material).uuid}`;
+        const cacheKey = `${color}|${intensity}|${(m as THREE.Material).uuid}`;
         let c = this.highlightMatCache.get(cacheKey);
         if (!c) {
           c = (m as THREE.Material).clone();
-          const anyMat = c as unknown as { emissive?: THREE.Color; emissiveIntensity?: number };
-          if (anyMat.emissive) {
-            anyMat.emissive.copy(tint);
-            anyMat.emissiveIntensity = Math.max(anyMat.emissiveIntensity ?? 0, 0.6);
-          }
+          const anyMat = c as unknown as {
+            color?: THREE.Color; emissive?: THREE.Color; emissiveIntensity?: number;
+          };
+          // 本色向目标色混合：结果恒在 [0,1]，亮色材质也不会过曝发白；贴图/细节全保留。
+          if (anyMat.color) anyMat.color.lerp(tint, Math.min(1, Math.max(0, intensity)));
+          // 关闭克隆材质上的发光，杜绝叠加过曝（烘焙材质 emissive 本就是黑，这里兜底）。
+          if (anyMat.emissive) anyMat.emissive.setRGB(0, 0, 0);
+          if (anyMat.emissiveIntensity !== undefined) anyMat.emissiveIntensity = 0;
           this.highlightMatCache.set(cacheKey, c);
         }
         return c;
@@ -3378,6 +3390,7 @@ export class MapScene {
     });
     this.highlightedObject = obj;
     this.highlightRoofOnly = roofOnly;
+    this.highlightIntensity = intensity;
     this.markDirty();
   }
 
@@ -3393,6 +3406,7 @@ export class MapScene {
     });
     this.highlightedObject = null;
     this.highlightRoofOnly = false;
+    this.highlightIntensity = 0;
     this.markDirty();
   }
 

@@ -352,6 +352,19 @@ export class MapScene {
   private lastViewChangeAt = 0;
   private pointerDownHandler: ((e: PointerEvent) => void) | null = null;
   private pointerUpHandler: ((e: PointerEvent) => void) | null = null;
+
+  /**
+   * 旋转模式（工具栏「旋转」按钮）：开启后禁用高德原生拖拽/旋转手势，改为左键拖动直接调 setRotation，
+   * 避免用户必须知道「Ctrl+拖动」这个隐藏操作。与测量模式互斥；退出后恢复原来的拖拽状态。
+   */
+  private rotateMode = false;
+  private rotateDrag: { startX: number; startRotation: number } | null = null;
+  private rotateDownHandler: ((e: PointerEvent) => void) | null = null;
+  private rotateMoveHandler: ((e: PointerEvent) => void) | null = null;
+  private rotateUpHandler: (() => void) | null = null;
+  /** 旋转灵敏度（度/像素）：拖动约 300px 转 90°，与高德原生 Ctrl 拖动手感接近 */
+  private static readonly ROTATE_DEG_PER_PX = 0.3;
+
   /** 内容变更后「同步直绘」的时间戳：防止同一帧内多次 markDirty 重复全场景重绘 */
   private lastImmediateDrawAt = 0;
   /** 被 12ms 节流跳过的直绘请求排程标记：保证最后一次内容变更一定上屏（不能丢弃） */
@@ -3141,6 +3154,7 @@ export class MapScene {
    * 三级降载：位置去重（<1px 跳过）→ rAF 合帧（每帧至多一次 raycast）→ 结果去重（同楼栋内移动零后续开销）。
    */
   private queueHover(clientX: number, clientY: number): void {
+    if (this.rotateMode) return; // 旋转模式下不做悬停拾取（进入时已清一次高亮）
     if (this.measureMode !== 'none') {
       // 测量期间只需清除一次悬停高亮，避免高频触发 Vue 更新与 clearHighlight。
       if (!this.measureHoverCleared) {
@@ -3187,12 +3201,14 @@ export class MapScene {
 
   private handleClick(e: any): void {
     if (this.measureMode !== 'none') return; // 测量时由测量点击处理，不触发拾取
+    if (this.rotateMode) { this.clearHighlight(); return; } // 旋转模式下左键是旋转，不拾取建筑
     const { x, y } = this.pixelOf(e);
     this.callbacks.onSelect?.(this.pick(x, y));
   }
 
   private handleDoubleClick(e: any): void {
     if (this.measureMode !== 'none') return; // 测量结束由测量 dblclick 处理
+    if (this.rotateMode) return; // 旋转模式下双击不进入拾取
     const { x, y } = this.pixelOf(e);
     this.callbacks.onDoubleClick?.(this.pick(x, y));
   }
@@ -3653,6 +3669,100 @@ export class MapScene {
   /** 当前量算模式（'none' 表示已结束但结果仍保留在地图上） */
   get measuringMode(): 'none' | 'distance' | 'area' {
     return this.measureMode;
+  }
+
+  // -------------------------------------------------------------------------
+  // 旋转交互（工具栏「旋转」按钮 + 右下角罗盘）
+  // 用户不必知道「Ctrl+拖动」这个隐藏手势：点「旋转」后左键拖动直接改地图 bearing；
+  // 罗盘则随时可用——拖动罗盘转视角，单击罗盘回到初始朝向。
+  // -------------------------------------------------------------------------
+  /** 当前朝向（度，高德 bearing） */
+  getRotation(): number {
+    return Number(this.map?.getRotation?.() ?? 0);
+  }
+
+  /** 设置朝向（度）：罗盘拖动 / 回正北调用。
+   *  第二参 true（isAnimate）必须给：高德 setRotation 单参调用在本环境会走一条「缓慢漂移」路径，
+   *  设 77 却停在 141 且持续缓动；带 true 才是一次性精确落位。 */
+  setRotation(deg: number): void {
+    if (!this.map) return;
+    this.map.setRotation(deg, true);
+    this.markDirty();
+  }
+
+  /** 回到初始朝向（配置 initialRotation）：罗盘单击「回正北」 */
+  resetRotation(): void {
+    this.setRotation(this.initialRotation);
+  }
+
+  /** 进入/退出旋转模式。退出时恢复原来的拖拽开关。 */
+  setRotateMode(on: boolean): void {
+    if (!this.map || this.rotateMode === on) return;
+    this.rotateMode = on;
+    if (on) {
+      // 禁用高德自己的拖拽/旋转手势：左键拖动全部由我们接管去改 bearing，
+      // 否则同一次拖动会既平移又旋转。滚轮缩放保留（scrollWheel 不动）。
+      try { this.map.setStatus({ dragEnable: false, rotateEnable: false }); } catch { /* ignore */ }
+      this.bindRotateDom();
+      // 旋转模式下清掉悬停高亮，避免转视角时屋顶标签跟着乱闪
+      this.clearHighlight();
+      this.callbacks.onHover?.(null);
+      this.container.style.cursor = 'grab';
+    } else {
+      this.unbindRotateDom();
+      try { this.map.setStatus({ dragEnable: this.dragEnable, rotateEnable: true }); } catch { /* ignore */ }
+      this.container.style.cursor = '';
+    }
+    // eslint-disable-next-line no-console
+    console.info(`[MapScene] 旋转模式 ${on ? '开启（左键拖动=旋转）' : '关闭（恢复拖动平移）'}`);
+  }
+
+  get isRotateMode(): boolean {
+    return this.rotateMode;
+  }
+
+  /** 容器级 pointer 监听：旋转模式下把左键横向拖动换算成 bearing 增量。
+   *  用 window + 捕获阶段，pointerup 落在容器外也能正确收尾。 */
+  private bindRotateDom(): void {
+    if (!this.container || this.rotateDownHandler) return;
+    const inMap = (t: EventTarget | null) => t instanceof Node && this.container!.contains(t);
+    this.rotateDownHandler = (e: PointerEvent) => {
+      if (!this.rotateMode || e.button !== 0 || !inMap(e.target)) return;
+      e.preventDefault(); // 阻止高德把这次拖动当成平移/文本选择
+      this.rotateDrag = { startX: e.clientX, startRotation: this.getRotation() };
+      this.container!.style.cursor = 'grabbing';
+    };
+    this.rotateMoveHandler = (e: PointerEvent) => {
+      if (!this.rotateDrag) return;
+      const dx = e.clientX - this.rotateDrag.startX;
+      this.setRotation(this.rotateDrag.startRotation + dx * MapScene.ROTATE_DEG_PER_PX);
+    };
+    this.rotateUpHandler = () => {
+      if (!this.rotateDrag) return;
+      this.rotateDrag = null;
+      if (this.container) this.container.style.cursor = this.rotateMode ? 'grab' : '';
+    };
+    this.container.addEventListener('pointerdown', this.rotateDownHandler, { capture: true });
+    window.addEventListener('pointermove', this.rotateMoveHandler, { capture: true });
+    window.addEventListener('pointerup', this.rotateUpHandler, { capture: true });
+    window.addEventListener('pointercancel', this.rotateUpHandler, { capture: true });
+  }
+
+  private unbindRotateDom(): void {
+    this.rotateDrag = null;
+    if (this.rotateDownHandler) {
+      this.container?.removeEventListener('pointerdown', this.rotateDownHandler, { capture: true } as EventListenerOptions);
+      this.rotateDownHandler = null;
+    }
+    if (this.rotateMoveHandler) {
+      window.removeEventListener('pointermove', this.rotateMoveHandler, { capture: true });
+      this.rotateMoveHandler = null;
+    }
+    if (this.rotateUpHandler) {
+      window.removeEventListener('pointerup', this.rotateUpHandler, { capture: true });
+      window.removeEventListener('pointercancel', this.rotateUpHandler, { capture: true });
+      this.rotateUpHandler = null;
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -5134,6 +5244,8 @@ export class MapScene {
   // -------------------------------------------------------------------------
   destroy(): void {
     this.disposed = true;
+    // 旋转模式 DOM 监听（若处于旋转模式）
+    this.unbindRotateDom();
     // 悬停拾取：移除原生监听并取消挂起的 rAF，避免跨实例泄漏
     if (this.hoverDomHandler) {
       this.container.removeEventListener('pointermove', this.hoverDomHandler, { capture: true } as EventListenerOptions);

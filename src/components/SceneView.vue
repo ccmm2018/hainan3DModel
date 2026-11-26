@@ -67,6 +67,12 @@
              改由下方 .toolbar-pending 占位展示；此处只保留默认三维。
              恢复方法见下方待开发占位条的注释与 setView() / toggleIndoor()。 -->
         <button class="toolbar__btn" :class="{ active: currentView === '3d' }" @click="setView('3d')">三维</button>
+        <button
+          class="toolbar__btn"
+          :class="{ active: rotateMode }"
+          title="旋转视角：开启后按住鼠标左键左右拖动即可旋转（无需 Ctrl），按 Esc 或再点一次退出"
+          @click="toggleRotate"
+        >旋转</button>
       </div>
       <div class="toolbar__group">
         <span class="toolbar__label">量算</span>
@@ -139,6 +145,37 @@
           <small>把以上字段粘贴进 mapConfig 的 DEFAULT_SCENE_CONFIG 即可「写死」为默认值</small>
         </div>
         <div class="calib-panel__tip">提示：微调时可用地图右键旋转 / 滚轮缩放观察对齐；保存后刷新仍生效。</div>
+      </div>
+    </div>
+
+    <!-- 旋转操作引导条：旋转模式时常驻，明确告知「怎么操作/怎么退出」 -->
+    <div v-if="rotateMode" class="rotate-guide">
+      <span class="rotate-guide__dot"></span>
+      <div class="rotate-guide__text">
+        <strong>旋转视角</strong>
+        <span>按住鼠标左键左右拖动即可旋转，滚轮仍可缩放</span>
+      </div>
+      <button class="rotate-guide__exit" @click="toggleRotate">退出 <kbd>Esc</kbd></button>
+    </div>
+
+    <!-- 右下角罗盘：N 始终指向正北，拖动罗盘旋转视角，单击回到初始朝向 -->
+    <div
+      class="compass"
+      :class="{ 'compass--dragging': compassDragging }"
+      title="拖动罗盘旋转视角 · 单击回到初始朝向"
+      @pointerdown="onCompassDown"
+      @pointermove="onCompassMove"
+      @pointerup="onCompassUp"
+      @pointercancel="onCompassUp"
+      @click="onCompassClick"
+    >
+      <div class="compass__face">
+        <span class="compass__n">N</span>
+        <div class="compass__needle" :style="{ transform: `translate(-50%, -50%) rotate(${compassRotation}deg)` }">
+          <span class="compass__tip compass__tip--n"></span>
+          <span class="compass__tip compass__tip--s"></span>
+        </div>
+        <span class="compass__center"></span>
       </div>
     </div>
 
@@ -859,6 +896,9 @@ let scene: MapScene | null = null;
 // 恢复 2D：在工具栏加回 `setView('2d')` 按钮、把此处类型加回 '2d'，
 // 并在 MapScene.setMapView() 里加回 pitch=0 / rotation=0 的分支。
 const currentView = ref<'2.5d' | '3d'>('3d');
+const rotateMode = ref(false); // 工具栏「旋转」模式：左键拖动直接旋转视角
+const compassRotation = ref(0); // 罗盘指针角度（=地图 bearing），随 onViewChange 实时刷新
+const compassDragging = ref(false); // 正在拖动罗盘（用于指针样式）
 const measureActive = ref(false); // 是否正在打点测量中（控制「完成」按钮显隐）
 const measureTool = ref<'none' | 'distance' | 'area'>('none'); // 已选中的量算工具（高亮，清除前保持）
 const measureResult = ref<MeasureResult | null>(null);
@@ -1586,6 +1626,10 @@ function handleEscKey(e: KeyboardEvent) {
     return;
   }
   if (e.key === 'Escape') {
+    if (rotateMode.value) {
+      exitRotate();
+      return;
+    }
     if (measureTool.value !== 'none' || measureResult.value) {
       stopMeasure();
       return;
@@ -1638,7 +1682,75 @@ function toggleIndoor() {
   // isIndoorView.value = true;
 }
 
+// ---------------------------------------------------------------------------
+// 旋转交互：工具栏「旋转」按钮 + 右下角罗盘
+// ---------------------------------------------------------------------------
+/** 工具栏「旋转」按钮：进入后左键拖动直接旋转；与量算互斥（进入旋转会先清掉量算） */
+function toggleRotate(): void {
+  const next = !rotateMode.value;
+  if (next && (measureTool.value !== 'none' || measureResult.value)) stopMeasure();
+  rotateMode.value = next;
+  scene?.setRotateMode(next);
+}
+
+/** 退出旋转（供 Esc / 引导条调用） */
+function exitRotate(): void {
+  if (!rotateMode.value) return;
+  rotateMode.value = false;
+  scene?.setRotateMode(false);
+}
+
+/** 罗盘拖动：以罗盘中心为轴，指针跟随鼠标方位角；地图 bearing 与指针同向 */
+let compassDragStart = 0; // 按下时鼠标相对罗盘中心的角度（度）
+let compassDragRot = 0; // 按下时的地图 bearing
+let compassMoved = false; // 区分「拖动」与「单击回正北」
+
+function compassAngle(e: PointerEvent, el: HTMLElement): number {
+  const r = el.getBoundingClientRect();
+  const cx = r.left + r.width / 2;
+  const cy = r.top + r.height / 2;
+  // 屏幕坐标 y 向下：atan2(dy,dx) 顺时针为正；罗盘 0° 朝上，故 +90
+  return (Math.atan2(e.clientY - cy, e.clientX - cx) * 180) / Math.PI + 90;
+}
+
+function onCompassDown(e: PointerEvent): void {
+  const el = e.currentTarget as HTMLElement;
+  compassDragStart = compassAngle(e, el);
+  compassDragRot = scene?.getRotation() ?? 0;
+  compassMoved = false;
+  compassDragging.value = true;
+  el.setPointerCapture?.(e.pointerId);
+  e.preventDefault();
+}
+
+function onCompassMove(e: PointerEvent): void {
+  if (!compassDragging.value) return;
+  const el = e.currentTarget as HTMLElement;
+  let delta = compassAngle(e, el) - compassDragStart;
+  // 走最短路径，避免跨 ±180° 时瞬间跳转一整圈
+  if (delta > 180) delta -= 360;
+  if (delta < -180) delta += 360;
+  if (Math.abs(delta) > 2) compassMoved = true;
+  scene?.setRotation(compassDragRot + delta); // 罗盘指针顺时针转 = 北朝右 = bearing 增大
+  compassRotation.value = scene?.getRotation() ?? compassDragRot;
+}
+
+function onCompassUp(e: PointerEvent): void {
+  if (!compassDragging.value) return;
+  const el = e.currentTarget as HTMLElement;
+  el.releasePointerCapture?.(e.pointerId);
+  compassDragging.value = false;
+}
+
+/** 罗盘单击（未拖动）：回到初始朝向，和常见地图罗盘「点一下回正北」一致 */
+function onCompassClick(): void {
+  if (compassMoved) { compassMoved = false; return; }
+  scene?.resetRotation();
+  compassRotation.value = scene?.getRotation() ?? 0;
+}
+
 function startMeasure(mode: 'distance' | 'area') {
+  if (rotateMode.value) exitRotate(); // 量算与旋转互斥
   measureTool.value = mode; // 高亮保持，直到点击「清除」
   scene?.startMeasure(mode);
 }
@@ -2000,8 +2112,11 @@ onMounted(async () => {
       onMeasureActive: (active: boolean) => {
         measureActive.value = active;
       },
-      // 地图平移/缩放/旋转/飞行时，让锚定浮层跟随节点
-      onViewChange: () => updateAnchors(),
+      // 地图平移/缩放/旋转/飞行时，让锚定浮层跟随节点，并同步罗盘指针
+      onViewChange: () => {
+        updateAnchors();
+        if (!compassDragging.value) compassRotation.value = scene?.getRotation() ?? 0;
+      },
     });
 
     status.value = 'loading-model';
@@ -3348,6 +3463,126 @@ onBeforeUnmount(() => {
   border-color: #60a5fa;
   background: #3b82f6;
   color: #ffffff;
+}
+
+/* 旋转操作引导条：旋转模式时常驻在画面上方，明确告知如何操作/退出 */
+.rotate-guide {
+  position: absolute;
+  z-index: 165;
+  top: 64px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: calc(100% - 32px);
+  padding: 10px 14px;
+  border: 1px solid #a78bfa;
+  border-radius: 12px;
+  background: rgba(16, 24, 40, 0.95);
+  box-shadow: 0 16px 44px rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(10px);
+}
+.rotate-guide__dot {
+  flex: none;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #a78bfa;
+  box-shadow: 0 0 0 4px rgba(167, 139, 250, 0.18);
+}
+.rotate-guide__text { display: flex; flex-direction: column; gap: 2px; }
+.rotate-guide__text strong { font-size: 13px; font-weight: 700; color: #eaf2ff; }
+.rotate-guide__text span { font-size: 12px; color: #b6c4da; }
+.rotate-guide__exit {
+  flex: none;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid #475569;
+  border-radius: 6px;
+  color: #eaf2ff;
+  background: rgba(71, 85, 105, 0.5);
+  font-size: 12px;
+  cursor: pointer;
+}
+.rotate-guide__exit:hover { border-color: #a78bfa; background: rgba(167, 139, 250, 0.2); }
+.rotate-guide__exit kbd,
+.measure-guide__finish kbd,
+.measure-guide__cancel kbd {
+  margin-left: 4px;
+  padding: 1px 4px;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  border-radius: 3px;
+  font-size: 10px;
+  font-family: inherit;
+  opacity: 0.8;
+}
+
+/* 右下角罗盘：N 指向正北，拖动旋转 / 单击复位。避开底部中间的 hint-bar。 */
+.compass {
+  position: absolute;
+  z-index: 140;
+  right: 18px;
+  bottom: 58px;
+  width: 62px;
+  height: 62px;
+  border-radius: 50%;
+  border: 1px solid #475569;
+  background: rgba(16, 24, 40, 0.88);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  backdrop-filter: blur(8px);
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+.compass--dragging { cursor: grabbing; }
+.compass:hover { border-color: #a78bfa; }
+.compass__face { position: relative; width: 100%; height: 100%; border-radius: 50%; }
+.compass__n {
+  position: absolute;
+  top: 3px;
+  left: 50%;
+  transform: translateX(-50%);
+  color: #f87171;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1;
+}
+.compass__needle {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 4px;
+  height: 38px;
+  transform-origin: 50% 50%;
+}
+.compass__tip {
+  position: absolute;
+  left: 50%;
+  width: 0;
+  height: 0;
+  transform: translateX(-50%);
+  border-left: 3px solid transparent;
+  border-right: 3px solid transparent;
+}
+.compass__tip--n {
+  top: 0;
+  border-bottom: 18px solid #ef4444;
+}
+.compass__tip--s {
+  bottom: 0;
+  border-top: 18px solid #94a3b8;
+}
+.compass__center {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 8px;
+  height: 8px;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  background: #e2e8f0;
+  box-shadow: 0 0 0 2px rgba(15, 23, 42, 0.7);
 }
 
 /* 量算操作引导条：测量进行时常驻在画面上方，明确告知如何结束 */

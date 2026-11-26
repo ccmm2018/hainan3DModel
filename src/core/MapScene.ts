@@ -34,22 +34,28 @@ const MIN_ZOOM_DEFAULT = 17.2;
 const MAX_ZOOM = 20;
 
 /**
- * 地图拖拽平移开关。默认允许拖拽（dragEnable=true），但用「自管理软边界」把地图中心
- * 限制在以「实际取景中心 / 定位后中心」为锚点、半径 PAN_LIMIT_METERS_DEFAULT 的圆内：
- * 可在圈内自由上下左右移动，到边界就拖不动（逐帧钳回、无弹跳），模型基本保持居中又不会被拖丢。
+ * 地图拖拽平移开关。默认允许拖拽（dragEnable=true），用「自管理软边界」把地图中心
+ * 限制在以「模型地理中心」为锚点、半径=模型外接圆+PAN_MARGIN_METERS 的圆内：
+ * 可在圈内自由上下左右移动（覆盖整个模型 + 边缘余量），到边界才钳回，不回弹。
  *
  * 为什么不用高德 setLimitBounds：实测在 3D 斜视（pitch=73）下它对鼠标拖拽是「硬锁中心」——
- * 连边界内的几米都一动不动（诊断：拖 500px 后 center 完全不变），做不到"小范围拖动"。
- * 早期另一失败方案把边界中心设成「模型地理中心」，而取景中心因 viewNudge 偏了约 200m，
- * 加载时中心贴边 → 弹簧回弹。自管理方案锚点一律取「setZoomAndCenter 后 map.getCenter() 的真实中心」。
+ * 连边界内的几米都一动不动（诊断：拖 500px 后 center 完全不变）。
+ *
+ * 锚点用「模型中心」而非「取景中心」：viewNudge 把取景中心推到模型右上角外约 270m，
+ * 若以它为圆心、半径取旧值 80m，取景中心本身就在圈外 → 一加载贴边、一拖就弹簧回弹
+ * （这是用户反馈"拖动距离有限+回弹"的根因）。改用模型中心 + 半径=外接圆(~643m)+10m，
+ * 取景中心(距模型中心~270m)落在圈内，既能拖到模型任意边缘、又不贴边回弹。
+ * 模型校准/缩放改变几何时，边界在 applyPanLimit 里按最新 bbox 重算。
  *
  * 实现：监听地图 move 事件，中心偏离锚点超过半径时用 setCenter 逐帧钳回边界圆（防重入）；
- * flyTo / 室内 / 测量等程序化定位期间先 disablePanGuard，落位后再以新中心重建锚点并启用。
- * URL ?drag=0 完全禁用拖拽（回退到锁死居中）；?panrange=<米> 调整半径，0 = 不限制。
+ * flyTo / 室内 / 测量等程序化定位期间先 disablePanGuard，落位后再重建锚点并启用。
+ * URL ?drag=0 完全禁用拖拽（回退到锁死居中）；?panrange=<米> 显式指定半径，0 = 不限制。
  */
 const DRAG_ENABLE_DEFAULT = true;
-/** 拖动半径（米）：地图中心可偏离锚点的最大地面距离，默认 80m（小范围、模型基本居中） */
+/** 默认拖动半径兜底值（米）：模型 bbox 未算出前的临时值；正常运行时被模型外接圆+PAN_MARGIN 覆盖 */
 const PAN_LIMIT_METERS_DEFAULT = 80;
+/** 拖动边界相对模型外接圆的外扩余量（米）：用户要求"边界在模型外轮廓之外约 10 米" */
+const PAN_MARGIN_METERS = 10;
 
 /**
  * 地图视野扩张：把模型 scale 乘 2^n 放大（n=MAP_ZOOM_OUT_DEFAULT）。
@@ -238,8 +244,12 @@ export class MapScene {
   private mapZoomOut = MAP_ZOOM_OUT_DEFAULT;
   /** 建筑外墙贴图 mipmap LOD bias（负值=拉远时多用高清 mip）；URL ?mipbias= 可覆盖，0=关闭 */
   private mipBias = MIP_BIAS_DEFAULT;
-  /** 当前拖动边界的锚点中心 [lng, lat]（GCJ-02）；取景/定位完成后由 map.getCenter() 记录 */
+  /** 当前拖动边界的锚点中心 [lng, lat]（WGS84）；正常取模型 bbox 中心，?panrange 显式时可用当前中心 */
   private panAnchor: [number, number] | null = null;
+  /** panrange 是否被 URL 显式指定（显式时锚点仍用取景中心/模型中心由调用方决定，半径直接用指定值） */
+  private panRangeExplicit = false;
+  /** 缓存的模型拖动边界（中心 GCJ-02 + 半径米）；模型几何/校准变化后置 null 重算 */
+  private modelPanBounds: { center: [number, number]; radius: number } | null = null;
   /** 定位动画落位后重建边界的防抖定时器：连续定位只以最后一次的中心为准 */
   private panLimitTimer: number | null = null;
   /** 软边界钳制：程序化定位动画期间暂停，避免逐帧钳回把定位截断 */
@@ -574,10 +584,12 @@ export class MapScene {
     const dragRaw = urlParams.get('drag');
     if (dragRaw === '1') this.dragEnable = true;
     else if (dragRaw === '0') this.dragEnable = false;
-    // 拖动范围半幅（米）：?panrange=120 放宽、?panrange=40 收紧、?panrange=0 不限制。
+    // 拖动范围半幅（米）：默认由模型 bbox 自动算（外接圆+10m，见 applyPanLimit）；
+    // ?panrange=120 显式放宽、?panrange=40 收紧、?panrange=0 不限制。
     const prRaw = urlParams.get('panrange');
     if (prRaw !== null && Number.isFinite(Number(prRaw))) {
       this.panRangeMeters = Math.max(0, Number(prRaw));
+      this.panRangeExplicit = true;
     }
     // 底图样式：URL ?mapstyle=normal|light|grey|whitesmoke|dark 可临时覆盖，方便不重新构建就对比。
     // 默认已切 whitesmoke(远山黛) 浅灰白：低饱和、素雅，与模型白砖地皮衔接；
@@ -2820,6 +2832,7 @@ export class MapScene {
     this.modelRoot.updateMatrixWorld(true);
     this.refreshBuildingBoxes(); // 校准后重建建筑 AABB，保证悬停粗筛与模型位置同步
     this.fogCorners = null; // 模型变换变了：淡雾角点缓存失效，下次渲染重算
+    this.modelPanBounds = null; // 模型 scale/位置变了：拖动边界需按新 bbox 重算
     this.markDirty();
   }
 
@@ -4245,20 +4258,80 @@ export class MapScene {
     if (!this.map || !this.dragEnable || this.panRangeMeters <= 0) return;
     let anchor: [number, number] | null = null;
     if (center) {
+      // 显式传入（程序化定位落位后）：沿用该中心作锚点
       anchor = center;
-    } else {
+    } else if (this.panRangeExplicit) {
+      // URL 显式指定了 panrange：保持旧的"取景中心为锚点"语义
       try {
         const c = this.map.getCenter();
         anchor = [c.getLng(), c.getLat()];
       } catch { /* ignore */ }
+    } else {
+      // 默认：以模型 bbox 中心为锚点、半径=模型外接圆+余量，贴合模型外轮廓
+      const mb = this.modelPanBounds ?? (this.modelPanBounds = this.computeModelPanBounds());
+      if (mb) {
+        anchor = mb.center;
+        this.panRangeMeters = mb.radius + PAN_MARGIN_METERS;
+      } else {
+        // 模型 bbox 暂不可用时退回取景中心
+        try {
+          const c = this.map.getCenter();
+          anchor = [c.getLng(), c.getLat()];
+        } catch { /* ignore */ }
+      }
     }
     if (!anchor) return;
     this.panAnchor = anchor;
     this.panGuardSuspended = false; // 重建锚点即恢复钳制
     // eslint-disable-next-line no-console
     console.info(
-      `[MapScene] 拖动范围：锚点[${anchor[0].toFixed(5)},${anchor[1].toFixed(5)}] 半径 ${this.panRangeMeters}m`,
+      `[MapScene] 拖动范围：锚点[${anchor[0].toFixed(5)},${anchor[1].toFixed(5)}] 半径 ${this.panRangeMeters.toFixed(0)}m`,
     );
+  }
+
+  /** 从模型实际几何 bbox 计算拖动边界 {中心(GCJ-02), 外接圆半径(米)}。
+   *  只采模型顶点（排除潜在的超大隐形底板），中心取 bbox 对角中点，半径取中心到四角最大地面距离。
+   *  半径按地图 move 事件同样的"经纬度差→米"口径换算，保证钳制判定一致。 */
+  private computeModelPanBounds(): { center: [number, number]; radius: number } | null {
+    if (!this.modelRoot || !this.customCoords) return null;
+    this.modelRoot.updateMatrixWorld(true);
+    let minx = Infinity, maxx = -Infinity, miny = Infinity, maxy = -Infinity;
+    const v = new THREE.Vector3();
+    this.modelRoot.traverse((o) => {
+      const mesh = o as THREE.Mesh;
+      if (!mesh.isMesh || !mesh.geometry) return;
+      const p = mesh.geometry.getAttribute('position') as THREE.BufferAttribute | undefined;
+      if (!p) return;
+      for (let i = 0; i < p.count; i += 16) { // 采样即可，bbox 无需逐顶点
+        v.set(p.getX(i), p.getY(i), p.getZ(i)).applyMatrix4(mesh.matrixWorld);
+        if (v.x < minx) minx = v.x;
+        if (v.x > maxx) maxx = v.x;
+        if (v.y < miny) miny = v.y;
+        if (v.y > maxy) maxy = v.y;
+      }
+    });
+    if (!Number.isFinite(minx)) return null;
+    // 世界坐标 bbox 角点 → GCJ-02（worldToWgs84 内部先算 GCJ 再转 WGS84，这里需要 GCJ）
+    const toGcj = (x: number, y: number): [number, number] => {
+      const dx = x - this.anchorWorld.x;
+      const dy = y - this.anchorWorld.y;
+      const latRad = (this.gcjAnchor[1] * Math.PI) / 180;
+      return [this.gcjAnchor[0] + dx / R_METERS_PER_DEG, this.gcjAnchor[1] + (dy * Math.cos(latRad)) / R_METERS_PER_DEG];
+    };
+    const cx = (minx + maxx) / 2, cy = (miny + maxy) / 2;
+    const center = toGcj(cx, cy);
+    // 半径：按 onMapMoveGuard 同口径（lng 差 × R × cos(lat)，lat 差 × R）取四角最大距离
+    const rlat = Math.max(Math.cos(center[1] * Math.PI / 180), 0.01);
+    let radius = 0;
+    for (const [x, y] of [[minx, miny], [minx, maxy], [maxx, miny], [maxx, maxy]]) {
+      const ll = toGcj(x, y);
+      const dx = (ll[0] - center[0]) * R_METERS_PER_DEG * rlat;
+      const dy = (ll[1] - center[1]) * R_METERS_PER_DEG;
+      radius = Math.max(radius, Math.hypot(dx, dy));
+    }
+    // eslint-disable-next-line no-console
+    console.info(`[MapScene] 模型 bbox 世界=[${minx.toFixed(0)},${maxx.toFixed(0)}]x[${miny.toFixed(0)},${maxy.toFixed(0)}] 拖动半径=${radius.toFixed(0)}m`);
+    return { center, radius };
   }
 
   /** 临时禁用软边界钳制：程序化 flyTo / setZoomAndCenter 期间调用，避免定位过程被逐帧钳回截断。

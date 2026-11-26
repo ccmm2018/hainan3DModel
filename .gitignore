@@ -17,3 +17,8 @@ npm-debug.log*
 .vscode/
 .idea/
 .DS_Store
+
+# 开发过程产物：诊断脚本/截图/中间文件（根目录一律以 _ 开头）
+_*
+# 备份文件（含 src/、public/models/ 下的 .bak_s562 等）
+*.bak_*

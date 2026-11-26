@@ -1091,6 +1091,37 @@ export class MapScene {
   // 模型加载与地理对齐放置
   // -------------------------------------------------------------------------
   /**
+   * s562: 把量化压缩的 POSITION 还原为真实世界坐标。
+   * GLB 里 POSITION 存成 Int16(normalized=true)，three 只会把它归一化到 [-1,1]，
+   * 若不在渲染/居中前还原，模型会缩成约 1 米、居中与拾取全部错位。
+   * 每个节点 extras.quantPos={offset:[x,y,z],scale} 记录「原始 = q*scale+offset」。
+   * 同一 geometry 可能被多节点共享（如 EaveC），用 Set 去重避免重复还原。
+   */
+  private dequantizePositions(root: THREE.Object3D, quant: { offset: number[]; scale: number } | null): number {
+    if (!quant || !Array.isArray(quant.offset) || !Number.isFinite(quant.scale)) return 0;
+    let count = 0;
+    root.traverse((o) => {
+      const mesh = o as THREE.Mesh;
+      if (!mesh.isMesh || !mesh.geometry) return;
+      const pos = mesh.geometry.getAttribute('position') as THREE.BufferAttribute | undefined;
+      if (!pos || !(pos.array instanceof Int16Array)) return;
+      const src = pos.array as Int16Array;
+      const out = new Float32Array(src.length);
+      const [ox, oy, oz] = quant.offset;
+      for (let i = 0; i < src.length; i += 3) {
+        out[i] = src[i] * quant.scale + ox;
+        out[i + 1] = src[i + 1] * quant.scale + oy;
+        out[i + 2] = src[i + 2] * quant.scale + oz;
+      }
+      mesh.geometry.setAttribute('position', new THREE.BufferAttribute(out, 3));
+      mesh.geometry.boundingBox = null;
+      mesh.geometry.boundingSphere = null;
+      count++;
+    });
+    return count;
+  }
+
+  /**
    * 模型下载+解析完成后的统一后处理与挂载（原 loadModel 的 onLoad 主体）。
    * 不论模型来自「组件层并行预取缓冲（setPrefetchedBuffer）」还是「initThree 内 startModelLoad 自行下载」，
    * 都走这里。入口前的 onLoadEntryTs 已由发起下载处记录（= 解析完成时刻）。
@@ -1099,9 +1130,21 @@ export class MapScene {
     if (this.disposed) return;
     this.modelRoot = gltf.scene as THREE.Object3D;
 
+        // s562: 模型几何采用 KHR_mesh_quantization 压缩——POSITION 存为 Int16，
+        // 全局还原参数 {offset,scale} 写在 glTF 的 asset.extras.quant.position。
+        // three 对 normalized Int16 只做 [-1,1] 归一化，直接渲染会让模型缩成约 1 米；
+        // 且后续 recenter 的 geometry.translate()/mergeGeometries() 都在归一化空间算，
+        // 必须先还原成真实 Float32 坐标。NORMAL(int8)/UV(uint16) 由 WebGL normalized
+        // 属性自动还原到 [-1,1]/[0,1]，无需处理。
+        const qj = (gltf?.parser?.json?.asset?.extras as Record<string, unknown> | undefined)?.quant as
+          { position?: { offset: number[]; scale: number } } | undefined;
+        const dequantCount = this.dequantizePositions(this.modelRoot, qj?.position ?? null);
+
         // 按配置过滤节点：隐藏 Blender 一并导出的辅助几何（屋顶棚/女儿墙/大门/廊架/骨架/空物体等），
         // 只保留楼本体，避免地图上出现无关网格。需在居中/命名解析前执行。
         this.applyNodeFilter();
+
+        if (dequantCount) console.info(`[MapScene] s562 反量化 POSITION: ${dequantCount} 个网格`);
 
         this.modelRoot.traverse((child) => {
           if ((child as THREE.Mesh).isMesh) {

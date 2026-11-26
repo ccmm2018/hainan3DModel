@@ -540,6 +540,43 @@ export class MapScene {
     this.gcjAnchor = wgs84ToGcj02(anchor[0], anchor[1]);
   }
 
+  /**
+   * 是否隐藏高德 logo / 版权（防呆护栏：只由「链接参数 + 访问环境」决定，不留持久开关）。
+   *
+   * 背景：免费版高德 key 按服务条款必须保留 logo 与版权信息。用户有两轮公网部署：
+   *   ① 演示版 → 要隐藏；② 正式版 → 要显示（合规）。担心正式部署时忘记把隐藏开关改回来。
+   *
+   * 判定优先级（从高到低）：
+   *   1. ?showattribution=1 → 强制显示（本地临时预览正式版样子）
+   *   2. ?hideattribution=1 → 强制隐藏（演示版链接专用，公网也能生效）
+   *   3. 本机 / 内网环境 → 默认隐藏（local开发习惯，localhost 打开就是干净的）
+   *   4. 公网域名 / 公网 IP → 默认显示（正式版干净链接天然合规，无需"放开"操作）
+   *
+   * 为什么不会"忘记放开"：隐藏能力不写入部署产物 / localStorage，公网默认就是显示；
+   * 演示版只靠链接上的 ?hideattribution=1 开启，正式部署换一条干净链接即自动恢复合规。
+   */
+  private shouldHideAttribution(): boolean {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      // ① 强制显示优先级最高（本地预览正式版样子）
+      const forceShow = params.get('showattribution');
+      if (forceShow === '1' || forceShow === 'true') return false;
+      // ② 强制隐藏（演示版链接，公网也生效）
+      const forceHide = params.get('hideattribution');
+      if (forceHide === '1' || forceHide === 'true') return true;
+      // ③/④ 无参数时按环境：本机/内网默认隐藏，公网默认显示
+      const h = (window.location.hostname || '').toLowerCase();
+      if (h === 'localhost' || h === '127.0.0.1' || h === '::1' || h === '[::1]' || h === '') return true;
+      if (/^10\./.test(h)) return true;
+      if (/^192\.168\./.test(h)) return true;
+      const m172 = h.match(/^172\.(\d+)\./);
+      if (m172 && Number(m172[1]) >= 16 && Number(m172[1]) <= 31) return true;
+      return false; // 公网：默认显示
+    } catch {
+      return false; // 取不到信息时按公网处理，保守显示
+    }
+  }
+
   get centerGcj02(): [number, number] {
     return this.gcjCenter;
   }
@@ -674,9 +711,12 @@ export class MapScene {
       }
     }
 
-    // 商用授权下隐藏左下角 logo / 版权（免费版请勿开启，会违反高德服务条款）
-    if (this.config.hideAMapAttribution) {
+    // 左下角 logo / 版权：本机/内网默认隐藏、公网默认显示；?hideattribution=1 可在公网演示时强制隐藏，
+    // ?showattribution=1 可强制显示。隐藏不写入产物/配置，正式版干净链接天然合规，无「忘记放开」风险。
+    if (this.shouldHideAttribution()) {
       this.container.classList.add('hide-amap-attribution');
+      // eslint-disable-next-line no-console
+      console.info('[MapScene] 已隐藏高德 logo/版权（本地环境或 ?hideattribution=1 演示链接；公网干净链接会自动显示）');
     }
 
     this.customCoords = this.map.customCoords;

@@ -113,7 +113,7 @@ export interface SceneConfig {
   /** 房屋分配提交后端 API 地址（留空则本地模拟） */
   allocationApiUrl: string;
   /**
-   * 是否隐藏高德地图左下角的 logo 与版权信息。
+   * 是否隐藏高德地图左下角的 logo 与版权信息（现已改为「链接参数控制」，此字段保留但不再读取）。
    *
    * ⚠️ 合规提醒（务必阅读）：
    * 高德地图 JS API「免费版」的《服务条款》要求必须保留地图 logo 与版权信息，
@@ -121,8 +121,13 @@ export interface SceneConfig {
    * 隐藏它们仅在「已获得高德商用授权」的前提下才合规；否则属于违反服务条款，
    * 高德有权限制 / 封禁对应 key 的使用。
    *
-   * 因此该开关默认关闭（false）以保证免费版合规；
-   * 请在你已与高德签订商用授权、明确允许去除品牌标识后再置为 true。
+   * 防呆设计（关键）：为避免「演示版隐藏、正式版忘记放开」，隐藏不写入产物/配置，
+   * 由「访问环境 + 链接参数」决定，不留任何需要修改/回退的持久开关：
+   *   - 本机 / 内网访问（含 localhost:3000）→ 默认隐藏 logo，本地开发界面干净
+   *   - 公网域名 / 公网 IP → 默认显示 logo（正式版干净链接天然合规，无需"放开"操作）
+   *   - 演示版公网链接：网址后加 ?hideattribution=1 → 强制隐藏 logo
+   *   - ?showattribution=1 → 强制显示（优先级最高，本地临时预览正式版样子）
+   * MapScene.shouldHideAttribution() 按上述规则判断，本字段仅作历史兼容保留。
    */
   hideAMapAttribution: boolean;
   /**
@@ -257,7 +262,7 @@ export const DEFAULT_SCENE_CONFIG: SceneConfig = {
   measurePitch: 5,
   defaultFloorCount: 4,
   allocationApiUrl: '',
-  hideAMapAttribution: false,
+  hideAMapAttribution: true,
   // 楼栋显示名映射：GLB 节点名（数字 0–25，结构主键/数据外键） → 真实楼名。
   // 仅用于「界面显示」，不影响数据查找（floors/属性仍按节点号匹配）。
   // 同名多栋用「(节点号)」区分，便于在搜索/属性面板中辨识具体楼栋。

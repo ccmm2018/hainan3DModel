@@ -81,12 +81,17 @@ const MAP_ZOOM_OUT_DEFAULT = 0.5;
  * WebGL1 下三参数采样是 GLSL ES 1.00 标准；WebGL2 下 three 会把 texture2D 宏替换成 texture，
  * texture(map,uv,bias) 同样合法，故两端通用。
  *
- * 取值范围 -0.5~-1.0：从 -0.5 试起，不够再往 -1；不要 < -1.5（远处会出噪点和闪烁）。
+ * 默认 -1（加强档，拉远时外墙更清楚）。取值范围 -1.5~0，不要 < -1.5（远处会出噪点和闪烁）。
+ *
+ * 手动调试（URL ?mipbias=<值> 强制覆盖默认值）：
+ *   ?mipbias=-0.5  回到保守档（高分屏或拉远后出现噪点/闪烁时用）
+ *   ?mipbias=-0.7  折中档
+ *   ?mipbias=0     彻底关闭
+ *
  * 仅作用于建筑外墙/窗格材质（BK_Facade_* / M_GymWall / M_TeachBase / 食堂 / *Porch*），
  * 不动地面/道路/树木/水面/天空等（这些锐化会放大噪点或产生摩尔纹）。
- * URL ?mipbias=<值> 覆盖（0=关闭）；?mipbias=-1 加强。
  */
-const MIP_BIAS_DEFAULT = -0.5;
+const MIP_BIAS_DEFAULT = -1;
 
 /**
  * 淡雾（大气透视）配置：让远处楼栋略微发白、融入灰白底图，弱化"贴纸感"。
@@ -242,7 +247,7 @@ export class MapScene {
   private panRangeMeters = PAN_LIMIT_METERS_DEFAULT;
   /** 地图视野扩张：取景 zoom 再减多少级、模型 scale 乘 2^n 补偿；URL ?mapzoomout= 可覆盖，0=关闭 */
   private mapZoomOut = MAP_ZOOM_OUT_DEFAULT;
-  /** 建筑外墙贴图 mipmap LOD bias（负值=拉远时多用高清 mip）；URL ?mipbias= 可覆盖，0=关闭 */
+  /** 建筑外墙贴图 mipmap LOD bias（负值=拉远时多用高清 mip）；默认 -1，URL ?mipbias= 可覆盖（调试值见文件头注释） */
   private mipBias = MIP_BIAS_DEFAULT;
   /** 当前拖动边界的锚点中心 [lng, lat]（WGS84）；正常取模型 bbox 中心，?panrange 显式时可用当前中心 */
   private panAnchor: [number, number] | null = null;
@@ -619,7 +624,8 @@ export class MapScene {
     if (mzoRaw !== null && Number.isFinite(Number(mzoRaw))) {
       this.mapZoomOut = Math.max(0, Math.min(2, Number(mzoRaw)));
     }
-    // 外墙贴图 mipmap LOD bias：?mipbias=-0.5 默认；?mipbias=0 关闭；不要 < -1.5（远处噪点/闪烁）。
+    // 外墙贴图 mipmap LOD bias：默认 -1；?mipbias=<值> 强制覆盖（-0.5 保守 / -0.7 折中 / 0 关闭）；
+    // 不要 < -1.5（远处噪点/闪烁）。
     const mibRaw = urlParams.get('mipbias');
     if (mibRaw !== null && Number.isFinite(Number(mibRaw))) {
       this.mipBias = Math.max(-1.5, Math.min(0, Number(mibRaw)));

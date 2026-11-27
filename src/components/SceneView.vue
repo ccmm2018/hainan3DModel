@@ -349,8 +349,7 @@
         :style="{ transform: detailMaximized ? 'none' : `translate(${detailPos.x}px, ${detailPos.y}px)` }"
       >
         <div class="detail-modal__head" @mousedown="onDetailDragStart" title="按住头部可拖动窗口">
-          <strong>{{ selectedProps.name }} · 楼宇详情</strong>
-          <span v-if="!detailMaximized" class="detail-modal__drag-hint">拖动</span>
+          <strong>{{ shownBuildingName() }} · 楼宇详情</strong>
           <button class="detail-modal__maxbtn" :title="detailMaximized ? '还原窗口' : '最大化窗口'" @click.stop="toggleDetailMax">
             {{ detailMaximized ? '❐' : '⛶' }}
           </button>
@@ -381,6 +380,7 @@
                 <div
                   v-for="f in sec.fields"
                   :key="f.key"
+                  v-show="!(detailEditing && f.hideInEdit)"
                   class="detail-field"
                   :class="{ 'detail-field--wide': f.kind === 'textarea' }"
                 >
@@ -392,19 +392,19 @@
                     <template v-if="!detailEditing">
                       <span class="detail-value">{{ detailFieldDisplay(f) }}</span>
                     </template>
-                    <!-- 编辑态：固定 / 只读（不可改，带标记） -->
+                    <!-- 编辑态：固定（不可改，带标记） / 只读（不可改，无标记） -->
                     <template v-else-if="f.kind === 'fixed' || f.kind === 'readonly'">
                       <span class="detail-value detail-value--locked">{{ detailFieldDisplay(f) }}</span>
-                      <span class="detail-field-tag">{{ f.kind === 'fixed' ? '固定' : '只读' }}</span>
+                      <span v-if="f.kind === 'fixed'" class="detail-field-tag">固定</span>
                     </template>
-                    <!-- 编辑态：下拉 -->
+                    <!-- 编辑态：下拉（当前值不在预设里时补一项，避免回显空白） -->
                     <select
                       v-else-if="f.kind === 'select'"
                       v-model="detailDraft[f.key]"
                       class="detail-input"
                       :class="{ 'detail-input--error': detailErrorField === f.key }"
                     >
-                      <option v-for="opt in f.options" :key="opt" :value="opt">{{ opt }}</option>
+                      <option v-for="opt in detailSelectOptions(f)" :key="opt" :value="opt">{{ opt }}</option>
                     </select>
                     <!-- 编辑态：多行文本 -->
                     <textarea
@@ -414,6 +414,16 @@
                       rows="2"
                       :class="{ 'detail-input--error': detailErrorField === f.key }"
                     ></textarea>
+                    <!-- 编辑态：日期 -->
+                    <input
+                      v-else-if="f.kind === 'date'"
+                      v-model="detailDraft[f.key]"
+                      class="detail-input detail-input--date"
+                      type="date"
+                      placeholder="点击选择竣工日期"
+                      @click="onDateInputClick"
+                      :class="{ 'detail-input--error': detailErrorField === f.key }"
+                    />
                     <!-- 编辑态：数字 / 文本 -->
                     <input
                       v-else
@@ -1507,7 +1517,7 @@ const detailTabs = ['基础信息', '附件信息', '资产信息', '楼栋资�
 // 字段类型：fixed 固定（主键）/ readonly 只读 / select 下拉 / text|number|textarea 可编辑
 // required 必填保存时校验；编辑结果写回 buildingData 并同步 localStorage
 // ---------------------------------------------------------------------------
-type DetailFieldKind = 'fixed' | 'readonly' | 'select' | 'text' | 'number' | 'textarea';
+type DetailFieldKind = 'fixed' | 'readonly' | 'select' | 'text' | 'number' | 'date' | 'textarea';
 interface DetailFieldDef {
   key: string;
   label: string;
@@ -1516,18 +1526,25 @@ interface DetailFieldDef {
   options?: string[];
   unit?: string;
   min?: number;
+  /** 编辑态隐藏（浏览态仍展示），用于无业务意义的字段 */
+  hideInEdit?: boolean;
 }
 interface DetailSectionDef { title: string; fields: DetailFieldDef[] }
+
+/** 管理部门 / 使用部门下拉选项：内置常见部门 + 数据中已有部门 */
+const DEPARTMENT_OPTIONS = [
+  '教务处', '实验实训中心', '图书馆', '警体部', '后勤保障', '后勤保障处', '学生工作处', '基建处', '资产管理处',
+];
 
 const detailSections: DetailSectionDef[] = [
   {
     title: '基础信息',
     fields: [
-      { key: 'name', label: '楼宇名称', kind: 'fixed' },
+      { key: 'name', label: '楼宇名称', kind: 'text', required: true },
       { key: 'campus', label: '所在校区', kind: 'select', options: ['主校区', '东校区', '西校区'], required: true },
       { key: 'bizCategoryLabel', label: '楼宇类型', kind: 'select', options: [...BUILDING_CATEGORIES, OTHER_CATEGORY].map((c) => c.label), required: true },
-      { key: 'managementDept', label: '管理部门', kind: 'text', required: true },
-      { key: 'department', label: '使用部门', kind: 'text' },
+      { key: 'managementDept', label: '管理部门', kind: 'select', options: DEPARTMENT_OPTIONS, required: true },
+      { key: 'department', label: '使用部门', kind: 'select', options: DEPARTMENT_OPTIONS },
       { key: 'lngLat', label: '经纬度', kind: 'readonly' },
       { key: 'description', label: '备注', kind: 'textarea' },
     ],
@@ -1536,7 +1553,6 @@ const detailSections: DetailSectionDef[] = [
     title: '建筑信息',
     fields: [
       { key: 'totalFloors', label: '总层数', kind: 'number', required: true, unit: '层', min: 1 },
-      { key: 'roomCount', label: '房间数', kind: 'readonly', unit: '间' },
       { key: 'buildingArea', label: '建筑面积', kind: 'number', required: true, unit: '㎡', min: 0 },
       { key: 'usableArea', label: '使用面积', kind: 'number', unit: '㎡', min: 0 },
       { key: 'height', label: '建筑高度', kind: 'readonly', unit: 'm' },
@@ -1545,9 +1561,9 @@ const detailSections: DetailSectionDef[] = [
   {
     title: '建造信息',
     fields: [
-      { key: 'buildYear', label: '建造年代', kind: 'select', options: ['1950 年前', '1950-1979', '1980-1999', '2000-2010', '2011 年以后'] },
+      { key: 'buildYear', label: '建造年代', kind: 'select', options: ['1950 年前', '1950-1979', '1980-1999', '2000-2010', '2011 年以后'], hideInEdit: true },
       { key: 'structureType', label: '结构类型', kind: 'select', options: ['框架结构', '砖混结构', '剪力墙结构', '钢结构', '其他'] },
-      { key: 'completionDate', label: '竣工日期', kind: 'text' },
+      { key: 'completionDate', label: '竣工日期', kind: 'date' },
       { key: 'designUnit', label: '设计单位', kind: 'text' },
       { key: 'builder', label: '施工单位', kind: 'text' },
       { key: 'propertyOwner', label: '产权单位', kind: 'fixed' },
@@ -1567,9 +1583,27 @@ const selectedDataKey = computed(() => {
   return buildingData.value[bizName] ? bizName : selectedKey.value;
 });
 
+/** 楼宇名称：优先取本地编辑覆盖值（改名后即时显示），否则用模型节点显示名 */
+function shownBuildingName(): string {
+  const key = selectedDataKey.value;
+  const edits = loadStoredDetailEdits();
+  const edited = key && typeof edits[key]?.name === 'string' ? String(edits[key].name) : '';
+  return edited || (selected.value ? displayName(selected.value.name) : '');
+}
+
+/** 下拉字段选项：当前值不在预设列表里时补到最前，保证回显不空白 */
+function detailSelectOptions(f: DetailFieldDef): string[] {
+  const opts = f.options ?? [];
+  const cur = String(detailDraft[f.key] ?? '');
+  return cur && !opts.includes(cur) ? [cur, ...opts] : opts;
+}
+
 /** 字段展示值（浏览态 / 浏览态与锁定态共用） */
 function detailFieldDisplay(f: DetailFieldDef): string {
   const p = selectedProps.value;
+  if (f.key === 'name') {
+    return shownBuildingName();
+  }
   if (f.key === 'lngLat') {
     return selected.value ? `${selected.value.lngLat[0].toFixed(6)}, ${selected.value.lngLat[1].toFixed(6)}` : '—';
   }
@@ -1587,10 +1621,22 @@ function detailFieldDisplay(f: DetailFieldDef): string {
 
 /** 字段进入编辑态时的初值（不带单位 / 不带后缀） */
 function detailFieldDraft(f: DetailFieldDef): string {
+  if (f.key === 'name') return shownBuildingName();
   if (f.key === 'lngLat') return detailFieldDisplay(f);
   if (f.key === 'bizCategoryLabel') return resolveBizCategory(selectedProps.value).label;
   const v = (selectedProps.value as Record<string, unknown>)[f.key];
   return v == null ? '' : String(v);
+}
+
+/** 日期框：点击任意位置都主动弹出原生日历面板（Chrome 点文本区默认只进分段输入，不弹面板） */
+function onDateInputClick(e: MouseEvent): void {
+  const el = e.currentTarget as HTMLInputElement | null;
+  if (!el || typeof el.showPicker !== 'function') return;
+  try {
+    el.showPicker();
+  } catch {
+    // 浏览器不支持或面板已打开时忽略，保持原生行为
+  }
 }
 
 function startDetailEdit(): void {
@@ -1638,7 +1684,7 @@ function saveDetailEdit(): void {
   }
   const patch: Record<string, unknown> = {};
   for (const f of fields) {
-    if (f.kind === 'fixed' || f.kind === 'readonly') continue; // 固定 / 只读字段不写回
+    if (f.kind === 'fixed' || f.kind === 'readonly' || f.hideInEdit) continue; // 固定 / 只读 / 编辑态隐藏字段不写回
     const raw = String(detailDraft[f.key] ?? '').trim();
     if (f.key === 'bizCategoryLabel') {
       const meta = [...BUILDING_CATEGORIES, OTHER_CATEGORY].find((c) => c.label === raw);
@@ -1674,6 +1720,7 @@ function exportDetailExcel(): void {
   const p = selectedProps.value;
   if (!p.name) return;
   const esc = xmlEscape;
+  const exportName = shownBuildingName() || p.name; // 用改名后的名称（若已修改）
   const now = new Date();
   const stamp = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
 
@@ -1684,7 +1731,7 @@ function exportDetailExcel(): void {
       return `<Row><Cell><Data ss:Type="String">${label}</Data></Cell><Cell><Data ss:Type="String">${value}</Data></Cell></Row>`;
     }).join('');
     return `<Worksheet ss:Name="${esc(sec.title)}"><Table>
-      <Row><Cell><Data ss:Type="String">${esc(p.name)} · ${esc(sec.title)}</Data></Cell><Cell><Data ss:Type="String">导出时间：${esc(stamp)}</Data></Cell></Row>
+      <Row><Cell><Data ss:Type="String">${esc(exportName)} · ${esc(sec.title)}</Data></Cell><Cell><Data ss:Type="String">导出时间：${esc(stamp)}</Data></Cell></Row>
       <Row><Cell><Data ss:Type="String">字段</Data></Cell><Cell><Data ss:Type="String">值</Data></Cell></Row>
       ${rows}
       </Table></Worksheet>`;
@@ -1703,7 +1750,7 @@ ${sheets}
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `${p.name}_楼宇详情.xls`;
+  a.download = `${exportName}_楼宇详情.xls`;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
@@ -3281,6 +3328,13 @@ onBeforeUnmount(() => {
 }
 .detail-input:focus { border-color: #38bdf8; box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.14); }
 .detail-input--error { border-color: #ff6b6b !important; }
+/* 日期框：深色主题让日历图标/占位文字可见，整框可点击 */
+.detail-input--date { color-scheme: dark; cursor: pointer; }
+.detail-input--date::-webkit-calendar-picker-indicator {
+  cursor: pointer; opacity: .9;
+}
+.detail-input--date::-webkit-datetime-edit { color: #eaf2ff; }
+.detail-input--date::-webkit-datetime-edit-fields-wrapper { color: #eaf2ff; }
 .detail-textarea { resize: vertical; }
 select.detail-input { cursor: pointer; }
 select.detail-input option { background: #0e1626; color: #eaf2ff; }

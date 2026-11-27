@@ -556,7 +556,7 @@
 
         <!-- 底部操作栏：基础信息可编辑，其他 Tab 只读 -->
         <div class="detail-modal__footer">
-          <button class="detail-footer-btn detail-footer-btn--export" @click="exportDetailExcel" title="导出当前楼宇数据为 Excel">导出 Excel</button>
+          <button v-if="detailTab === '基础信息'" class="detail-footer-btn detail-footer-btn--export" @click="exportDetailExcel" title="导出当前楼宇基础信息为 Excel">导出 Excel</button>
           <template v-if="detailTab === '基础信息'">
             <button v-if="!detailEditing" class="detail-footer-btn detail-footer-btn--primary" @click="startDetailEdit">修改</button>
             <template v-else>

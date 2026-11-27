@@ -441,16 +441,56 @@
 
           <!-- 附件信息 -->
           <div v-else-if="detailTab === '附件信息'" class="detail-tabpane">
-            <ul class="attach-list">
-              <li v-for="(a, i) in attachmentList" :key="i" class="attach-item">
-                <span class="attach-icon" :class="`attach-icon--${a.type}`">{{ a.type === 'img' ? '图' : '档' }}</span>
-                <div class="attach-meta">
-                  <div class="attach-name">{{ a.name }} <em v-if="a.sample" class="tag-sample">示例</em></div>
-                  <div class="attach-sub">{{ a.typeLabel }} · {{ a.size }} · {{ a.time }}</div>
-                </div>
-                <button class="attach-dl" @click="downloadStub(a)">下载</button>
-              </li>
-            </ul>
+            <!-- 查询区：文件名搜索 + 类型筛选 + 导出清单 -->
+            <div class="attach-toolbar">
+              <input v-model="attachKeyword" class="attach-search" placeholder="搜索文件名…" />
+              <select v-model="attachTypeFilter" class="attach-filter">
+                <option value="">全部类型</option>
+                <option v-for="t in attachTypeOptions" :key="t" :value="t">{{ t }}</option>
+              </select>
+              <button class="attach-export" @click="exportAttachmentsExcel">导出清单</button>
+            </div>
+            <!-- 统计条 -->
+            <div class="attach-stats">
+              共 <b>{{ filteredAttachments.length }}</b> 个附件
+              <template v-if="attachKeyword || attachTypeFilter">（从 {{ attachmentList.length }} 个中筛选）</template>
+              <span class="attach-stats__sep">·</span>
+              图片 {{ attachStats.img }} / 文档 {{ attachStats.doc }}
+            </div>
+            <!-- 字段列表格 -->
+            <table class="attach-table">
+              <thead>
+                <tr>
+                  <th class="attach-col-idx">序号</th>
+                  <th>文件名称</th>
+                  <th class="attach-col-type">附件分类</th>
+                  <th class="attach-col-fmt">格式</th>
+                  <th class="attach-col-size">大小</th>
+                  <th class="attach-col-time">上传时间</th>
+                  <th class="attach-col-op">操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="(a, i) in filteredAttachments" :key="a.name">
+                  <td class="attach-idx">{{ i + 1 }}</td>
+                  <td class="attach-name-cell">
+                    <span class="attach-icon" :class="`attach-icon--${a.type}`">{{ a.type === 'img' ? '图' : '档' }}</span>
+                    <span class="attach-name">{{ a.name }}</span>
+                    <em v-if="a.sample" class="tag-sample">示例</em>
+                  </td>
+                  <td>{{ a.typeLabel }}</td>
+                  <td>{{ a.format }}</td>
+                  <td>{{ a.size }}</td>
+                  <td>{{ a.time }}</td>
+                  <td class="attach-ops">
+                    <button class="attach-op" @click="previewAttachment(a)">预览</button>
+                    <button class="attach-op attach-op--primary" @click="downloadAttachment(a)">下载</button>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+            <p v-if="!filteredAttachments.length" class="tab-empty">没有匹配的附件</p>
+            <p class="tab-note">示例附件为演示数据，正式文件由业务系统同步。</p>
           </div>
 
           <!-- 资产信息 -->
@@ -1762,6 +1802,7 @@ interface AttachmentItem {
   name: string;
   type: 'img' | 'doc';
   typeLabel: string;
+  format: string;
   size: string;
   time: string;
   sample: boolean;
@@ -1772,15 +1813,32 @@ const attachmentList = computed<AttachmentItem[]>(() => {
   const p = selectedProps.value;
   const list: AttachmentItem[] = [];
   if (p.image) {
-    list.push({ name: `${p.name} 实景图.jpg`, type: 'img', typeLabel: '图片', size: '1.2 MB', time: '2025-03-12', sample: false });
+    list.push({ name: `${p.name} 实景图.jpg`, type: 'img', typeLabel: '图片', format: 'jpg', size: '1.2 MB', time: '2025-03-12', sample: false });
   }
   list.push(
-    { name: `${p.name} 建筑平面图.dwg`, type: 'doc', typeLabel: 'CAD 图纸', size: '3.4 MB', time: '2024-11-08', sample: true },
-    { name: `${p.name} 竣工验收备案表.pdf`, type: 'doc', typeLabel: '文档', size: '860 KB', time: '2024-09-20', sample: true },
-    { name: `${p.name} 资产清查表.xlsx`, type: 'doc', typeLabel: '表格', size: '210 KB', time: '2025-06-01', sample: true },
+    { name: `${p.name} 建筑平面图.dwg`, type: 'doc', typeLabel: 'CAD 图纸', format: 'dwg', size: '3.4 MB', time: '2024-11-08', sample: true },
+    { name: `${p.name} 竣工验收备案表.pdf`, type: 'doc', typeLabel: '文档', format: 'pdf', size: '860 KB', time: '2024-09-20', sample: true },
+    { name: `${p.name} 资产清查表.xlsx`, type: 'doc', typeLabel: '表格', format: 'xlsx', size: '210 KB', time: '2025-06-01', sample: true },
   );
   return list;
 });
+
+// ---- 附件查询：文件名关键词 + 附件分类筛选 ----
+const attachKeyword = ref('');
+const attachTypeFilter = ref('');
+const attachTypeOptions = ['图片', 'CAD 图纸', '文档', '表格'];
+const filteredAttachments = computed<AttachmentItem[]>(() => {
+  const kw = attachKeyword.value.trim().toLowerCase();
+  const tf = attachTypeFilter.value;
+  return attachmentList.value.filter((a) =>
+    (!kw || a.name.toLowerCase().includes(kw)) && (!tf || a.typeLabel === tf)
+  );
+});
+/** 统计条按全量附件统计（不随筛选变化） */
+const attachStats = computed(() => ({
+  img: attachmentList.value.filter((a) => a.type === 'img').length,
+  doc: attachmentList.value.filter((a) => a.type === 'doc').length,
+}));
 
 /** 资产信息：按建筑面积测算的示例资产卡片 */
 const assetSummary = computed(() => {
@@ -1856,12 +1914,60 @@ const changeRecords = computed(() => [
   { date: '2025-06-01', type: '用途调整', desc: '部分楼层用途由办公调整为实训教室。', by: '教务处' },
 ]);
 
-function downloadStub(a: AttachmentItem) {
-  if (a.type === 'img') {
-    const img = selectedProps.value.image;
-    if (img) window.open(img, '_blank');
+/** 预览：真实图片新窗口打开；示例文档诚实提示（无真实文件） */
+function previewAttachment(a: AttachmentItem): void {
+  if (a.type === 'img' && selectedProps.value.image) {
+    window.open(selectedProps.value.image, '_blank');
+    return;
   }
-  // 示例文档暂无真实文件，仅对真实图片开放预览
+  ElMessage.warning(a.sample ? '该附件为示例数据，暂无真实文件可预览' : '暂无可预览的文件');
+}
+
+/** 下载：真实图片新窗口打开；示例文档诚实提示（无真实文件） */
+function downloadAttachment(a: AttachmentItem): void {
+  if (a.type === 'img' && selectedProps.value.image) {
+    window.open(selectedProps.value.image, '_blank');
+    return;
+  }
+  ElMessage.warning(a.sample ? '该附件为示例数据，暂无真实文件可下载' : '暂无可下载的文件');
+}
+
+/** 导出附件清单：零依赖 SpreadsheetML .xls，导出当前筛选结果 */
+function exportAttachmentsExcel(): void {
+  const p = selectedProps.value;
+  if (!p.name) return;
+  const esc = xmlEscape;
+  const exportName = shownBuildingName() || p.name;
+  const now = new Date();
+  const stamp = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+  const headers = ['序号', '文件名称', '附件分类', '格式', '大小', '上传时间', '是否示例'];
+  const headerRow = `<Row>${headers.map((h) => `<Cell><Data ss:Type="String">${esc(h)}</Data></Cell>`).join('')}</Row>`;
+  const rows = filteredAttachments.value.map((a, i) => {
+    const cells = [String(i + 1), a.name, a.typeLabel, a.format, a.size, a.time, a.sample ? '示例' : '真实'];
+    return `<Row>${cells.map((c) => `<Cell><Data ss:Type="String">${esc(c)}</Data></Cell>`).join('')}</Row>`;
+  }).join('');
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<?mso-application progid="Excel.Sheet"?>
+<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"
+ xmlns:o="urn:schemas-microsoft-com:office:office"
+ xmlns:x="urn:schemas-microsoft-com:office:excel"
+ xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">
+<Worksheet ss:Name="附件清单"><Table>
+<Row><Cell><Data ss:Type="String">${esc(exportName)} · 附件清单</Data></Cell><Cell><Data ss:Type="String">导出时间：${esc(stamp)}</Data></Cell></Row>
+${headerRow}
+${rows}
+</Table></Worksheet>
+</Workbook>`;
+  const blob = new Blob(['\ufeff', xml], { type: 'application/vnd.ms-excel;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${exportName}_附件清单.xls`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  ElMessage.success(`附件清单已导出（${filteredAttachments.value.length} 条）`);
 }
 
 // ---------------------------------------------------------------------------
@@ -3472,55 +3578,77 @@ select.detail-input option { background: #0e1626; color: #eaf2ff; }
 .room-mgmt__no { font-size: 16px; font-weight: 700; color: #2a241a; letter-spacing: 0.5px; }
 
 
-/* 附件信息 */
-.attach-list { list-style: none; margin: 0; padding: 8px 12px; display: flex; flex-direction: column; gap: 8px; }
-.attach-item {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 9px 10px;
-  border: 1px solid #24324a;
-  border-radius: 8px;
-  background: rgba(14, 20, 34, 0.5);
+/* 附件信息：查询区 + 字段表格 */
+.attach-toolbar {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 12px 6px;
 }
-.attach-icon {
-  flex: none;
-  width: 34px;
-  height: 34px;
-  border-radius: 7px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+.attach-search, .attach-filter {
+  appearance: none; outline: none;
+  height: 30px; padding: 0 9px; font-size: 12.5px;
+  color: #eaf2ff; background: #0e1626;
+  border: 1px solid #35507a; border-radius: 5px;
+}
+.attach-search { flex: 1; min-width: 0; }
+.attach-search::placeholder { color: #70809a; }
+.attach-search:focus, .attach-filter:focus { border-color: #38bdf8; box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.14); }
+.attach-filter { width: 110px; cursor: pointer; }
+.attach-filter option { background: #0e1626; color: #eaf2ff; }
+.attach-export {
+  appearance: none; cursor: pointer; font-size: 12px; white-space: nowrap;
+  height: 30px; padding: 0 12px; border-radius: 5px;
+  border: 1px solid #0b6fb8; color: #d7ecff;
+  background: linear-gradient(180deg, #0d6fa8, #0a5686);
+}
+.attach-export:hover { filter: brightness(1.15); }
+.attach-stats { padding: 2px 12px 8px; color: #8a97ad; font-size: 11.5px; }
+.attach-stats b { color: #d7ecff; font-size: 12.5px; }
+.attach-stats__sep { margin: 0 6px; color: #4a5a76; }
+.attach-table {
+  width: 100%; border-collapse: collapse;
+  margin: 0 12px; width: calc(100% - 24px);
   font-size: 12px;
-  font-weight: 700;
-  color: #fff;
-  background: #3a4a66;
+}
+.attach-table th {
+  text-align: left; padding: 8px 8px; white-space: nowrap;
+  color: #9fb0c8; font-weight: 500; font-size: 11.5px;
+  background: rgba(30, 42, 64, 0.7);
+  border-bottom: 1px solid #2c3c58;
+}
+.attach-table td {
+  padding: 8px; color: #d7e2f2; vertical-align: middle;
+  border-bottom: 1px dashed #1e2a40;
+}
+.attach-table tbody tr:hover { background: rgba(56, 189, 248, 0.06); }
+.attach-col-idx { width: 42px; }
+.attach-col-type { width: 88px; }
+.attach-col-fmt { width: 55px; }
+.attach-col-size { width: 74px; }
+.attach-col-time { width: 100px; }
+.attach-col-op { width: 108px; }
+.attach-idx { color: #7c8ba3; }
+.attach-name-cell { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.attach-icon {
+  flex: none; width: 26px; height: 26px; border-radius: 6px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 11px; font-weight: 700; color: #fff; background: #3a4a66;
 }
 .attach-icon--img { background: #1d7a5a; }
-.attach-meta { flex: 1; min-width: 0; }
-.attach-name { color: #eaf2ff; font-size: 13px; display: flex; align-items: center; gap: 6px; }
-.attach-sub { color: #8a97ad; font-size: 11px; margin-top: 2px; }
+.attach-name { color: #eaf2ff; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tag-sample {
-  font-style: normal;
-  font-size: 10px;
-  color: #f0b429;
-  border: 1px solid #5a4a1e;
+  flex: none; font-style: normal; font-size: 10px;
+  color: #f0b429; border: 1px solid #5a4a1e;
   background: rgba(240, 180, 41, 0.12);
-  border-radius: 4px;
-  padding: 0 5px;
+  border-radius: 4px; padding: 0 5px;
 }
-.attach-dl {
-  flex: none;
-  appearance: none;
-  border: 1px solid #2c3c58;
-  background: transparent;
-  color: #9fc6ff;
-  font-size: 12px;
-  padding: 5px 12px;
-  border-radius: 6px;
-  cursor: pointer;
+.attach-ops { display: flex; gap: 5px; }
+.attach-op {
+  appearance: none; cursor: pointer; font-size: 11.5px;
+  padding: 3px 8px; border-radius: 5px;
+  border: 1px solid #2c3c58; background: transparent; color: #9fc6ff;
 }
-.attach-dl:hover { border-color: #38bdf8; color: #38bdf8; }
+.attach-op:hover { border-color: #38bdf8; color: #38bdf8; }
+.attach-op--primary { border-color: #0b6fb8; color: #d7ecff; background: rgba(11, 111, 184, 0.25); }
 
 /* 资产信息卡片 */
 .asset-summary {

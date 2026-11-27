@@ -457,11 +457,19 @@
               <template v-if="attachKeyword || attachTypeFilter">（从 {{ attachmentList.length }} 个中筛选）</template>
               <span class="attach-stats__sep">·</span>
               图片 {{ attachStats.img }} / 文档 {{ attachStats.doc }}
+              <span v-if="selectedAttachNames.length" class="attach-stats__sel">· 已选 {{ selectedAttachNames.length }} 项</span>
             </div>
             <!-- 字段列表格 -->
             <table class="attach-table">
               <thead>
                 <tr>
+                  <th class="attach-col-check">
+                    <input
+                      type="checkbox" class="attach-check"
+                      :checked="allFilteredSelected" :disabled="!filteredAttachments.length"
+                      title="全选当前筛选结果" @change="onSelectAll"
+                    />
+                  </th>
                   <th class="attach-col-idx">序号</th>
                   <th>文件名称</th>
                   <th class="attach-col-type">附件分类</th>
@@ -472,7 +480,13 @@
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="(a, i) in filteredAttachments" :key="a.name">
+                <tr v-for="(a, i) in filteredAttachments" :key="a.name" :class="{ 'attach-row--selected': selectedAttachNames.includes(a.name) }">
+                  <td class="attach-check-cell">
+                    <input
+                      type="checkbox" class="attach-check"
+                      :checked="selectedAttachNames.includes(a.name)" @change="onSelectOne($event, a.name)"
+                    />
+                  </td>
                   <td class="attach-idx">{{ i + 1 }}</td>
                   <td class="attach-name-cell">
                     <span class="attach-icon" :class="`attach-icon--${a.type}`">{{ a.type === 'img' ? '图' : '档' }}</span>
@@ -486,12 +500,13 @@
                   <td class="attach-ops">
                     <button class="attach-op" @click="previewAttachment(a)">预览</button>
                     <button class="attach-op attach-op--primary" @click="downloadAttachment(a)">下载</button>
+                    <button class="attach-op attach-op--danger" @click="deleteAttachments([a.name])">删除</button>
                   </td>
                 </tr>
               </tbody>
             </table>
             <p v-if="!filteredAttachments.length" class="tab-empty">没有匹配的附件</p>
-            <!-- <p class="tab-note">示例附件为演示数据，正式文件由业务系统同步。</p> -->
+            <p class="tab-note">示例附件的删除仅在当前页面生效，刷新后还原；正式删除需业务系统接口。</p>
           </div>
 
           <!-- 资产信息 -->
@@ -554,9 +569,15 @@
           </div>
         </div>
 
-        <!-- 导出 Excel：固定在底部横线上方（不随内容滚动），仅基础信息页显示 -->
-        <div v-if="detailTab === '基础信息'" class="detail-export-row">
-          <button class="detail-footer-btn detail-footer-btn--export" @click="exportDetailExcel" title="导出当前楼宇基础信息为 Excel">导出 Excel</button>
+        <!-- 底部横线上方的操作行：基础信息=导出 Excel，附件信息=批量删除（样式与位置一致） -->
+        <div v-if="detailTab === '基础信息' || detailTab === '附件信息'" class="detail-export-row">
+          <button v-if="detailTab === '基础信息'" class="detail-footer-btn detail-footer-btn--export" @click="exportDetailExcel" title="导出当前楼宇基础信息为 Excel">导出 Excel</button>
+          <button
+            v-else class="detail-footer-btn detail-footer-btn--export attach-batch-del"
+            :disabled="!selectedAttachNames.length"
+            title="删除当前勾选的附件（需二次确认，示例数据仅本次页面生效）"
+            @click="deleteAttachments(selectedAttachNames)"
+          >批量删除<template v-if="selectedAttachNames.length">（{{ selectedAttachNames.length }}）</template></button>
         </div>
 
         <!-- 底部操作栏：关闭 / 修改居中排列，按钮之间留间隔 -->
@@ -725,7 +746,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch, type Ref } from 'vue';
 import * as THREE from 'three';
-import { ElMessage } from 'element-plus';
+import { ElMessage, ElMessageBox } from 'element-plus';
 import { loadAMap } from '../utils/loadAMap';
 import { MapScene, type PickResult, type MeasureResult, type ModelStats } from '../core/MapScene';
 import { DEFAULT_SCENE_CONFIG, type SceneConfig } from '../config/mapConfig';
@@ -1816,9 +1837,9 @@ interface AttachmentItem {
   sample: boolean;
 }
 
-/** 附件信息：含楼宇实景图（真实）与若干示例文档 */
-const attachmentList = computed<AttachmentItem[]>(() => {
-  const p = selectedProps.value;
+/** 附件信息：含楼宇实景图（真实）与若干示例文档。
+ *  用可变列表支持前端临时删除；切换楼宇重建，刷新页面还原（无后端接口）。 */
+function buildAttachmentList(p: BuildingProps): AttachmentItem[] {
   const list: AttachmentItem[] = [];
   if (p.image) {
     list.push({ name: `${p.name} 实景图.jpg`, type: 'img', typeLabel: '图片', format: 'jpg', size: '1.2 MB', time: '2025-03-12', sample: false });
@@ -1829,7 +1850,17 @@ const attachmentList = computed<AttachmentItem[]>(() => {
     { name: `${p.name} 资产清查表.xlsx`, type: 'doc', typeLabel: '表格', format: 'xlsx', size: '210 KB', time: '2025-06-01', sample: true },
   );
   return list;
-});
+}
+const selectedAttachNames = ref<string[]>([]);
+const attachmentList = ref<AttachmentItem[]>([]);
+watch(
+  () => selectedProps.value.name,
+  () => {
+    attachmentList.value = buildAttachmentList(selectedProps.value);
+    selectedAttachNames.value = [];
+  },
+  { immediate: true },
+);
 
 // ---- 附件查询：文件名关键词 + 附件分类筛选 ----
 const attachKeyword = ref('');
@@ -1851,6 +1882,43 @@ const attachStats = computed(() => ({
 function resetAttachQuery(): void {
   attachKeyword.value = '';
   attachTypeFilter.value = '';
+}
+
+// ---- 附件勾选 / 删除（示例数据：仅本次页面生效，刷新还原） ----
+/** 全选框：只针对当前筛选结果，且保持其他筛选结果的勾选不变 */
+const allFilteredSelected = computed(() => {
+  const rows = filteredAttachments.value;
+  return rows.length > 0 && rows.every((a) => selectedAttachNames.value.includes(a.name));
+});
+function onSelectAll(e: Event): void {
+  const checked = (e.target as HTMLInputElement).checked;
+  const names = filteredAttachments.value.map((a) => a.name);
+  selectedAttachNames.value = checked
+    ? [...new Set([...selectedAttachNames.value, ...names])]
+    : selectedAttachNames.value.filter((n) => !names.includes(n));
+}
+function onSelectOne(e: Event, name: string): void {
+  const checked = (e.target as HTMLInputElement).checked;
+  selectedAttachNames.value = checked
+    ? [...new Set([...selectedAttachNames.value, name])]
+    : selectedAttachNames.value.filter((n) => n !== name);
+}
+async function deleteAttachments(names: string[]): Promise<void> {
+  const targets = names.filter((n) => attachmentList.value.some((a) => a.name === n));
+  if (!targets.length) return;
+  try {
+    await ElMessageBox.confirm(
+      `确定删除 ${targets.length} 个附件吗？\n\n示例附件的删除仅在本次页面生效，刷新后还原；不会删除服务器上的任何文件。`,
+      targets.length > 1 ? '批量删除附件 - 二次确认' : '删除附件 - 二次确认',
+      { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' },
+    );
+  } catch {
+    return; // 用户取消，不删除
+  }
+  const removed = new Set(targets);
+  attachmentList.value = attachmentList.value.filter((a) => !removed.has(a.name));
+  selectedAttachNames.value = selectedAttachNames.value.filter((n) => !removed.has(n));
+  ElMessage.success(`已删除 ${targets.length} 个附件（本次页面生效，刷新后还原）`);
 }
 
 /** 资产信息：按建筑面积测算的示例资产卡片 */
@@ -3500,7 +3568,8 @@ select.detail-input option { background: #0e1626; color: #eaf2ff; }
   border-color: #2f7d6b; color: #b8e6d9;
   background: linear-gradient(180deg, #1c7a68, #14614f);
 }
-.detail-footer-btn--export:hover { background: linear-gradient(180deg, #14614f, #0f4c3e); color: #fff; }
+.detail-footer-btn--export:hover:not(:disabled) { background: linear-gradient(180deg, #14614f, #0f4c3e); color: #fff; }
+.detail-footer-btn--export:disabled { cursor: not-allowed; opacity: .45; filter: grayscale(.4); }
 .detail-error { color: #ff8f8f; font-size: 12px; }
 .detail-footer-hint { color: #7c8ba3; font-size: 11.5px; }
 
@@ -3642,6 +3711,7 @@ select.detail-input option { background: #0e1626; color: #eaf2ff; }
 .attach-stats { padding: 2px 12px 8px; color: #8a97ad; font-size: 11.5px; }
 .attach-stats b { color: #d7ecff; font-size: 12.5px; }
 .attach-stats__sep { margin: 0 6px; color: #4a5a76; }
+.attach-stats__sel { margin-left: 6px; color: #38bdf8; }
 .attach-table {
   width: 100%; border-collapse: collapse;
   margin: 0 12px; width: calc(100% - 24px);
@@ -3658,12 +3728,26 @@ select.detail-input option { background: #0e1626; color: #eaf2ff; }
   border-bottom: 1px dashed #1e2a40;
 }
 .attach-table tbody tr:hover { background: rgba(56, 189, 248, 0.06); }
+.attach-table tbody tr.attach-row--selected { background: rgba(56, 189, 248, 0.10); }
+.attach-col-check { width: 34px; }
+.attach-check {
+  appearance: none; position: relative; margin: 0;
+  width: 14px; height: 14px; cursor: pointer;
+  border: 1px solid #4a5a76; border-radius: 3px; background: #0e1626;
+}
+.attach-check:checked { border-color: #38bdf8; background: #0b6fb8; }
+.attach-check:checked::after {
+  content: ''; position: absolute; left: 3px; top: 0;
+  width: 4px; height: 8px; border: solid #fff; border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+.attach-check:disabled { opacity: .4; cursor: default; }
 .attach-col-idx { width: 42px; }
 .attach-col-type { width: 88px; }
 .attach-col-fmt { width: 55px; }
 .attach-col-size { width: 74px; }
 .attach-col-time { width: 100px; }
-.attach-col-op { width: 108px; }
+.attach-col-op { width: 152px; }
 .attach-idx { color: #7c8ba3; }
 .attach-name-cell { display: flex; align-items: center; gap: 7px; min-width: 0; }
 .attach-icon {
@@ -3687,6 +3771,8 @@ select.detail-input option { background: #0e1626; color: #eaf2ff; }
 }
 .attach-op:hover { border-color: #38bdf8; color: #38bdf8; }
 .attach-op--primary { border-color: #0b6fb8; color: #d7ecff; background: rgba(11, 111, 184, 0.25); }
+.attach-op--danger { border-color: #7b3a49; color: #f3a7b5; }
+.attach-op--danger:hover { border-color: #d0637a; color: #ffd0d9; }
 
 /* 资产信息卡片 */
 .asset-summary {

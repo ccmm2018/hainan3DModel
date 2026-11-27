@@ -491,7 +491,7 @@
               </tbody>
             </table>
             <p v-if="!filteredAttachments.length" class="tab-empty">没有匹配的附件</p>
-            <p class="tab-note">示例附件为演示数据，正式文件由业务系统同步。</p>
+            <!-- <p class="tab-note">示例附件为演示数据，正式文件由业务系统同步。</p> -->
           </div>
 
           <!-- 资产信息 -->
@@ -565,7 +565,7 @@
               <button class="detail-footer-btn detail-footer-btn--primary" @click="saveDetailEdit">保存</button>
             </template>
           </template>
-          <span v-else class="detail-footer-hint">该页数据由业务系统同步，仅供查看</span>
+          <!-- <span v-else class="detail-footer-hint">该页数据由业务系统同步，仅供查看</span> -->
         </div>
       </div>
     </div>

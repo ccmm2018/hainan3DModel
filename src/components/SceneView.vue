@@ -451,7 +451,8 @@
               <button class="attach-reset" @click="resetAttachQuery">重置</button>
               <button class="attach-export" @click="exportAttachmentsExcel">导出清单</button>
             </div>
-            <!-- 字段列表格 -->
+            <!-- 字段列表格（宽表横向滚动，操作列固定右侧） -->
+            <div class="attach-table-wrap">
             <table class="attach-table">
               <thead>
                 <tr>
@@ -497,6 +498,7 @@
                 </tr>
               </tbody>
             </table>
+            </div>
             <p v-if="!filteredAttachments.length" class="tab-empty">没有匹配的附件</p>
             <div class="table-pager">
               <span class="table-pager__total">共 {{ filteredAttachments.length }} 条</span>
@@ -523,7 +525,7 @@
               <table class="asset-table asset-table--detail">
                 <colgroup>
                   <col style="width: 94px" /><col style="width: 112px" /><col style="width: 66px" />
-                  <col style="width: 62px" /><col style="width: 34px" /><col style="width: 78px" />
+                  <col style="width: 62px" /><col style="width: 44px" /><col style="width: 78px" />
                   <col style="width: 78px" /><col style="width: 62px" /><col style="width: 86px" />
                   <col style="width: 84px" />
                 </colgroup>
@@ -565,6 +567,7 @@
 
           <!-- 楼栋资产 -->
           <div v-else-if="detailTab === '楼栋资产'" class="detail-tabpane">
+            <div class="asset-table-wrap">
             <table class="asset-table">
               <thead><tr><th>资产大类</th><th>金额（元）</th><th>占比</th></tr></thead>
               <tbody>
@@ -575,11 +578,13 @@
                 </tr>
               </tbody>
             </table>
+            </div>
             <p class="tab-note">楼栋资产按大类拆分，金额为示例测算值。</p>
           </div>
 
           <!-- 楼层信息 -->
           <div v-else-if="detailTab === '楼层信息'" class="detail-tabpane">
+            <div class="asset-table-wrap">
             <table class="asset-table">
               <thead><tr><th>楼层</th><th>面积（㎡）</th><th>房间数</th><th>主要用途</th></tr></thead>
               <tbody>
@@ -591,6 +596,7 @@
                 </tr>
               </tbody>
             </table>
+            </div>
             <p v-if="!floorRows.length" class="tab-empty">暂无楼层数据</p>
           </div>
 
@@ -3851,20 +3857,21 @@ select.detail-input option { background: #0e1626; color: #eaf2ff; }
   background: linear-gradient(180deg, #0d6fa8, #0a5686);
 }
 .attach-export:hover { filter: brightness(1.15); }
+.attach-table-wrap { overflow-x: auto; }
 .attach-table {
-  width: 100%; border-collapse: collapse;
-  margin: 0 12px; width: calc(100% - 24px);
-  font-size: 12px;
+  width: calc(100% - 24px); border-collapse: collapse;
+  margin: 0 12px; font-size: 12px;
+  border: 1px solid #2b3a56; /* 列边界清晰 */
 }
 .attach-table th {
   text-align: left; padding: 8px 8px; white-space: nowrap;
   color: #9fb0c8; font-weight: 500; font-size: 11.5px;
-  background: rgba(30, 42, 64, 0.7);
-  border-bottom: 1px solid #2c3c58;
+  background: #202a3f;
+  border: 1px solid #2b3a56;
 }
 .attach-table td {
   padding: 8px; color: #d7e2f2; vertical-align: middle;
-  border-bottom: 1px dashed #1e2a40;
+  border: 1px solid #2b3a56;
 }
 .attach-table tbody tr:hover { background: rgba(56, 189, 248, 0.06); }
 .attach-table tbody tr.attach-row--selected { background: rgba(56, 189, 248, 0.10); }
@@ -3887,6 +3894,12 @@ select.detail-input option { background: #0e1626; color: #eaf2ff; }
 .attach-col-size { width: 74px; }
 .attach-col-time { width: 100px; }
 .attach-col-op { width: 152px; }
+/* 操作列固定右侧：横向滚动时不随内容移动 */
+.attach-table .attach-col-op, .attach-table td.attach-ops {
+  position: sticky; right: 0; z-index: 1;
+  background: #141b2b; box-shadow: -3px 0 6px rgba(0, 0, 0, 0.3);
+}
+.attach-table thead .attach-col-op { z-index: 2; background: #202a3f; }
 .attach-idx { color: #7c8ba3; }
 .attach-name-cell { display: flex; align-items: center; gap: 7px; min-width: 0; }
 .attach-icon {
@@ -3916,9 +3929,19 @@ select.detail-input option { background: #0e1626; color: #eaf2ff; }
 /* 资产明细 / 资产大类 / 楼层表格 */
 .asset-table-wrap { overflow-x: auto; }
 .asset-table--detail { table-layout: fixed; font-size: 11.5px; }
-.asset-table--detail th, .asset-table--detail td {
+/* 表头绝不省略；单元格内容过长才省略（有 title 可看全） */
+.asset-table--detail th {
+  padding: 6px; white-space: nowrap; overflow: visible; color: #9fb0c8; background: #202a3f;
+}
+.asset-table--detail td {
   padding: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
+/* 操作列固定右侧 */
+.asset-table--detail th:last-child, .asset-table--detail td.asset-ops {
+  position: sticky; right: 0; z-index: 1;
+  background: #141b2b; box-shadow: -3px 0 6px rgba(0, 0, 0, 0.3);
+}
+.asset-table--detail thead th:last-child { z-index: 2; background: #202a3f; }
 .asset-code { color: #8fb8e8; }
 .asset-num { text-align: right; font-variant-numeric: tabular-nums; }
 .asset-status {
@@ -3941,11 +3964,12 @@ select.detail-input option { background: #0e1626; color: #eaf2ff; }
   margin: 10px 12px;
   border-collapse: collapse;
   font-size: 12.5px;
+  border: 1px solid #2b3a56;
 }
 .asset-table th, .asset-table td {
   padding: 8px 10px;
   text-align: left;
-  border-bottom: 1px solid #1e2a40;
+  border: 1px solid #2b3a56;
 }
 .asset-table th { color: #8a97ad; font-weight: 600; }
 .asset-table td { color: #eaf2ff; }

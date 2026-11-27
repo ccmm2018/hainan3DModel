@@ -466,8 +466,8 @@
                   <th class="attach-col-check">
                     <input
                       type="checkbox" class="attach-check"
-                      :checked="allFilteredSelected" :disabled="!filteredAttachments.length"
-                      title="全选当前筛选结果" @change="onSelectAll"
+                      :checked="allPageSelected" :disabled="!pagedAttachments.length"
+                      title="全选当前页" @change="onSelectAll"
                     />
                   </th>
                   <th class="attach-col-idx">序号</th>
@@ -480,14 +480,14 @@
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="(a, i) in filteredAttachments" :key="a.name" :class="{ 'attach-row--selected': selectedAttachNames.includes(a.name) }">
+                <tr v-for="(a, i) in pagedAttachments" :key="a.name" :class="{ 'attach-row--selected': selectedAttachNames.includes(a.name) }">
                   <td class="attach-check-cell">
                     <input
                       type="checkbox" class="attach-check"
                       :checked="selectedAttachNames.includes(a.name)" @change="onSelectOne($event, a.name)"
                     />
                   </td>
-                  <td class="attach-idx">{{ i + 1 }}</td>
+                  <td class="attach-idx">{{ (attachPage - 1) * PAGE_SIZE + i + 1 }}</td>
                   <td class="attach-name-cell">
                     <span class="attach-icon" :class="`attach-icon--${a.type}`">{{ a.type === 'img' ? '图' : '档' }}</span>
                     <span class="attach-name">{{ a.name }}</span>
@@ -506,11 +506,30 @@
               </tbody>
             </table>
             <p v-if="!filteredAttachments.length" class="tab-empty">没有匹配的附件</p>
+            <div class="table-pager">
+              <span class="table-pager__count">共 {{ filteredAttachments.length }} 条 · 第 {{ attachPage }} / {{ attachPageCount }} 页</span>
+              <button :disabled="attachPage <= 1" @click="attachPage--">上一页</button>
+              <button v-for="p in attachPageCount" :key="p" :class="{ active: p === attachPage }" @click="attachPage = p">{{ p }}</button>
+              <button :disabled="attachPage >= attachPageCount" @click="attachPage++">下一页</button>
+            </div>
             <p class="tab-note">示例附件的删除仅在当前页面生效，刷新后还原；正式删除需业务系统接口。</p>
           </div>
 
           <!-- 资产信息：指定楼栋的资产明细清单（表格） -->
           <div v-else-if="detailTab === '资产信息'" class="detail-tabpane">
+            <!-- 查询区：资产名称/编码搜索 + 资产类别筛选 + 重置 -->
+            <div class="attach-toolbar">
+              <input v-model="assetKeyword" class="attach-search" placeholder="搜索资产名称 / 编码…" />
+              <select v-model="assetCategoryFilter" class="attach-filter">
+                <option value="">全部类别</option>
+                <option v-for="c in assetCategoryOptions" :key="c" :value="c">{{ c }}</option>
+              </select>
+              <button class="attach-reset" @click="resetAssetQuery">重置</button>
+            </div>
+            <div class="attach-stats">
+              共 <b>{{ filteredAssetRows.length }}</b> 条资产
+              <template v-if="assetKeyword || assetCategoryFilter">（从 {{ assetDetailRows.length }} 条中筛选）</template>
+            </div>
             <div class="asset-table-wrap">
               <table class="asset-table asset-table--detail">
                 <colgroup>
@@ -525,7 +544,7 @@
                   </tr>
                 </thead>
                 <tbody>
-                  <tr v-for="row in assetDetailRows" :key="row.code">
+                  <tr v-for="row in pagedAssetRows" :key="row.code">
                     <td class="asset-code">{{ row.code }}</td>
                     <td :title="row.name">{{ row.name }}</td>
                     <td>{{ row.category }}</td>
@@ -538,6 +557,13 @@
                   </tr>
                 </tbody>
               </table>
+            </div>
+            <p v-if="!filteredAssetRows.length" class="tab-empty">没有匹配的资产</p>
+            <div class="table-pager">
+              <span class="table-pager__count">共 {{ filteredAssetRows.length }} 条 · 第 {{ assetPage }} / {{ assetPageCount }} 页</span>
+              <button :disabled="assetPage <= 1" @click="assetPage--">上一页</button>
+              <button v-for="p in assetPageCount" :key="p" :class="{ active: p === assetPage }" @click="assetPage = p">{{ p }}</button>
+              <button :disabled="assetPage >= assetPageCount" @click="assetPage++">下一页</button>
             </div>
             <p class="tab-note">资产信息为指定楼栋的示例明细，金额按建筑面积测算；正式数据由资产台账同步。</p>
           </div>
@@ -1882,6 +1908,9 @@ watch(
   { immediate: true },
 );
 
+// ---- 通用分页：每页条数（弹窗内表格） ----
+const PAGE_SIZE = 3;
+
 // ---- 附件查询：文件名关键词 + 附件分类筛选 ----
 const attachKeyword = ref('');
 const attachTypeFilter = ref('');
@@ -1893,6 +1922,14 @@ const filteredAttachments = computed<AttachmentItem[]>(() => {
     (!kw || a.name.toLowerCase().includes(kw)) && (!tf || a.typeLabel === tf)
   );
 });
+/** 附件分页：筛选结果按每页条数切片，筛选/删除变化后回到第一页 */
+const attachPage = ref(1);
+const attachPageCount = computed(() => Math.max(1, Math.ceil(filteredAttachments.value.length / PAGE_SIZE)));
+const pagedAttachments = computed(() => filteredAttachments.value.slice(
+  (attachPage.value - 1) * PAGE_SIZE, attachPage.value * PAGE_SIZE,
+));
+watch(filteredAttachments, () => { attachPage.value = 1; });
+
 /** 统计条按全量附件统计（不随筛选变化） */
 const attachStats = computed(() => ({
   img: attachmentList.value.filter((a) => a.type === 'img').length,
@@ -1905,14 +1942,14 @@ function resetAttachQuery(): void {
 }
 
 // ---- 附件勾选 / 删除（示例数据：仅本次页面生效，刷新还原） ----
-/** 全选框：只针对当前筛选结果，且保持其他筛选结果的勾选不变 */
-const allFilteredSelected = computed(() => {
-  const rows = filteredAttachments.value;
+/** 全选框：只针对当前页，且保持其他页/其他筛选结果的勾选不变 */
+const allPageSelected = computed(() => {
+  const rows = pagedAttachments.value;
   return rows.length > 0 && rows.every((a) => selectedAttachNames.value.includes(a.name));
 });
 function onSelectAll(e: Event): void {
   const checked = (e.target as HTMLInputElement).checked;
-  const names = filteredAttachments.value.map((a) => a.name);
+  const names = pagedAttachments.value.map((a) => a.name);
   selectedAttachNames.value = checked
     ? [...new Set([...selectedAttachNames.value, ...names])]
     : selectedAttachNames.value.filter((n) => !names.includes(n));
@@ -1991,6 +2028,30 @@ const assetDetailRows = computed<AssetDetailRow[]>(() => {
     };
   });
 });
+
+// ---- 资产信息查询：名称/编码关键词 + 类别筛选 + 分页 ----
+const assetKeyword = ref('');
+const assetCategoryFilter = ref('');
+const assetCategoryOptions = ['房屋建筑物', '通用设备', '专用设备', '家具用具'];
+const filteredAssetRows = computed<AssetDetailRow[]>(() => {
+  const kw = assetKeyword.value.trim().toLowerCase();
+  const cf = assetCategoryFilter.value;
+  return assetDetailRows.value.filter((r) =>
+    (!kw || r.name.toLowerCase().includes(kw) || r.code.toLowerCase().includes(kw)) &&
+    (!cf || r.category === cf)
+  );
+});
+const assetPage = ref(1);
+const assetPageCount = computed(() => Math.max(1, Math.ceil(filteredAssetRows.value.length / PAGE_SIZE)));
+const pagedAssetRows = computed(() => filteredAssetRows.value.slice(
+  (assetPage.value - 1) * PAGE_SIZE, assetPage.value * PAGE_SIZE,
+));
+watch(filteredAssetRows, () => { assetPage.value = 1; });
+function resetAssetQuery(): void {
+  assetKeyword.value = '';
+  assetCategoryFilter.value = '';
+  assetPage.value = 1;
+}
 
 /** 楼栋资产：按大类拆分（示例测算） */
 const buildingAssetRows = computed(() => {
@@ -3856,6 +3917,23 @@ select.detail-input option { background: #0e1626; color: #eaf2ff; }
 .asset-table th { color: #8a97ad; font-weight: 600; }
 .asset-table td { color: #eaf2ff; }
 .asset-table tbody tr:hover { background: rgba(56, 189, 248, 0.06); }
+
+/* 通用分页条（附件信息 / 资产信息） */
+.table-pager {
+  display: flex; align-items: center; justify-content: flex-end; gap: 5px;
+  padding: 4px 12px 8px; color: #8a97ad; font-size: 11.5px;
+}
+.table-pager__count { margin-right: auto; }
+.table-pager button {
+  appearance: none; cursor: pointer; min-width: 26px; height: 24px;
+  padding: 0 6px; font-size: 11.5px; border-radius: 4px;
+  border: 1px solid #3a4a66; background: transparent; color: #9fb0c8;
+}
+.table-pager button:hover:not(:disabled) { border-color: #38bdf8; color: #38bdf8; }
+.table-pager button.active {
+  border-color: #0b6fb8; color: #fff; background: rgba(11, 111, 184, 0.35);
+}
+.table-pager button:disabled { cursor: not-allowed; opacity: .4; }
 
 .tab-note { margin: 4px 16px 14px; color: #7d8aa3; font-size: 11px; line-height: 1.6; }
 .tab-empty { margin: 18px 16px; color: #7d8aa3; font-size: 13px; text-align: center; }

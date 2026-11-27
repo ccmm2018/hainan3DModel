@@ -448,6 +448,7 @@
                 <option value="">全部类型</option>
                 <option v-for="t in attachTypeOptions" :key="t" :value="t">{{ t }}</option>
               </select>
+              <button class="attach-reset" @click="resetAttachQuery">重置</button>
               <button class="attach-export" @click="exportAttachmentsExcel">导出清单</button>
             </div>
             <!-- 统计条 -->
@@ -1839,6 +1840,11 @@ const attachStats = computed(() => ({
   img: attachmentList.value.filter((a) => a.type === 'img').length,
   doc: attachmentList.value.filter((a) => a.type === 'doc').length,
 }));
+/** 重置查询：清空关键词与类型筛选 */
+function resetAttachQuery(): void {
+  attachKeyword.value = '';
+  attachTypeFilter.value = '';
+}
 
 /** 资产信息：按建筑面积测算的示例资产卡片 */
 const assetSummary = computed(() => {
@@ -3589,11 +3595,17 @@ select.detail-input option { background: #0e1626; color: #eaf2ff; }
   color: #eaf2ff; background: #0e1626;
   border: 1px solid #35507a; border-radius: 5px;
 }
-.attach-search { flex: 1; min-width: 0; }
+.attach-search { width: 180px; flex: none; }
 .attach-search::placeholder { color: #70809a; }
 .attach-search:focus, .attach-filter:focus { border-color: #38bdf8; box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.14); }
 .attach-filter { width: 110px; cursor: pointer; }
 .attach-filter option { background: #0e1626; color: #eaf2ff; }
+.attach-reset {
+  appearance: none; cursor: pointer; font-size: 12px;
+  height: 30px; padding: 0 12px; border-radius: 5px;
+  border: 1px solid #3a4a66; background: transparent; color: #9fb0c8;
+}
+.attach-reset:hover { border-color: #38bdf8; color: #38bdf8; }
 .attach-export {
   appearance: none; cursor: pointer; font-size: 12px; white-space: nowrap;
   height: 30px; padding: 0 12px; border-radius: 5px;

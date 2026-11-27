@@ -509,17 +509,37 @@
             <p class="tab-note">示例附件的删除仅在当前页面生效，刷新后还原；正式删除需业务系统接口。</p>
           </div>
 
-          <!-- 资产信息 -->
+          <!-- 资产信息：指定楼栋的资产明细清单（表格） -->
           <div v-else-if="detailTab === '资产信息'" class="detail-tabpane">
-            <div class="asset-summary">
-              <div><span>资产编码</span><b>{{ assetSummary.code }}</b></div>
-              <div><span>资产类别</span><b>{{ assetSummary.category }}</b></div>
-              <div><span>建筑原值</span><b>{{ assetSummary.original.toLocaleString() }} 元</b></div>
-              <div><span>当前净值</span><b>{{ assetSummary.net.toLocaleString() }} 元</b></div>
-              <div><span>折旧年限</span><b>{{ assetSummary.life }} 年</b></div>
-              <div><span>使用状态</span><b>{{ assetSummary.status }}</b></div>
+            <div class="asset-table-wrap">
+              <table class="asset-table asset-table--detail">
+                <colgroup>
+                  <col style="width: 106px" /><col style="width: 126px" /><col style="width: 76px" />
+                  <col style="width: 72px" /><col style="width: 40px" /><col style="width: 84px" />
+                  <col style="width: 84px" /><col style="width: 70px" /><col style="width: 92px" />
+                </colgroup>
+                <thead>
+                  <tr>
+                    <th>资产编码</th><th>资产名称</th><th>资产类别</th><th>规格型号</th>
+                    <th>数量</th><th>原值（元）</th><th>净值（元）</th><th>使用状态</th><th>取得日期</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="row in assetDetailRows" :key="row.code">
+                    <td class="asset-code">{{ row.code }}</td>
+                    <td :title="row.name">{{ row.name }}</td>
+                    <td>{{ row.category }}</td>
+                    <td>{{ row.spec }}</td>
+                    <td>{{ row.count }}</td>
+                    <td class="asset-num">{{ row.original.toLocaleString() }}</td>
+                    <td class="asset-num">{{ row.net.toLocaleString() }}</td>
+                    <td><span class="asset-status" :class="{ 'asset-status--idle': row.status !== '在用' }">{{ row.status }}</span></td>
+                    <td>{{ row.date }}</td>
+                  </tr>
+                </tbody>
+              </table>
             </div>
-            <p class="tab-note">资产台账对接中，金额为按建筑面积测算的示例值。</p>
+            <p class="tab-note">资产信息为指定楼栋的示例明细，金额按建筑面积测算；正式数据由资产台账同步。</p>
           </div>
 
           <!-- 楼栋资产 -->
@@ -1936,6 +1956,40 @@ const assetSummary = computed(() => {
     life: 50,
     status: '在用',
   };
+});
+
+/** 资产信息：指定楼栋的资产明细清单（示例测算，按资产大类拆成多条） */
+interface AssetDetailRow {
+  code: string;
+  name: string;
+  category: string;
+  spec: string;
+  count: number;
+  original: number;
+  net: number;
+  status: string;
+  date: string;
+}
+const assetDetailRows = computed<AssetDetailRow[]>(() => {
+  const p = selectedProps.value;
+  const total = assetSummary.value.original;
+  const defs = [
+    { name: `${p.name} 主体建筑`, category: '房屋建筑物', spec: '钢混结构', count: 1, ratio: 0.86, netRatio: 0.82, status: '在用', date: '2015-09-18' },
+    { name: `${p.name} 配电设备`, category: '通用设备', spec: '低压配电柜', count: 4, ratio: 0.07, netRatio: 0.65, status: '在用', date: '2018-05-20' },
+    { name: `${p.name} 实验实训设备`, category: '专用设备', spec: '教学仪器', count: 12, ratio: 0.05, netRatio: 0.58, status: '在用', date: '2020-11-03' },
+    { name: `${p.name} 办公家具`, category: '家具用具', spec: '桌椅/柜类', count: 30, ratio: 0.02, netRatio: 0.35, status: '部分闲置', date: '2017-08-15' },
+  ];
+  let used = 0;
+  return defs.map((d, i) => {
+    // 最后一条取余额，保证明细原值合计=汇总原值（避免四舍五入尾差）
+    const original = i === defs.length - 1 ? Math.max(0, total - used) : Math.round(total * d.ratio);
+    used += original;
+    return {
+      code: `${assetSummary.value.code}-${String(i + 1).padStart(2, '0')}`,
+      name: d.name, category: d.category, spec: d.spec, count: d.count,
+      original, net: Math.round(original * d.netRatio), status: d.status, date: d.date,
+    };
+  });
 });
 
 /** 楼栋资产：按大类拆分（示例测算） */
@@ -3774,25 +3828,20 @@ select.detail-input option { background: #0e1626; color: #eaf2ff; }
 .attach-op--danger { border-color: #7b3a49; color: #f3a7b5; }
 .attach-op--danger:hover { border-color: #d0637a; color: #ffd0d9; }
 
-/* 资产信息卡片 */
-.asset-summary {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 0 16px;
-  padding: 12px 16px;
+/* 资产明细 / 资产大类 / 楼层表格 */
+.asset-table-wrap { overflow-x: auto; }
+.asset-table--detail { table-layout: fixed; font-size: 11.5px; }
+.asset-table--detail th, .asset-table--detail td {
+  padding: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.asset-summary > div {
-  display: flex;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 8px 0;
-  font-size: 13px;
-  border-bottom: 1px dashed #1e2a40;
+.asset-code { color: #8fb8e8; }
+.asset-num { text-align: right; font-variant-numeric: tabular-nums; }
+.asset-status {
+  font-size: 11px; padding: 2px 6px; border-radius: 4px;
+  color: #a7e3c4; background: rgba(45, 160, 100, .16);
 }
-.asset-summary span { color: #8a97ad; white-space: nowrap; }
-.asset-summary b { color: #eaf2ff; text-align: right; }
+.asset-status--idle { color: #f0c274; background: rgba(240, 180, 41, .14); }
 
-/* 资产 / 楼层表格 */
 .asset-table {
   width: calc(100% - 24px);
   margin: 10px 12px;

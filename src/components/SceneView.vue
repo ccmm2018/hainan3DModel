@@ -3977,7 +3977,7 @@ select.detail-input option { background: #0e1626; color: #eaf2ff; }
   display: flex; align-items: center; justify-content: flex-end; gap: 5px;
   padding: 4px 12px 8px; color: #8a97ad; font-size: 11.5px;
 }
-.table-pager__total { margin-right: auto; }
+.table-pager__total { white-space: nowrap; }
 .table-pager__count { margin-right: 4px; white-space: nowrap; color: #b7c6dc; }
 .table-pager button {
   appearance: none; cursor: pointer; min-width: 26px; height: 24px;

@@ -554,18 +554,25 @@
           </div>
         </div>
 
-        <!-- 底部操作栏：基础信息可编辑，其他 Tab 只读 -->
+        <!-- 导出 Excel：固定在底部横线上方（不随内容滚动），仅基础信息页显示 -->
+        <div v-if="detailTab === '基础信息'" class="detail-export-row">
+          <button class="detail-footer-btn detail-footer-btn--export" @click="exportDetailExcel" title="导出当前楼宇基础信息为 Excel">导出 Excel</button>
+        </div>
+
+        <!-- 底部操作栏：关闭 / 修改居中排列，按钮之间留间隔 -->
         <div class="detail-modal__footer">
-          <button v-if="detailTab === '基础信息'" class="detail-footer-btn detail-footer-btn--export" @click="exportDetailExcel" title="导出当前楼宇基础信息为 Excel">导出 Excel</button>
-          <template v-if="detailTab === '基础信息'">
-            <button v-if="!detailEditing" class="detail-footer-btn detail-footer-btn--primary" @click="startDetailEdit">修改</button>
-            <template v-else>
-              <span v-if="detailError" class="detail-error">{{ detailError }}</span>
-              <button class="detail-footer-btn" @click="cancelDetailEdit">取消</button>
-              <button class="detail-footer-btn detail-footer-btn--primary" @click="saveDetailEdit">保存</button>
+          <div class="detail-footer-actions">
+            <button class="detail-footer-btn detail-footer-btn--close" @click="detailOpen = false">关闭</button>
+            <template v-if="detailTab === '基础信息'">
+              <button v-if="!detailEditing" class="detail-footer-btn detail-footer-btn--primary" @click="startDetailEdit">修改</button>
+              <template v-else>
+                <span v-if="detailError" class="detail-error">{{ detailError }}</span>
+                <button class="detail-footer-btn" @click="cancelDetailEdit">取消</button>
+                <button class="detail-footer-btn detail-footer-btn--primary" @click="saveDetailEdit">保存</button>
+              </template>
             </template>
-          </template>
-          <!-- <span v-else class="detail-footer-hint">该页数据由业务系统同步，仅供查看</span> -->
+            <span v-else class="detail-footer-hint">该页数据由业务系统同步，仅供查看</span>
+          </div>
         </div>
       </div>
     </div>
@@ -3269,14 +3276,17 @@ onBeforeUnmount(() => {
   backdrop-filter: blur(3px);
 }
 .detail-modal__card {
+  display: flex;
+  flex-direction: column;
   width: 50vw;
   max-width: 50vw;
   height: 80vh;
   max-height: 80vh;
-  overflow-y: auto;
-  border: 1px solid #24324a;
+  overflow: hidden; /* 整体不滚动，仅 body 滚动，footer 永远固定底部 */
+  border: 1px solid #2b3a56;
   border-radius: 10px;
-  background: rgba(20, 27, 43, 0.98);
+  /* 上浅下深的深蓝灰渐变，替代纯黑，更有层次 */
+  background: linear-gradient(180deg, rgba(28, 38, 58, 0.98) 0%, rgba(16, 22, 37, 0.98) 100%);
   box-shadow: 0 24px 70px rgba(0, 0, 0, 0.5);
   will-change: transform;
   transition: width 0.2s, height 0.2s, max-width 0.2s, max-height 0.2s;
@@ -3289,6 +3299,7 @@ onBeforeUnmount(() => {
   border-radius: 8px;
 }
 .detail-modal__head {
+  flex: none;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -3369,6 +3380,7 @@ onBeforeUnmount(() => {
 
 /* 楼宇详情 Tab */
 .detail-modal__tabs {
+  flex: none;
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
@@ -3398,7 +3410,7 @@ onBeforeUnmount(() => {
   border-bottom-color: transparent;
   font-weight: 600;
 }
-.detail-modal__body { padding: 0 0 8px; }
+.detail-modal__body { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 0 0 8px; }
 .detail-tabpane { padding-top: 4px; }
 
 /* 楼宇详情 · 基础信息分块 */
@@ -3450,14 +3462,22 @@ onBeforeUnmount(() => {
 .detail-textarea { resize: vertical; }
 select.detail-input { cursor: pointer; }
 select.detail-input option { background: #0e1626; color: #eaf2ff; }
-/* 底部操作栏 */
-.detail-modal__footer {
-  position: sticky; bottom: 0; z-index: 3;
-  display: flex; align-items: center; justify-content: flex-end; gap: 8px;
-  padding: 10px 16px;
-  border-top: 1px solid #24324a;
-  background: rgba(20, 27, 43, 0.98);
+/* 导出 Excel：贴在底部横线上方，固定在内容区与操作栏之间 */
+.detail-export-row {
+  flex: none;
+  display: flex; justify-content: flex-start;
+  padding: 4px 16px 8px;
+  background: rgba(16, 22, 37, 0.98);
 }
+/* 底部操作栏：关闭 / 修改居中，按钮间留间隔 */
+.detail-modal__footer {
+  flex: none; z-index: 3;
+  display: flex; align-items: center; justify-content: center;
+  padding: 10px 16px 12px;
+  border-top: 1px solid #2b3a56;
+  background: rgba(16, 22, 37, 0.98);
+}
+.detail-footer-actions { display: flex; align-items: center; justify-content: center; gap: 18px; }
 .detail-footer-btn {
   appearance: none; cursor: pointer; font-size: 12.5px;
   padding: 7px 18px; border-radius: 6px;
@@ -3470,8 +3490,13 @@ select.detail-input option { background: #0e1626; color: #eaf2ff; }
   box-shadow: 0 2px 6px rgba(11, 111, 184, 0.28);
 }
 .detail-footer-btn--primary:hover { background: linear-gradient(180deg, #0b6fb8, #095a99); }
+.detail-footer-btn--close {
+  border-color: #b5485e; color: #ffd9e0; font-weight: 600;
+  background: linear-gradient(180deg, #a33b50, #832c3e);
+  box-shadow: 0 2px 6px rgba(163, 59, 80, 0.28);
+}
+.detail-footer-btn--close:hover { background: linear-gradient(180deg, #b5485e, #93344a); color: #fff; }
 .detail-footer-btn--export {
-  margin-right: auto;
   border-color: #2f7d6b; color: #b8e6d9;
   background: linear-gradient(180deg, #1c7a68, #14614f);
 }

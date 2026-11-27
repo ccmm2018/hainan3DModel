@@ -357,29 +357,69 @@
             :key="t"
             class="detail-tab"
             :class="{ active: detailTab === t }"
-            @click="detailTab = t"
+            @click="onDetailTabClick(t)"
           >{{ t }}</button>
         </div>
 
         <div class="detail-modal__body">
-          <!-- 基础信息 -->
+          <!-- 基础信息：分块展示（基础信息 / 建筑信息 / 建造信息） -->
           <div v-if="detailTab === '基础信息'" class="detail-tabpane">
             <div v-if="selectedProps.image && !imageError" class="detail-modal__image">
               <img :src="selectedProps.image" :alt="selectedProps.name" @error="imageError = true" />
             </div>
-            <dl class="detail-modal__grid">
-              <div><dt>所在校区</dt><dd>{{ selectedProps.campus ?? '—' }}</dd></div>
-              <div><dt>管理部门</dt><dd>{{ selectedProps.managementDept ?? selectedProps.department ?? '—' }}</dd></div>
-              <div><dt>使用部门</dt><dd>{{ selectedProps.department ?? '—' }}</dd></div>
-              <div><dt>类型</dt><dd>{{ categoryLabel(selectedProps.category) }}</dd></div>
-              <div><dt>总层数</dt><dd>{{ selectedProps.totalFloors != null ? `${selectedProps.totalFloors} 层` : '—' }}</dd></div>
-              <div><dt>房间数</dt><dd>{{ selectedProps.roomCount != null ? `${selectedProps.roomCount} 间` : '—' }}</dd></div>
-              <div><dt>建筑面积</dt><dd>{{ selectedProps.buildingArea != null ? `${selectedProps.buildingArea.toLocaleString()} ㎡` : '—' }}</dd></div>
-              <div><dt>使用面积</dt><dd>{{ selectedProps.usableArea != null ? `${selectedProps.usableArea.toLocaleString()} ㎡` : '—' }}</dd></div>
-              <div><dt>建筑高度</dt><dd>{{ selectedProps.height ?? '—' }}</dd></div>
-              <div v-if="selected"><dt>经纬度</dt><dd>{{ selected.lngLat[0].toFixed(6) }}, {{ selected.lngLat[1].toFixed(6) }}</dd></div>
-            </dl>
-            <p v-if="selectedProps.description" class="detail-modal__desc">{{ selectedProps.description }}</p>
+
+            <section v-for="sec in detailSections" :key="sec.title" class="detail-block">
+              <h4 class="detail-block__title"><span class="detail-block__bar"></span>{{ sec.title }}</h4>
+              <dl class="detail-modal__grid" :class="{ 'detail-modal__grid--edit': detailEditing }">
+                <div
+                  v-for="f in sec.fields"
+                  :key="f.key"
+                  class="detail-field"
+                  :class="{ 'detail-field--wide': f.kind === 'textarea' }"
+                >
+                  <dt>
+                    {{ f.label }}<em v-if="detailEditing && f.required" class="detail-req" title="必填">*</em>
+                  </dt>
+                  <dd>
+                    <!-- 浏览态：统一只读展示 -->
+                    <template v-if="!detailEditing">
+                      <span class="detail-value">{{ detailFieldDisplay(f) }}</span>
+                    </template>
+                    <!-- 编辑态：固定 / 只读（不可改，带标记） -->
+                    <template v-else-if="f.kind === 'fixed' || f.kind === 'readonly'">
+                      <span class="detail-value detail-value--locked">{{ detailFieldDisplay(f) }}</span>
+                      <span class="detail-field-tag">{{ f.kind === 'fixed' ? '固定' : '只读' }}</span>
+                    </template>
+                    <!-- 编辑态：下拉 -->
+                    <select
+                      v-else-if="f.kind === 'select'"
+                      v-model="detailDraft[f.key]"
+                      class="detail-input"
+                      :class="{ 'detail-input--error': detailErrorField === f.key }"
+                    >
+                      <option v-for="opt in f.options" :key="opt" :value="opt">{{ opt }}</option>
+                    </select>
+                    <!-- 编辑态：多行文本 -->
+                    <textarea
+                      v-else-if="f.kind === 'textarea'"
+                      v-model="detailDraft[f.key]"
+                      class="detail-input detail-textarea"
+                      rows="2"
+                      :class="{ 'detail-input--error': detailErrorField === f.key }"
+                    ></textarea>
+                    <!-- 编辑态：数字 / 文本 -->
+                    <input
+                      v-else
+                      v-model="detailDraft[f.key]"
+                      class="detail-input"
+                      :type="f.kind === 'number' ? 'number' : 'text'"
+                      :min="f.min"
+                      :class="{ 'detail-input--error': detailErrorField === f.key }"
+                    />
+                  </dd>
+                </div>
+              </dl>
+            </section>
           </div>
 
           <!-- 附件信息 -->
@@ -454,6 +494,19 @@
             </ul>
             <p class="tab-note">变更记录为示例数据，正式数据由资产系统同步。</p>
           </div>
+        </div>
+
+        <!-- 底部操作栏：基础信息可编辑，其他 Tab 只读 -->
+        <div class="detail-modal__footer">
+          <template v-if="detailTab === '基础信息'">
+            <button v-if="!detailEditing" class="detail-footer-btn detail-footer-btn--primary" @click="startDetailEdit">修改</button>
+            <template v-else>
+              <span v-if="detailError" class="detail-error">{{ detailError }}</span>
+              <button class="detail-footer-btn" @click="cancelDetailEdit">取消</button>
+              <button class="detail-footer-btn detail-footer-btn--primary" @click="saveDetailEdit">保存</button>
+            </template>
+          </template>
+          <span v-else class="detail-footer-hint">该页数据由业务系统同步，仅供查看</span>
         </div>
       </div>
     </div>
@@ -613,6 +666,9 @@ import { DEFAULT_SCENE_CONFIG, type SceneConfig } from '../config/mapConfig';
 import {
   SAMPLE_BUILDING_DATA,
   fetchBuildingData,
+  BUILDING_CATEGORIES,
+  OTHER_CATEGORY,
+  resolveBizCategory,
   type BuildingDataMap,
   type BuildingProps,
 } from '../data/buildingData';
@@ -664,7 +720,26 @@ const businessReady = ref(false); // buildings.geojson / rooms.geojson 是否都
 
 const config: SceneConfig = DEFAULT_SCENE_CONFIG;
 // 属性数据源：优先从 GeoJSON / 后端 API 读取，失败则回退到内置示例数据
-const buildingData = ref<BuildingDataMap>(SAMPLE_BUILDING_DATA);
+// 楼宇详情「修改」的本地持久化：本地项目无后端，编辑结果存 localStorage，刷新后仍生效
+const DETAIL_EDITS_KEY = 'hnjcxy_building_detail_edits';
+type DetailEdits = Record<string, Record<string, unknown>>;
+function loadStoredDetailEdits(): DetailEdits {
+  try {
+    const raw = localStorage.getItem(DETAIL_EDITS_KEY);
+    return raw ? (JSON.parse(raw) as DetailEdits) : {};
+  } catch {
+    return {};
+  }
+}
+function applyStoredDetailEdits(map: BuildingDataMap): BuildingDataMap {
+  const edits = loadStoredDetailEdits();
+  const out: BuildingDataMap = { ...map };
+  for (const key of Object.keys(edits)) {
+    if (out[key]) out[key] = { ...out[key], ...edits[key] };
+  }
+  return out;
+}
+const buildingData = ref<BuildingDataMap>(applyStoredDetailEdits(SAMPLE_BUILDING_DATA));
 const roomData = ref<RoomDataMap>(SAMPLE_ROOM_DATA);
 
 const hovered = ref<PickResult | null>(null);
@@ -1353,6 +1428,7 @@ function closePanel() {
   selected.value = null;
   panelAnchor.value = null;
   detailOpen.value = false;
+  cancelDetailEdit();
   imageError.value = false;
   roomMgmtOpen.value = false; // 关闭属性面板时一并关闭房间管理面板
   scene?.clearHighlight();
@@ -1364,6 +1440,8 @@ function flyToSelected() {
 
 function openBuildingDetail() {
   detailTab.value = '基础信息'; // 默认展示「基础信息」
+  cancelDetailEdit(); // 每次打开均回到浏览态
+  imageError.value = false;
   roomMgmtOpen.value = false; // 与房间管理抽屉互斥，避免两个大面板同时铺满屏幕
   detailDragReset(); // 每次打开恢复初始居中位置
   detailOpen.value = true;
@@ -1409,6 +1487,166 @@ function openRoomManagement() {
 // 楼宇详情 Tab：基础信息 / 附件信息 / 资产信息 / 楼栋资产 / 楼层信息 / 变更记录
 // ---------------------------------------------------------------------------
 const detailTabs = ['基础信息', '附件信息', '资产信息', '楼栋资产', '楼层信息', '变更记录'] as const;
+
+// ---------------------------------------------------------------------------
+// 基础信息分块字段定义 + 修改模式
+// 字段类型：fixed 固定（主键）/ readonly 只读 / select 下拉 / text|number|textarea 可编辑
+// required 必填保存时校验；编辑结果写回 buildingData 并同步 localStorage
+// ---------------------------------------------------------------------------
+type DetailFieldKind = 'fixed' | 'readonly' | 'select' | 'text' | 'number' | 'textarea';
+interface DetailFieldDef {
+  key: string;
+  label: string;
+  kind: DetailFieldKind;
+  required?: boolean;
+  options?: string[];
+  unit?: string;
+  min?: number;
+}
+interface DetailSectionDef { title: string; fields: DetailFieldDef[] }
+
+const detailSections: DetailSectionDef[] = [
+  {
+    title: '基础信息',
+    fields: [
+      { key: 'name', label: '楼宇名称', kind: 'fixed' },
+      { key: 'campus', label: '所在校区', kind: 'select', options: ['主校区', '东校区', '西校区'], required: true },
+      { key: 'bizCategoryLabel', label: '楼宇类型', kind: 'select', options: [...BUILDING_CATEGORIES, OTHER_CATEGORY].map((c) => c.label), required: true },
+      { key: 'managementDept', label: '管理部门', kind: 'text', required: true },
+      { key: 'department', label: '使用部门', kind: 'text' },
+      { key: 'lngLat', label: '经纬度', kind: 'readonly' },
+      { key: 'description', label: '备注', kind: 'textarea' },
+    ],
+  },
+  {
+    title: '建筑信息',
+    fields: [
+      { key: 'totalFloors', label: '总层数', kind: 'number', required: true, unit: '层', min: 1 },
+      { key: 'roomCount', label: '房间数', kind: 'readonly', unit: '间' },
+      { key: 'buildingArea', label: '建筑面积', kind: 'number', required: true, unit: '㎡', min: 0 },
+      { key: 'usableArea', label: '使用面积', kind: 'number', unit: '㎡', min: 0 },
+      { key: 'height', label: '建筑高度', kind: 'readonly', unit: 'm' },
+    ],
+  },
+  {
+    title: '建造信息',
+    fields: [
+      { key: 'buildYear', label: '建造年代', kind: 'select', options: ['1950 年前', '1950-1979', '1980-1999', '2000-2010', '2011 年以后'] },
+      { key: 'structureType', label: '结构类型', kind: 'select', options: ['框架结构', '砖混结构', '剪力墙结构', '钢结构', '其他'] },
+      { key: 'completionDate', label: '竣工日期', kind: 'text' },
+      { key: 'designUnit', label: '设计单位', kind: 'text' },
+      { key: 'builder', label: '施工单位', kind: 'text' },
+      { key: 'propertyOwner', label: '产权单位', kind: 'fixed' },
+    ],
+  },
+];
+
+const detailEditing = ref(false);
+const detailDraft = reactive<Record<string, string>>({});
+const detailError = ref('');
+const detailErrorField = ref('');
+
+/** 当前楼栋在 buildingData 中的真实主键（与 selectedProps 查数口径一致） */
+const selectedDataKey = computed(() => {
+  if (!selected.value) return '';
+  const bizName = toBusinessBuildingName(selectedKey.value);
+  return buildingData.value[bizName] ? bizName : selectedKey.value;
+});
+
+/** 字段展示值（浏览态 / 浏览态与锁定态共用） */
+function detailFieldDisplay(f: DetailFieldDef): string {
+  const p = selectedProps.value;
+  if (f.key === 'lngLat') {
+    return selected.value ? `${selected.value.lngLat[0].toFixed(6)}, ${selected.value.lngLat[1].toFixed(6)}` : '—';
+  }
+  if (f.key === 'bizCategoryLabel') {
+    return resolveBizCategory(p).label;
+  }
+  if (f.key === 'propertyOwner') {
+    return String((p as Record<string, unknown>).propertyOwner ?? '学校自有');
+  }
+  const v = (p as Record<string, unknown>)[f.key];
+  if (v == null || v === '') return '—';
+  const s = typeof v === 'number' ? v.toLocaleString() : String(v);
+  return f.unit ? `${s} ${f.unit}` : s;
+}
+
+/** 字段进入编辑态时的初值（不带单位 / 不带后缀） */
+function detailFieldDraft(f: DetailFieldDef): string {
+  if (f.key === 'lngLat') return detailFieldDisplay(f);
+  if (f.key === 'bizCategoryLabel') return resolveBizCategory(selectedProps.value).label;
+  const v = (selectedProps.value as Record<string, unknown>)[f.key];
+  return v == null ? '' : String(v);
+}
+
+function startDetailEdit(): void {
+  for (const sec of detailSections) {
+    for (const f of sec.fields) detailDraft[f.key] = detailFieldDraft(f);
+  }
+  detailError.value = '';
+  detailErrorField.value = '';
+  detailEditing.value = true;
+}
+
+function cancelDetailEdit(): void {
+  detailEditing.value = false;
+  detailError.value = '';
+  detailErrorField.value = '';
+}
+
+function saveDetailEdit(): void {
+  const fields = detailSections.flatMap((s) => s.fields);
+  // 必填校验
+  for (const f of fields) {
+    if (f.required && !String(detailDraft[f.key] ?? '').trim()) {
+      detailError.value = `「${f.label}」为必填项，请填写后再保存`;
+      detailErrorField.value = f.key;
+      return;
+    }
+  }
+  // 数字校验
+  for (const f of fields) {
+    if (f.kind !== 'number') continue;
+    const raw = String(detailDraft[f.key] ?? '').trim();
+    if (!raw) continue;
+    const n = Number(raw);
+    if (!Number.isFinite(n) || (f.min != null && n < f.min)) {
+      detailError.value = `「${f.label}」请输入有效数字${f.min != null ? `（不小于 ${f.min}）` : ''}`;
+      detailErrorField.value = f.key;
+      return;
+    }
+  }
+  const key = selectedDataKey.value;
+  const target = key ? buildingData.value[key] : undefined;
+  if (!target) {
+    detailError.value = '当前楼栋暂无可编辑的属性记录';
+    return;
+  }
+  const patch: Record<string, unknown> = {};
+  for (const f of fields) {
+    if (f.kind === 'fixed' || f.kind === 'readonly') continue; // 固定 / 只读字段不写回
+    const raw = String(detailDraft[f.key] ?? '').trim();
+    if (f.key === 'bizCategoryLabel') {
+      const meta = [...BUILDING_CATEGORIES, OTHER_CATEGORY].find((c) => c.label === raw);
+      patch.bizCategory = meta?.id ?? 'other';
+    } else if (f.kind === 'number') {
+      patch[f.key] = raw === '' ? undefined : Number(raw);
+    } else {
+      patch[f.key] = raw;
+    }
+  }
+  buildingData.value = { ...buildingData.value, [key]: { ...target, ...patch } };
+  const edits = loadStoredDetailEdits();
+  edits[key] = { ...(edits[key] ?? {}), ...patch };
+  localStorage.setItem(DETAIL_EDITS_KEY, JSON.stringify(edits));
+  ElMessage.success('楼宇基础信息已保存');
+  cancelDetailEdit();
+}
+
+function onDetailTabClick(t: (typeof detailTabs)[number]): void {
+  if (detailEditing && t !== '基础信息') cancelDetailEdit(); // 离开本页时放弃未保存的修改
+  detailTab.value = t;
+}
 
 interface AttachmentItem {
   name: string;
@@ -1602,6 +1840,8 @@ function handleEscKey(e: KeyboardEvent) {
       exitAllocationMode();
     } else if (exportOpen.value) {
       exportOpen.value = false;
+    } else if (detailEditing.value) {
+      cancelDetailEdit(); // 编辑中按 Esc 先退出编辑，不关闭弹窗
     } else if (detailOpen.value) {
       detailOpen.value = false;
     }
@@ -1900,7 +2140,7 @@ async function loadBuildingData(): Promise<boolean> {
   const url = config.dataUrl;
   if (!url) return false;
   try {
-    buildingData.value = await fetchBuildingData(url);
+    buildingData.value = applyStoredDetailEdits(await fetchBuildingData(url));
     return true;
   } catch (err) {
     console.warn('[建筑数据] 加载失败，回退示例数据：', err);
@@ -2916,6 +3156,72 @@ onBeforeUnmount(() => {
 }
 .detail-modal__body { padding: 0 0 8px; }
 .detail-tabpane { padding-top: 4px; }
+
+/* 楼宇详情 · 基础信息分块 */
+.detail-block {
+  margin: 10px 12px 0;
+  border: 1px solid #26344d;
+  border-radius: 8px;
+  background: rgba(12, 18, 31, 0.45);
+  overflow: hidden;
+}
+.detail-block__title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding: 9px 12px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #dce8fb;
+  border-bottom: 1px solid #26344d;
+}
+.detail-block__bar { width: 3px; height: 13px; border-radius: 2px; background: #38bdf8; }
+.detail-modal__grid--edit { gap: 0 16px; padding-top: 6px; }
+.detail-modal__grid .detail-field { min-width: 0; }
+.detail-modal__grid .detail-field--wide { grid-column: 1 / -1; flex-direction: column; align-items: stretch; gap: 5px; }
+.detail-modal__grid .detail-field--wide dd { width: 100%; text-align: left; }
+.detail-field dt { display: flex; align-items: center; gap: 3px; }
+.detail-req { color: #ff6b6b; font-style: normal; font-weight: 700; }
+.detail-field dd { display: flex; align-items: center; justify-content: flex-end; gap: 6px; min-width: 0; }
+.detail-value--locked { color: #8fa0b8; }
+.detail-field-tag {
+  flex: none; font-size: 10px; line-height: 1; color: #7c8ba3;
+  border: 1px solid #3a4a66; border-radius: 3px; padding: 2px 4px;
+}
+.detail-input {
+  width: 62%; min-width: 90px; max-width: 240px;
+  padding: 5px 8px; font-size: 12.5px;
+  color: #eaf2ff; background: #0e1626;
+  border: 1px solid #35507a; border-radius: 5px; outline: none;
+}
+.detail-input:focus { border-color: #38bdf8; box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.14); }
+.detail-input--error { border-color: #ff6b6b !important; }
+.detail-textarea { width: 100%; max-width: none; resize: vertical; box-sizing: border-box; }
+select.detail-input { cursor: pointer; }
+select.detail-input option { background: #0e1626; color: #eaf2ff; }
+/* 底部操作栏 */
+.detail-modal__footer {
+  position: sticky; bottom: 0; z-index: 3;
+  display: flex; align-items: center; justify-content: flex-end; gap: 8px;
+  padding: 10px 16px;
+  border-top: 1px solid #24324a;
+  background: rgba(20, 27, 43, 0.98);
+}
+.detail-footer-btn {
+  appearance: none; cursor: pointer; font-size: 12.5px;
+  padding: 7px 18px; border-radius: 6px;
+  border: 1px solid #3a4a66; background: #1b2740; color: #c8d6ea;
+}
+.detail-footer-btn:hover { border-color: #0b6fb8; color: #fff; }
+.detail-footer-btn--primary {
+  border-color: #0b6fb8; color: #fff;
+  background: linear-gradient(180deg, #1a86cf, #0b6fb8);
+  box-shadow: 0 2px 6px rgba(11, 111, 184, 0.28);
+}
+.detail-footer-btn--primary:hover { background: linear-gradient(180deg, #0b6fb8, #095a99); }
+.detail-error { margin-right: auto; color: #ff8f8f; font-size: 12px; }
+.detail-footer-hint { margin-right: auto; color: #7c8ba3; font-size: 11.5px; }
 
 /* 房间管理面板：右侧停靠，宽 20%，无遮罩层 */
 .room-mgmt-modal {

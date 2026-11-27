@@ -507,7 +507,8 @@
             </table>
             <p v-if="!filteredAttachments.length" class="tab-empty">没有匹配的附件</p>
             <div class="table-pager">
-              <span class="table-pager__count">共 {{ filteredAttachments.length }} 条 · 第 {{ attachPage }} / {{ attachPageCount }} 页</span>
+              <span class="table-pager__total">共 {{ filteredAttachments.length }} 条</span>
+              <span class="table-pager__count">第 {{ attachPage }} / {{ attachPageCount }} 页</span>
               <button :disabled="attachPage <= 1" @click="attachPage--">上一页</button>
               <button v-for="p in attachPageCount" :key="p" :class="{ active: p === attachPage }" @click="attachPage = p">{{ p }}</button>
               <button :disabled="attachPage >= attachPageCount" @click="attachPage++">下一页</button>
@@ -533,34 +534,40 @@
             <div class="asset-table-wrap">
               <table class="asset-table asset-table--detail">
                 <colgroup>
-                  <col style="width: 106px" /><col style="width: 126px" /><col style="width: 76px" />
-                  <col style="width: 72px" /><col style="width: 40px" /><col style="width: 84px" />
-                  <col style="width: 84px" /><col style="width: 70px" /><col style="width: 92px" />
+                  <col style="width: 94px" /><col style="width: 112px" /><col style="width: 66px" />
+                  <col style="width: 62px" /><col style="width: 34px" /><col style="width: 78px" />
+                  <col style="width: 78px" /><col style="width: 62px" /><col style="width: 86px" />
+                  <col style="width: 84px" />
                 </colgroup>
                 <thead>
                   <tr>
                     <th>资产编码</th><th>资产名称</th><th>资产类别</th><th>规格型号</th>
-                    <th>数量</th><th>原值（元）</th><th>净值（元）</th><th>使用状态</th><th>取得日期</th>
+                    <th>数量</th><th>原值（元）</th><th>净值（元）</th><th>使用状态</th><th>取得日期</th><th>操作</th>
                   </tr>
                 </thead>
                 <tbody>
                   <tr v-for="row in pagedAssetRows" :key="row.code">
                     <td class="asset-code">{{ row.code }}</td>
                     <td :title="row.name">{{ row.name }}</td>
-                    <td>{{ row.category }}</td>
-                    <td>{{ row.spec }}</td>
+                    <td :title="row.category">{{ row.category }}</td>
+                    <td :title="row.spec">{{ row.spec }}</td>
                     <td>{{ row.count }}</td>
                     <td class="asset-num">{{ row.original.toLocaleString() }}</td>
                     <td class="asset-num">{{ row.net.toLocaleString() }}</td>
                     <td><span class="asset-status" :class="{ 'asset-status--idle': row.status !== '在用' }">{{ row.status }}</span></td>
                     <td>{{ row.date }}</td>
+                    <td class="asset-ops">
+                      <button class="asset-op" @click="viewAsset(row)">查看</button>
+                      <button class="asset-op asset-op--danger" @click="deleteAsset(row)">删除</button>
+                    </td>
                   </tr>
                 </tbody>
               </table>
             </div>
             <p v-if="!filteredAssetRows.length" class="tab-empty">没有匹配的资产</p>
             <div class="table-pager">
-              <span class="table-pager__count">共 {{ filteredAssetRows.length }} 条 · 第 {{ assetPage }} / {{ assetPageCount }} 页</span>
+              <span class="table-pager__total">共 {{ filteredAssetRows.length }} 条</span>
+              <span class="table-pager__count">第 {{ assetPage }} / {{ assetPageCount }} 页</span>
               <button :disabled="assetPage <= 1" @click="assetPage--">上一页</button>
               <button v-for="p in assetPageCount" :key="p" :class="{ active: p === assetPage }" @click="assetPage = p">{{ p }}</button>
               <button :disabled="assetPage >= assetPageCount" @click="assetPage++">下一页</button>
@@ -2007,8 +2014,8 @@ interface AssetDetailRow {
   status: string;
   date: string;
 }
-const assetDetailRows = computed<AssetDetailRow[]>(() => {
-  const p = selectedProps.value;
+/** 改为可变列表，支持操作列临时删除；切换楼宇重建，刷新还原 */
+function buildAssetDetailRows(p: BuildingProps): AssetDetailRow[] {
   const total = assetSummary.value.original;
   const defs = [
     { name: `${p.name} 主体建筑`, category: '房屋建筑物', spec: '钢混结构', count: 1, ratio: 0.86, netRatio: 0.82, status: '在用', date: '2015-09-18' },
@@ -2027,7 +2034,13 @@ const assetDetailRows = computed<AssetDetailRow[]>(() => {
       original, net: Math.round(original * d.netRatio), status: d.status, date: d.date,
     };
   });
-});
+}
+const assetDetailRows = ref<AssetDetailRow[]>([]);
+watch(
+  () => selectedProps.value.name,
+  () => { assetDetailRows.value = buildAssetDetailRows(selectedProps.value); },
+  { immediate: true },
+);
 
 // ---- 资产信息查询：名称/编码关键词 + 类别筛选 + 分页 ----
 const assetKeyword = ref('');
@@ -2051,6 +2064,38 @@ function resetAssetQuery(): void {
   assetKeyword.value = '';
   assetCategoryFilter.value = '';
   assetPage.value = 1;
+}
+
+/** 资产操作列：查看完整信息（弹窗） */
+function viewAsset(row: AssetDetailRow): void {
+  const esc = (v: string) => v.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c] ?? c));
+  const field = (k: string, v: string) =>
+    `<div style="display:flex;gap:8px;padding:3px 0"><span style="min-width:80px;color:#8a97ad">${k}</span><b style="color:#eaf2ff;font-weight:500">${esc(v)}</b></div>`;
+  ElMessageBox.alert(
+    '<div style="font-size:12.5px;line-height:1.7">' +
+      field('资产编码', row.code) + field('资产名称', row.name) + field('资产类别', row.category) +
+      field('规格型号', row.spec) + field('数量', String(row.count)) +
+      field('原值', row.original.toLocaleString() + ' 元') + field('净值', row.net.toLocaleString() + ' 元') +
+      field('使用状态', row.status) + field('取得日期', row.date) +
+      '<p style="margin:8px 0 0;color:#7d8aa3;font-size:11px">示例数据，正式信息由资产台账同步。</p></div>',
+    '资产详情',
+    { dangerouslyUseHTMLString: true, confirmButtonText: '关闭' },
+  );
+}
+
+/** 资产操作列：删除（示例数据，仅本次页面生效，带二次确认） */
+async function deleteAsset(row: AssetDetailRow): Promise<void> {
+  try {
+    await ElMessageBox.confirm(
+      `确定删除资产「${row.name}」吗？\n\n示例数据的删除仅在当前页面生效，刷新后还原。`,
+      '删除资产 - 二次确认',
+      { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' },
+    );
+  } catch {
+    return;
+  }
+  assetDetailRows.value = assetDetailRows.value.filter((r) => r.code !== row.code);
+  ElMessage.success('已删除 1 条资产（本次页面生效，刷新后还原）');
 }
 
 /** 楼栋资产：按大类拆分（示例测算） */
@@ -3902,6 +3947,15 @@ select.detail-input option { background: #0e1626; color: #eaf2ff; }
   color: #a7e3c4; background: rgba(45, 160, 100, .16);
 }
 .asset-status--idle { color: #f0c274; background: rgba(240, 180, 41, .14); }
+.asset-ops { display: flex; gap: 5px; }
+.asset-op {
+  appearance: none; cursor: pointer; font-size: 11px;
+  padding: 3px 6px; border-radius: 4px;
+  border: 1px solid #2c3c58; background: transparent; color: #9fc6ff;
+}
+.asset-op:hover { border-color: #38bdf8; color: #38bdf8; }
+.asset-op--danger { border-color: #7b3a49; color: #f3a7b5; }
+.asset-op--danger:hover { border-color: #d0637a; color: #ffd0d9; }
 
 .asset-table {
   width: calc(100% - 24px);
@@ -3923,7 +3977,8 @@ select.detail-input option { background: #0e1626; color: #eaf2ff; }
   display: flex; align-items: center; justify-content: flex-end; gap: 5px;
   padding: 4px 12px 8px; color: #8a97ad; font-size: 11.5px;
 }
-.table-pager__count { margin-right: auto; }
+.table-pager__total { margin-right: auto; }
+.table-pager__count { margin-right: 4px; white-space: nowrap; color: #b7c6dc; }
 .table-pager button {
   appearance: none; cursor: pointer; min-width: 26px; height: 24px;
   padding: 0 6px; font-size: 11.5px; border-radius: 4px;

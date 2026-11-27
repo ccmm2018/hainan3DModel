@@ -524,6 +524,7 @@
             <div class="asset-table-wrap">
               <table class="asset-table asset-table--detail">
                 <colgroup>
+                  <col style="width: 34px" />
                   <col style="width: 94px" /><col style="width: 112px" /><col style="width: 66px" />
                   <col style="width: 62px" /><col style="width: 44px" /><col style="width: 78px" />
                   <col style="width: 78px" /><col style="width: 62px" /><col style="width: 86px" />
@@ -531,12 +532,25 @@
                 </colgroup>
                 <thead>
                   <tr>
+                    <th>
+                      <input
+                        type="checkbox" class="attach-check"
+                        :checked="allAssetPageSelected" :disabled="!pagedAssetRows.length"
+                        title="全选当前页" @change="onSelectAllAsset"
+                      />
+                    </th>
                     <th>资产编码</th><th>资产名称</th><th>资产类别</th><th>规格型号</th>
                     <th>数量</th><th>原值（元）</th><th>净值（元）</th><th>使用状态</th><th>取得日期</th><th>操作</th>
                   </tr>
                 </thead>
                 <tbody>
-                  <tr v-for="row in pagedAssetRows" :key="row.code">
+                  <tr v-for="row in pagedAssetRows" :key="row.code" :class="{ 'asset-row--selected': selectedAssetCodes.includes(row.code) }">
+                    <td>
+                      <input
+                        type="checkbox" class="attach-check"
+                        :checked="selectedAssetCodes.includes(row.code)" @change="onSelectOneAsset($event, row.code)"
+                      />
+                    </td>
                     <td class="asset-code">{{ row.code }}</td>
                     <td :title="row.name">{{ row.name }}</td>
                     <td :title="row.category">{{ row.category }}</td>
@@ -548,7 +562,7 @@
                     <td>{{ row.date }}</td>
                     <td class="asset-ops">
                       <button class="asset-op" @click="viewAsset(row)">查看</button>
-                      <button class="asset-op asset-op--danger" @click="deleteAsset(row)">删除</button>
+                      <button class="asset-op asset-op--danger" @click="deleteAssets([row.code])">删除</button>
                     </td>
                   </tr>
                 </tbody>
@@ -616,15 +630,21 @@
           </div>
         </div>
 
-        <!-- 底部横线上方的操作行：基础信息=导出 Excel，附件信息=批量删除（样式与位置一致） -->
-        <div v-if="detailTab === '基础信息' || detailTab === '附件信息'" class="detail-export-row">
+        <!-- 底部横线上方的操作行：基础信息=导出 Excel，附件/资产=批量删除（样式与位置一致） -->
+        <div v-if="detailTab === '基础信息' || detailTab === '附件信息' || detailTab === '资产信息'" class="detail-export-row">
           <button v-if="detailTab === '基础信息'" class="detail-footer-btn detail-footer-btn--export" @click="exportDetailExcel" title="导出当前楼宇基础信息为 Excel">导出 Excel</button>
           <button
-            v-else class="detail-footer-btn detail-footer-btn--export attach-batch-del"
+            v-else-if="detailTab === '附件信息'" class="detail-footer-btn detail-footer-btn--export attach-batch-del"
             :disabled="!selectedAttachNames.length"
             title="删除当前勾选的附件（需二次确认，示例数据仅本次页面生效）"
             @click="deleteAttachments(selectedAttachNames)"
           >批量删除<template v-if="selectedAttachNames.length">（{{ selectedAttachNames.length }}）</template></button>
+          <button
+            v-else class="detail-footer-btn detail-footer-btn--export asset-batch-del"
+            :disabled="!selectedAssetCodes.length"
+            title="删除当前勾选的资产（需二次确认，示例数据仅本次页面生效）"
+            @click="deleteAssets(selectedAssetCodes)"
+          >批量删除<template v-if="selectedAssetCodes.length">（{{ selectedAssetCodes.length }}）</template></button>
         </div>
 
         <!-- 底部操作栏：关闭 / 修改居中排列，按钮之间留间隔 -->
@@ -2003,7 +2023,8 @@ interface AssetDetailRow {
   status: string;
   date: string;
 }
-/** 改为可变列表，支持操作列临时删除；切换楼宇重建，刷新还原 */
+/** 改为可变列表，支持操作列/批量删除；切换楼宇重建，刷新还原 */
+const selectedAssetCodes = ref<string[]>([]);
 function buildAssetDetailRows(p: BuildingProps): AssetDetailRow[] {
   const total = assetSummary.value.original;
   const defs = [
@@ -2027,7 +2048,10 @@ function buildAssetDetailRows(p: BuildingProps): AssetDetailRow[] {
 const assetDetailRows = ref<AssetDetailRow[]>([]);
 watch(
   () => selectedProps.value.name,
-  () => { assetDetailRows.value = buildAssetDetailRows(selectedProps.value); },
+  () => {
+    assetDetailRows.value = buildAssetDetailRows(selectedProps.value);
+    selectedAssetCodes.value = [];
+  },
   { immediate: true },
 );
 
@@ -2055,6 +2079,25 @@ function resetAssetQuery(): void {
   assetPage.value = 1;
 }
 
+// ---- 资产勾选 / 删除（与附件一致：全选当前页，跨页勾选保留） ----
+const allAssetPageSelected = computed(() => {
+  const rows = pagedAssetRows.value;
+  return rows.length > 0 && rows.every((r) => selectedAssetCodes.value.includes(r.code));
+});
+function onSelectAllAsset(e: Event): void {
+  const checked = (e.target as HTMLInputElement).checked;
+  const codes = pagedAssetRows.value.map((r) => r.code);
+  selectedAssetCodes.value = checked
+    ? [...new Set([...selectedAssetCodes.value, ...codes])]
+    : selectedAssetCodes.value.filter((c) => !codes.includes(c));
+}
+function onSelectOneAsset(e: Event, code: string): void {
+  const checked = (e.target as HTMLInputElement).checked;
+  selectedAssetCodes.value = checked
+    ? [...new Set([...selectedAssetCodes.value, code])]
+    : selectedAssetCodes.value.filter((c) => c !== code);
+}
+
 /** 资产操作列：查看完整信息（弹窗） */
 function viewAsset(row: AssetDetailRow): void {
   const esc = (v: string) => v.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c] ?? c));
@@ -2072,19 +2115,23 @@ function viewAsset(row: AssetDetailRow): void {
   );
 }
 
-/** 资产操作列：删除（示例数据，仅本次页面生效，带二次确认） */
-async function deleteAsset(row: AssetDetailRow): Promise<void> {
+/** 资产删除：支持单条（操作列）与多条（批量），示例数据仅本次页面生效，带二次确认 */
+async function deleteAssets(codes: string[]): Promise<void> {
+  const targets = codes.filter((c) => assetDetailRows.value.some((r) => r.code === c));
+  if (!targets.length) return;
   try {
     await ElMessageBox.confirm(
-      `确定删除资产「${row.name}」吗？\n\n示例数据的删除仅在当前页面生效，刷新后还原。`,
-      '删除资产 - 二次确认',
+      `确定删除 ${targets.length} 条资产吗？\n\n示例数据的删除仅在当前页面生效，刷新后还原；不会删除资产系统中的任何记录。`,
+      targets.length > 1 ? '批量删除资产 - 二次确认' : '删除资产 - 二次确认',
       { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' },
     );
   } catch {
     return;
   }
-  assetDetailRows.value = assetDetailRows.value.filter((r) => r.code !== row.code);
-  ElMessage.success('已删除 1 条资产（本次页面生效，刷新后还原）');
+  const removed = new Set(targets);
+  assetDetailRows.value = assetDetailRows.value.filter((r) => !removed.has(r.code));
+  selectedAssetCodes.value = selectedAssetCodes.value.filter((c) => !removed.has(c));
+  ElMessage.success(`已删除 ${targets.length} 条资产（本次页面生效，刷新后还原）`);
 }
 
 /** 楼栋资产：按大类拆分（示例测算） */
@@ -3864,7 +3911,7 @@ select.detail-input option { background: #0e1626; color: #eaf2ff; }
   border: 1px solid #2b3a56; /* 列边界清晰 */
 }
 .attach-table th {
-  text-align: left; padding: 8px 8px; white-space: nowrap;
+  text-align: center; padding: 8px 8px; white-space: nowrap;
   color: #9fb0c8; font-weight: 500; font-size: 11.5px;
   background: #202a3f;
   border: 1px solid #2b3a56;
@@ -3958,6 +4005,7 @@ select.detail-input option { background: #0e1626; color: #eaf2ff; }
 .asset-op:hover { border-color: #38bdf8; color: #38bdf8; }
 .asset-op--danger { border-color: #7b3a49; color: #f3a7b5; }
 .asset-op--danger:hover { border-color: #d0637a; color: #ffd0d9; }
+.asset-table tbody tr.asset-row--selected { background: rgba(56, 189, 248, 0.10); }
 
 .asset-table {
   width: calc(100% - 24px);
@@ -3968,9 +4016,10 @@ select.detail-input option { background: #0e1626; color: #eaf2ff; }
 }
 .asset-table th, .asset-table td {
   padding: 8px 10px;
-  text-align: left;
   border: 1px solid #2b3a56;
 }
+.asset-table th { text-align: center; }
+.asset-table td { text-align: left; }
 .asset-table th { color: #8a97ad; font-weight: 600; }
 .asset-table td { color: #eaf2ff; }
 .asset-table tbody tr:hover { background: rgba(56, 189, 248, 0.06); }

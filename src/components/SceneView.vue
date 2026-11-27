@@ -451,14 +451,6 @@
               <button class="attach-reset" @click="resetAttachQuery">重置</button>
               <button class="attach-export" @click="exportAttachmentsExcel">导出清单</button>
             </div>
-            <!-- 统计条 -->
-            <div class="attach-stats">
-              共 <b>{{ filteredAttachments.length }}</b> 个附件
-              <template v-if="attachKeyword || attachTypeFilter">（从 {{ attachmentList.length }} 个中筛选）</template>
-              <span class="attach-stats__sep">·</span>
-              图片 {{ attachStats.img }} / 文档 {{ attachStats.doc }}
-              <span v-if="selectedAttachNames.length" class="attach-stats__sel">· 已选 {{ selectedAttachNames.length }} 项</span>
-            </div>
             <!-- 字段列表格 -->
             <table class="attach-table">
               <thead>
@@ -526,10 +518,6 @@
                 <option v-for="c in assetCategoryOptions" :key="c" :value="c">{{ c }}</option>
               </select>
               <button class="attach-reset" @click="resetAssetQuery">重置</button>
-            </div>
-            <div class="attach-stats">
-              共 <b>{{ filteredAssetRows.length }}</b> 条资产
-              <template v-if="assetKeyword || assetCategoryFilter">（从 {{ assetDetailRows.length }} 条中筛选）</template>
             </div>
             <div class="asset-table-wrap">
               <table class="asset-table asset-table--detail">
@@ -1937,11 +1925,6 @@ const pagedAttachments = computed(() => filteredAttachments.value.slice(
 ));
 watch(filteredAttachments, () => { attachPage.value = 1; });
 
-/** 统计条按全量附件统计（不随筛选变化） */
-const attachStats = computed(() => ({
-  img: attachmentList.value.filter((a) => a.type === 'img').length,
-  doc: attachmentList.value.filter((a) => a.type === 'doc').length,
-}));
 /** 重置查询：清空关键词与类型筛选 */
 function resetAttachQuery(): void {
   attachKeyword.value = '';
@@ -3868,10 +3851,6 @@ select.detail-input option { background: #0e1626; color: #eaf2ff; }
   background: linear-gradient(180deg, #0d6fa8, #0a5686);
 }
 .attach-export:hover { filter: brightness(1.15); }
-.attach-stats { padding: 2px 12px 8px; color: #8a97ad; font-size: 11.5px; }
-.attach-stats b { color: #d7ecff; font-size: 12.5px; }
-.attach-stats__sep { margin: 0 6px; color: #4a5a76; }
-.attach-stats__sel { margin-left: 6px; color: #38bdf8; }
 .attach-table {
   width: 100%; border-collapse: collapse;
   margin: 0 12px; width: calc(100% - 24px);

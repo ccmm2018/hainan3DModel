@@ -343,10 +343,17 @@
 
     <!-- 楼宇详情弹窗 -->
     <div v-if="detailOpen && selectedProps.name" class="detail-modal" @click.self="detailOpen = false">
-      <div class="detail-modal__card" :style="{ transform: `translate(${detailPos.x}px, ${detailPos.y}px)` }">
+      <div
+        class="detail-modal__card"
+        :class="{ 'detail-modal__card--max': detailMaximized }"
+        :style="{ transform: detailMaximized ? 'none' : `translate(${detailPos.x}px, ${detailPos.y}px)` }"
+      >
         <div class="detail-modal__head" @mousedown="onDetailDragStart" title="按住头部可拖动窗口">
           <strong>{{ selectedProps.name }} · 楼宇详情</strong>
-          <span class="detail-modal__drag-hint">拖动</span>
+          <span v-if="!detailMaximized" class="detail-modal__drag-hint">拖动</span>
+          <button class="detail-modal__maxbtn" :title="detailMaximized ? '还原窗口' : '最大化窗口'" @click.stop="toggleDetailMax">
+            {{ detailMaximized ? '❐' : '⛶' }}
+          </button>
           <button class="property-panel__close" aria-label="关闭" @click="detailOpen = false">×</button>
         </div>
 
@@ -498,6 +505,7 @@
 
         <!-- 底部操作栏：基础信息可编辑，其他 Tab 只读 -->
         <div class="detail-modal__footer">
+          <button class="detail-footer-btn detail-footer-btn--export" @click="exportDetailExcel" title="导出当前楼宇数据为 Excel">导出 Excel</button>
           <template v-if="detailTab === '基础信息'">
             <button v-if="!detailEditing" class="detail-footer-btn detail-footer-btn--primary" @click="startDetailEdit">修改</button>
             <template v-else>
@@ -754,6 +762,11 @@ const selectedRoom = ref<Room | null>(null);
 const isIndoorView = ref(false);
 const exportOpen = ref(false);
 const detailOpen = ref(false);
+const detailMaximized = ref(false); // 楼宇详情弹窗最大化状态
+function toggleDetailMax(): void {
+  detailMaximized.value = !detailMaximized.value;
+  if (detailMaximized.value) detailDragReset(); // 最大化时回到居中，避免带着旧偏移
+}
 
 // ---- 楼宇详情弹窗拖拽（仅拖动头部，整卡位移）----
 const detailPos = reactive({ x: 0, y: 0 }); // 相对居中位置的偏移量（px）
@@ -763,8 +776,8 @@ function detailDragReset(): void {
   detailPos.y = 0;
 }
 function onDetailDragStart(e: MouseEvent): void {
-  // 忽略关闭按钮等交互元素
-  if ((e.target as HTMLElement)?.closest('button')) return;
+  // 忽略关闭按钮等交互元素；最大化状态下不允许拖动
+  if (detailMaximized.value || (e.target as HTMLElement)?.closest('button')) return;
   detailDrag = { startX: e.clientX, startY: e.clientY, originX: detailPos.x, originY: detailPos.y };
   window.addEventListener('mousemove', onDetailDragMove);
   window.addEventListener('mouseup', onDetailDragEnd);
@@ -1440,6 +1453,7 @@ function flyToSelected() {
 
 function openBuildingDetail() {
   detailTab.value = '基础信息'; // 默认展示「基础信息」
+  detailMaximized.value = false; // 每次打开恢复默认窗口大小
   cancelDetailEdit(); // 每次打开均回到浏览态
   imageError.value = false;
   roomMgmtOpen.value = false; // 与房间管理抽屉互斥，避免两个大面板同时铺满屏幕
@@ -1646,6 +1660,55 @@ function saveDetailEdit(): void {
 function onDetailTabClick(t: (typeof detailTabs)[number]): void {
   if (detailEditing && t !== '基础信息') cancelDetailEdit(); // 离开本页时放弃未保存的修改
   detailTab.value = t;
+}
+
+// ---------------------------------------------------------------------------
+// 楼宇详情导出 Excel：零依赖生成 SpreadsheetML 2003 (.xls)，Excel 可直接打开。
+// 三个分块各占一个工作表，每表两列（字段 / 值），表头带楼名与导出时间。
+// ---------------------------------------------------------------------------
+function xmlEscape(v: string): string {
+  return v.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&apos;');
+}
+function exportDetailExcel(): void {
+  const p = selectedProps.value;
+  if (!p.name) return;
+  const esc = xmlEscape;
+  const now = new Date();
+  const stamp = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+
+  const sheets = detailSections.map((sec) => {
+    const rows = sec.fields.map((f) => {
+      const label = esc(f.label);
+      const value = esc(detailFieldDisplay(f));
+      return `<Row><Cell><Data ss:Type="String">${label}</Data></Cell><Cell><Data ss:Type="String">${value}</Data></Cell></Row>`;
+    }).join('');
+    return `<Worksheet ss:Name="${esc(sec.title)}"><Table>
+      <Row><Cell><Data ss:Type="String">${esc(p.name)} · ${esc(sec.title)}</Data></Cell><Cell><Data ss:Type="String">导出时间：${esc(stamp)}</Data></Cell></Row>
+      <Row><Cell><Data ss:Type="String">字段</Data></Cell><Cell><Data ss:Type="String">值</Data></Cell></Row>
+      ${rows}
+      </Table></Worksheet>`;
+  }).join('');
+
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<?mso-application progid="Excel.Sheet"?>
+<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"
+ xmlns:o="urn:schemas-microsoft-com:office:office"
+ xmlns:x="urn:schemas-microsoft-com:office:excel"
+ xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">
+${sheets}
+</Workbook>`;
+
+  const blob = new Blob(['\ufeff', xml], { type: 'application/vnd.ms-excel;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${p.name}_楼宇详情.xls`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  ElMessage.success('楼宇详情已导出为 Excel');
 }
 
 interface AttachmentItem {
@@ -3057,6 +3120,14 @@ onBeforeUnmount(() => {
   background: rgba(20, 27, 43, 0.98);
   box-shadow: 0 24px 70px rgba(0, 0, 0, 0.5);
   will-change: transform;
+  transition: width 0.2s, height 0.2s, max-width 0.2s, max-height 0.2s;
+}
+.detail-modal__card--max {
+  width: calc(100vw - 40px);
+  max-width: calc(100vw - 40px);
+  height: calc(100vh - 40px);
+  max-height: calc(100vh - 40px);
+  border-radius: 8px;
 }
 .detail-modal__head {
   display: flex;
@@ -3079,6 +3150,13 @@ onBeforeUnmount(() => {
   letter-spacing: .5px; padding: 2px 7px;
   border: 1px dashed #3a4a66; border-radius: 4px;
 }
+.detail-modal__maxbtn {
+  appearance: none; cursor: pointer; flex: none;
+  width: 22px; height: 22px; line-height: 20px; text-align: center;
+  font-size: 15px; color: #9fb0c9;
+  border: 1px solid transparent; border-radius: 5px; background: transparent;
+}
+.detail-modal__maxbtn:hover { color: #eaf2ff; border-color: #3a4a66; background: rgba(56, 189, 248, 0.08); }
 .detail-modal__image {
   height: 200px;
   border-bottom: 1px solid #24324a;
@@ -3093,24 +3171,31 @@ onBeforeUnmount(() => {
 }
 .detail-modal__grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 0 20px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  column-gap: 28px;
   margin: 0;
   padding: 10px 16px 12px;
 }
-.detail-modal__grid div {
-  display: flex;
-  justify-content: space-between;
-  gap: 10px;
+/* 每个字段：固定标签列 + 自适应值列，保证两列输入框等宽对齐 */
+.detail-modal__grid .detail-field {
+  display: grid;
+  grid-template-columns: 80px minmax(0, 1fr);
+  align-items: center;
+  column-gap: 8px;
+  min-width: 0;
   padding: 7px 0;
   font-size: 13px;
   border-bottom: 1px dashed #1e2a40;
 }
-.detail-modal__grid dt { color: #8a97ad; white-space: nowrap; }
+.detail-modal__grid dt {
+  color: #8a97ad;
+  white-space: nowrap;
+  line-height: 1.9;
+}
 .detail-modal__grid dd {
   margin: 0;
   color: #eaf2ff;
-  text-align: right;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -3177,27 +3262,26 @@ onBeforeUnmount(() => {
   border-bottom: 1px solid #26344d;
 }
 .detail-block__bar { width: 3px; height: 13px; border-radius: 2px; background: #38bdf8; }
-.detail-modal__grid--edit { gap: 0 16px; padding-top: 6px; }
-.detail-modal__grid .detail-field { min-width: 0; }
-.detail-modal__grid .detail-field--wide { grid-column: 1 / -1; flex-direction: column; align-items: stretch; gap: 5px; }
-.detail-modal__grid .detail-field--wide dd { width: 100%; text-align: left; }
+.detail-modal__grid--edit { padding-top: 6px; }
+.detail-modal__grid .detail-field--wide { grid-column: 1 / -1; grid-template-columns: 80px minmax(0, 1fr); }
 .detail-field dt { display: flex; align-items: center; gap: 3px; }
 .detail-req { color: #ff6b6b; font-style: normal; font-weight: 700; }
-.detail-field dd { display: flex; align-items: center; justify-content: flex-end; gap: 6px; min-width: 0; }
+.detail-field dd { display: flex; align-items: center; justify-content: flex-start; gap: 6px; min-width: 0; }
 .detail-value--locked { color: #8fa0b8; }
 .detail-field-tag {
   flex: none; font-size: 10px; line-height: 1; color: #7c8ba3;
   border: 1px solid #3a4a66; border-radius: 3px; padding: 2px 4px;
 }
+/* 所有输入控件占满值列，宽度完全一致 */
 .detail-input {
-  width: 62%; min-width: 90px; max-width: 240px;
+  display: block; width: 100%; min-width: 0; box-sizing: border-box;
   padding: 5px 8px; font-size: 12.5px;
   color: #eaf2ff; background: #0e1626;
   border: 1px solid #35507a; border-radius: 5px; outline: none;
 }
 .detail-input:focus { border-color: #38bdf8; box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.14); }
 .detail-input--error { border-color: #ff6b6b !important; }
-.detail-textarea { width: 100%; max-width: none; resize: vertical; box-sizing: border-box; }
+.detail-textarea { resize: vertical; }
 select.detail-input { cursor: pointer; }
 select.detail-input option { background: #0e1626; color: #eaf2ff; }
 /* 底部操作栏 */
@@ -3220,8 +3304,14 @@ select.detail-input option { background: #0e1626; color: #eaf2ff; }
   box-shadow: 0 2px 6px rgba(11, 111, 184, 0.28);
 }
 .detail-footer-btn--primary:hover { background: linear-gradient(180deg, #0b6fb8, #095a99); }
-.detail-error { margin-right: auto; color: #ff8f8f; font-size: 12px; }
-.detail-footer-hint { margin-right: auto; color: #7c8ba3; font-size: 11.5px; }
+.detail-footer-btn--export {
+  margin-right: auto;
+  border-color: #2f7d6b; color: #b8e6d9;
+  background: linear-gradient(180deg, #1c7a68, #14614f);
+}
+.detail-footer-btn--export:hover { background: linear-gradient(180deg, #14614f, #0f4c3e); color: #fff; }
+.detail-error { color: #ff8f8f; font-size: 12px; }
+.detail-footer-hint { color: #7c8ba3; font-size: 11.5px; }
 
 /* 房间管理面板：右侧停靠，宽 20%，无遮罩层 */
 .room-mgmt-modal {

@@ -3595,7 +3595,7 @@ select.detail-input option { background: #0e1626; color: #eaf2ff; }
   color: #eaf2ff; background: #0e1626;
   border: 1px solid #35507a; border-radius: 5px;
 }
-.attach-search { width: 180px; flex: none; }
+.attach-search { width: 260px; flex: none; }
 .attach-search::placeholder { color: #70809a; }
 .attach-search:focus, .attach-filter:focus { border-color: #38bdf8; box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.14); }
 .attach-filter { width: 110px; cursor: pointer; }
@@ -3609,6 +3609,7 @@ select.detail-input option { background: #0e1626; color: #eaf2ff; }
 .attach-export {
   appearance: none; cursor: pointer; font-size: 12px; white-space: nowrap;
   height: 30px; padding: 0 12px; border-radius: 5px;
+  margin-left: auto; /* 靠右对齐 */
   border: 1px solid #0b6fb8; color: #d7ecff;
   background: linear-gradient(180deg, #0d6fa8, #0a5686);
 }

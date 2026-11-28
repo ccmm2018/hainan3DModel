@@ -625,22 +625,51 @@
             <p class="tab-note">楼栋资产为示例数据，按楼宇信息派生；正式信息由资产台账同步。</p>
           </div>
 
-          <!-- 楼层信息 -->
+          <!-- 楼层信息：可新增/修改/删除/上传CAD，示例数据仅本次页面生效 -->
           <div v-else-if="detailTab === '楼层信息'" class="detail-tabpane">
+            <!-- 工具栏：新增按钮 -->
+            <div class="attach-toolbar">
+              <button class="floor-add-btn" @click="openFloorCreate">+ 新增楼层</button>
+            </div>
             <div class="asset-table-wrap">
-            <table class="asset-table" v-col-resizable>
-              <thead><tr><th>楼层</th><th>面积（㎡）</th><th>房间数</th><th>主要用途</th></tr></thead>
+            <table class="asset-table asset-table--floor" v-col-resizable>
+              <colgroup>
+                <col style="width: 110px" /><col style="width: 96px" /><col style="width: 116px" />
+                <col style="width: 90px" /><col style="width: 70px" /><col style="width: 160px" />
+                <col style="width: 110px" /><col style="width: 158px" />
+              </colgroup>
+              <thead><tr>
+                <th>楼栋名称</th><th>楼层名称</th><th>编码</th><th>图形标识</th>
+                <th>楼层号</th><th>楼层CAD</th><th>CAD上传时间</th><th>操作</th>
+              </tr></thead>
               <tbody>
-                <tr v-for="f in floorRows" :key="f.floor">
-                  <td class="cell-dict">{{ f.floor }}F</td>
-                  <td class="cell-num">{{ f.area.toLocaleString() }}</td>
-                  <td class="cell-num">{{ f.rooms }}</td>
-                  <td class="cell-dict">{{ f.use }}</td>
+                <tr v-for="f in pagedFloorRows" :key="f.code">
+                  <td class="cell-text" :title="f.buildingName">{{ f.buildingName }}</td>
+                  <td class="cell-text" :title="f.floorName">{{ f.floorName }}</td>
+                  <td class="cell-text">{{ f.code }}</td>
+                  <td class="cell-dict">{{ f.graphicMark }}</td>
+                  <td class="cell-num">{{ f.floorNo }}</td>
+                  <td class="cell-text" :title="f.cadFile">{{ f.cadFile || '未上传' }}</td>
+                  <td class="cell-text">{{ f.cadTime || '—' }}</td>
+                  <td class="floor-ops cell-dict">
+                    <button class="asset-op" @click="uploadFloorCad(f)">上传CAD</button>
+                    <button class="asset-op" @click="editFloor(f)">修改</button>
+                    <button class="asset-op asset-op--danger" @click="deleteFloor(f)">删除</button>
+                  </td>
                 </tr>
               </tbody>
             </table>
             </div>
             <p v-if="!floorRows.length" class="tab-empty">暂无楼层数据</p>
+            <!-- 分页 -->
+            <div class="table-pager">
+              <span class="table-pager__total">共 {{ floorRows.length }} 条</span>
+              <span class="table-pager__count">第 {{ floorPage }} / {{ floorPageCount }} 页</span>
+              <button :disabled="floorPage <= 1" @click="floorPage--">上一页</button>
+              <button v-for="pg in floorPageCount" :key="pg" :class="{ active: pg === floorPage }" @click="floorPage = pg">{{ pg }}</button>
+              <button :disabled="floorPage >= floorPageCount" @click="floorPage++">下一页</button>
+            </div>
+            <p class="tab-note">楼层为示例数据，新增/修改/删除/上传仅当前页面生效，刷新后还原。</p>
           </div>
 
           <!-- 变更记录 -->
@@ -697,6 +726,43 @@
             </template>
             <span v-else class="detail-footer-hint">该页数据由业务系统同步，仅供查看</span>
           </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 楼层新增 / 修改弹窗（覆盖在详情弹窗之上） -->
+    <div v-if="floorEditOpen" class="floor-edit-modal" @click.self="floorEditOpen = false">
+      <div class="floor-edit-card">
+        <div class="floor-edit__head">
+          <strong>{{ floorEditingCode === null ? '新增楼层' : '修改楼层' }}</strong>
+          <button class="property-panel__close" aria-label="关闭" @click="floorEditOpen = false">×</button>
+        </div>
+        <dl class="detail-modal__grid detail-modal__grid--asset">
+          <div class="detail-field">
+            <dt>楼栋名称</dt>
+            <dd><span class="detail-value detail-value--locked">{{ selectedProps.name }}</span><span class="detail-field-tag">不可修改</span></dd>
+          </div>
+          <div class="detail-field">
+            <dt>楼层名称</dt>
+            <dd><input v-model="floorForm.floorName" class="detail-input" placeholder="如 3F" /></dd>
+          </div>
+          <div class="detail-field">
+            <dt>编码</dt>
+            <dd><input v-model="floorForm.code" class="detail-input" /></dd>
+          </div>
+          <div class="detail-field">
+            <dt>图形标识</dt>
+            <dd><input v-model="floorForm.graphicMark" class="detail-input" /></dd>
+          </div>
+          <div class="detail-field">
+            <dt>楼层号</dt>
+            <dd><input v-model.number="floorForm.floorNo" type="number" class="detail-input" /></dd>
+          </div>
+        </dl>
+        <p v-if="floorEditError" class="floor-edit__error">{{ floorEditError }}</p>
+        <div class="floor-edit__actions">
+          <button class="detail-footer-btn" @click="floorEditOpen = false">取消</button>
+          <button class="detail-footer-btn detail-footer-btn--primary" @click="saveFloor">保存</button>
         </div>
       </div>
     </div>
@@ -2378,37 +2444,139 @@ const buildingAssetForm = computed(() => {
 });
 
 interface FloorRow {
-  floor: number;
-  area: number;
-  rooms: number;
-  use: string;
+  /** 楼栋名称（不可修改） */
+  buildingName: string;
+  /** 楼层名称 */
+  floorName: string;
+  /** 编码 */
+  code: string;
+  /** 图形标识 */
+  graphicMark: string;
+  /** 楼层号 */
+  floorNo: number;
+  /** 楼层CAD文件名 */
+  cadFile: string;
+  /** CAD上传时间 */
+  cadTime: string;
 }
 
-/** 楼层信息：优先聚合房间数据，否则按总层数均匀拆分 */
-const floorRows = computed<FloorRow[]>(() => {
-  const p = selectedProps.value;
-  const rooms = roomsOf(p.name);
-  if (rooms.length) {
-    const byFloor = new Map<number, Room[]>();
-    for (const r of rooms) {
-      if (!byFloor.has(r.floor)) byFloor.set(r.floor, []);
-      byFloor.get(r.floor)!.push(r);
-    }
-    return [...byFloor.entries()]
-      .sort((a, b) => a[0] - b[0])
-      .map(([floor, rs]) => ({
-        floor,
-        area: Math.round(rs.reduce((s, r) => s + (Number(r.area) || 0), 0)),
-        rooms: rs.length,
-        use: rs[0]?.purpose ?? '—',
-      }));
-  }
-  const total = p.totalFloors;
+/** 楼层信息：按总层数生成示例数据；改为可变列表支持新增/修改/删除，切换楼宇重建 */
+const floorRows = ref<FloorRow[]>([]);
+function buildFloorRows(p: BuildingProps): FloorRow[] {
+  const total = p.totalFloors || 0;
   if (!total) return [];
-  const areaPer = Math.round((Number(p.buildingArea) || 0) / total);
-  const roomsPer = Math.round((Number(p.roomCount) || 0) / total);
-  return Array.from({ length: total }, (_, i) => ({ floor: i + 1, area: areaPer, rooms: roomsPer, use: '教学/办公' }));
-});
+  const seed = [...p.name].reduce((s, c) => s + c.charCodeAt(0), 0);
+  const prefix = String(seed).padStart(6, '0');
+  return Array.from({ length: total }, (_, i) => {
+    const no = i + 1;
+    return {
+      buildingName: p.name,
+      floorName: `${no}F`,
+      code: `FL-${prefix}-${String(no).padStart(2, '0')}`,
+      graphicMark: '标准层',
+      floorNo: no,
+      cadFile: `${p.name}${no}层平面图.dwg`,
+      cadTime: `${2024 + (seed % 2)}-${String((seed % 12) + 1).padStart(2, '0')}-${String((seed % 27) + 1).padStart(2, '0')}`,
+    };
+  });
+}
+watch(
+  () => selectedProps.value.name,
+  () => { floorRows.value = buildFloorRows(selectedProps.value); floorPage.value = 1; },
+);
+
+// ---- 楼层分页 ----
+const floorPage = ref(1);
+const floorPageCount = computed(() => Math.max(1, Math.ceil(floorRows.value.length / PAGE_SIZE)));
+const pagedFloorRows = computed(() => floorRows.value.slice(
+  (floorPage.value - 1) * PAGE_SIZE, floorPage.value * PAGE_SIZE,
+));
+watch(floorRows, () => { floorPage.value = 1; });
+
+// ---- 楼层新增 / 修改（弹窗） ----
+const floorEditOpen = ref(false);
+const floorEditingCode = ref<string | null>(null); // null=新增
+const floorForm = reactive({ floorName: '', code: '', graphicMark: '', floorNo: 0 });
+const floorEditError = ref('');
+
+function openFloorCreate(): void {
+  floorEditingCode.value = null;
+  floorEditError.value = '';
+  floorForm.floorName = '';
+  floorForm.code = `FL-${String([...selectedProps.value.name].reduce((s, c) => s + c.charCodeAt(0), 0)).padStart(6, '0')}-${String(floorRows.value.length + 1).padStart(2, '0')}`;
+  floorForm.graphicMark = '标准层';
+  floorForm.floorNo = floorRows.value.length + 1;
+  floorEditOpen.value = true;
+}
+function editFloor(row: FloorRow): void {
+  floorEditingCode.value = row.code;
+  floorEditError.value = '';
+  floorForm.floorName = row.floorName;
+  floorForm.code = row.code;
+  floorForm.graphicMark = row.graphicMark;
+  floorForm.floorNo = row.floorNo;
+  floorEditOpen.value = true;
+}
+function saveFloor(): void {
+  if (!floorForm.floorName.trim()) { floorEditError.value = '楼层名称不能为空'; return; }
+  if (!floorForm.code.trim()) { floorEditError.value = '编码不能为空'; return; }
+  // 编码唯一性校验（排除自身）
+  if (floorRows.value.some((r) => r.code === floorForm.code.trim() && r.code !== floorEditingCode.value)) {
+    floorEditError.value = '编码已存在，请更换'; return;
+  }
+  if (floorEditingCode.value === null) {
+    const p = selectedProps.value;
+    floorRows.value.push({
+      buildingName: p.name,
+      floorName: floorForm.floorName.trim(),
+      code: floorForm.code.trim(),
+      graphicMark: floorForm.graphicMark,
+      floorNo: Number(floorForm.floorNo) || floorRows.value.length + 1,
+      cadFile: '',
+      cadTime: '',
+    });
+    ElMessage.success('已新增楼层（本次页面生效，刷新后还原）');
+  } else {
+    const row = floorRows.value.find((r) => r.code === floorEditingCode.value);
+    if (row) {
+      row.floorName = floorForm.floorName.trim();
+      row.code = floorForm.code.trim();
+      row.graphicMark = floorForm.graphicMark;
+      row.floorNo = Number(floorForm.floorNo) || row.floorNo;
+    }
+    ElMessage.success('已保存修改（本次页面生效，刷新后还原）');
+  }
+  floorEditOpen.value = false;
+}
+
+/** 上传CAD：示例数据无真实文件，用文件输入取文件名展示，提示为临时演示 */
+function uploadFloorCad(row: FloorRow): void {
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = '.dwg,.dxf,.pdf,.zip';
+  input.onchange = () => {
+    const file = input.files?.[0];
+    if (!file) return;
+    row.cadFile = file.name;
+    const d = new Date();
+    row.cadTime = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    ElMessage.success('已记录CAD文件名（仅当前页面演示，未上传至服务器）');
+  };
+  input.click();
+}
+
+/** 删除楼层：带二次确认，示例数据仅本次页面生效 */
+async function deleteFloor(row: FloorRow): Promise<void> {
+  try {
+    await ElMessageBox.confirm(
+      `确定删除楼层「${row.floorName}」吗？\n\n示例数据的删除仅在当前页面生效，刷新后还原。`,
+      '删除楼层 - 二次确认',
+      { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' },
+    );
+  } catch { return; }
+  floorRows.value = floorRows.value.filter((r) => r.code !== row.code);
+  ElMessage.success('已删除楼层（本次页面生效，刷新后还原）');
+}
 
 /** 变更记录（示例） */
 const changeRecords = computed(() => [
@@ -4380,6 +4548,46 @@ select.detail-input option { background: #ffffff; color: #1e293b; }
 .asset-table th { color: #334155; font-weight: 600; background: #eef4fa; }
 .asset-table td { color: #1e293b; background: #ffffff; }
 .asset-table tbody tr:hover td { background: #f0f7fd; }
+
+/* 楼层信息表格 */
+.floor-add-btn {
+  appearance: none; cursor: pointer; font-size: 12px;
+  height: 30px; padding: 0 14px; border-radius: 5px;
+  border: 1px solid #0284c7; color: #ffffff; background: #0284c7;
+}
+.floor-add-btn:hover { background: #0369a1; }
+.asset-table--floor { table-layout: fixed; min-width: 900px; }
+.asset-table--floor th, .asset-table--floor td {
+  padding: 7px 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.asset-table--floor th:last-child, .asset-table--floor td.floor-ops {
+  position: sticky; right: 0; z-index: 1;
+  background: #ffffff; box-shadow: -3px 0 6px rgba(15, 35, 70, 0.08);
+}
+.asset-table--floor thead th:last-child { z-index: 2; background: #eef4fa; }
+.asset-table--floor tbody tr:hover td.floor-ops { background: #f0f7fd; }
+.floor-ops { display: flex; gap: 10px; justify-content: center; }
+
+/* 楼层新增/修改弹窗 */
+.floor-edit-modal {
+  position: fixed; inset: 0; z-index: 2000;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(6, 10, 20, 0.45); backdrop-filter: blur(2px);
+}
+.floor-edit-card {
+  width: 560px; max-width: 90vw; overflow: hidden;
+  border: 1px solid #dbe3ed; border-radius: 10px; background: #ffffff;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.28);
+}
+.floor-edit__head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 16px; border-bottom: 1px solid #e2e8f0; font-size: 14px; color: #0f172a;
+}
+.floor-edit__error { margin: 0 16px 6px; color: #dc2626; font-size: 12px; }
+.floor-edit__actions {
+  display: flex; justify-content: center; gap: 18px;
+  padding: 10px 16px 14px; border-top: 1px solid #e2e8f0;
+}
 
 /* 数据单元格对齐：字符串居左 / 纯数字居右 / 枚举字典值居中（表头仍统一居中） */
 .detail-tabpane td.cell-text { text-align: left; }

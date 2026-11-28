@@ -474,23 +474,23 @@
               </thead>
               <tbody>
                 <tr v-for="(a, i) in pagedAttachments" :key="a.name" :class="{ 'attach-row--selected': selectedAttachNames.includes(a.name) }">
-                  <td class="attach-check-cell">
+                  <td class="attach-check-cell cell-dict">
                     <input
                       type="checkbox" class="attach-check"
                       :checked="selectedAttachNames.includes(a.name)" @change="onSelectOne($event, a.name)"
                     />
                   </td>
-                  <td class="attach-idx">{{ (attachPage - 1) * PAGE_SIZE + i + 1 }}</td>
-                  <td class="attach-name-cell">
+                  <td class="attach-idx cell-num">{{ (attachPage - 1) * PAGE_SIZE + i + 1 }}</td>
+                  <td class="attach-name-cell cell-text">
                     <span class="attach-icon" :class="`attach-icon--${a.type}`">{{ a.type === 'img' ? '图' : '档' }}</span>
                     <span class="attach-name">{{ a.name }}</span>
                     <em v-if="a.sample" class="tag-sample">示例</em>
                   </td>
-                  <td>{{ a.typeLabel }}</td>
-                  <td>{{ a.format }}</td>
-                  <td>{{ a.size }}</td>
-                  <td>{{ a.time }}</td>
-                  <td class="attach-ops">
+                  <td class="cell-dict">{{ a.typeLabel }}</td>
+                  <td class="cell-dict">{{ a.format }}</td>
+                  <td class="cell-text">{{ a.size }}</td>
+                  <td class="cell-text">{{ a.time }}</td>
+                  <td class="attach-ops cell-dict">
                     <button class="attach-op" @click="previewAttachment(a)">预览</button>
                     <button class="attach-op attach-op--primary" @click="downloadAttachment(a)">下载</button>
                     <button class="attach-op attach-op--danger" @click="deleteAttachments([a.name])">删除</button>
@@ -545,22 +545,22 @@
                 </thead>
                 <tbody>
                   <tr v-for="row in pagedAssetRows" :key="row.code" :class="{ 'asset-row--selected': selectedAssetCodes.includes(row.code) }">
-                    <td>
+                    <td class="cell-dict">
                       <input
                         type="checkbox" class="attach-check"
                         :checked="selectedAssetCodes.includes(row.code)" @change="onSelectOneAsset($event, row.code)"
                       />
                     </td>
-                    <td class="asset-code">{{ row.code }}</td>
-                    <td :title="row.name">{{ row.name }}</td>
-                    <td :title="row.category">{{ row.category }}</td>
-                    <td :title="row.spec">{{ row.spec }}</td>
-                    <td>{{ row.count }}</td>
-                    <td class="asset-num">{{ row.original.toLocaleString() }}</td>
-                    <td class="asset-num">{{ row.net.toLocaleString() }}</td>
-                    <td><span class="asset-status" :class="{ 'asset-status--idle': row.status !== '在用' }">{{ row.status }}</span></td>
-                    <td>{{ row.date }}</td>
-                    <td class="asset-ops">
+                    <td class="asset-code cell-text">{{ row.code }}</td>
+                    <td class="cell-text" :title="row.name">{{ row.name }}</td>
+                    <td class="cell-dict" :title="row.category">{{ row.category }}</td>
+                    <td class="cell-text" :title="row.spec">{{ row.spec }}</td>
+                    <td class="cell-num">{{ row.count }}</td>
+                    <td class="asset-num cell-num">{{ row.original.toLocaleString() }}</td>
+                    <td class="asset-num cell-num">{{ row.net.toLocaleString() }}</td>
+                    <td class="cell-dict"><span class="asset-status" :class="{ 'asset-status--idle': row.status !== '在用' }">{{ row.status }}</span></td>
+                    <td class="cell-text">{{ row.date }}</td>
+                    <td class="asset-ops cell-dict">
                       <button class="asset-op" @click="viewAsset(row)">查看</button>
                       <button class="asset-op asset-op--danger" @click="deleteAssets([row.code])">删除</button>
                     </td>
@@ -586,9 +586,9 @@
               <thead><tr><th>资产大类</th><th>金额（元）</th><th>占比</th></tr></thead>
               <tbody>
                 <tr v-for="row in buildingAssetRows" :key="row.name">
-                  <td>{{ row.name }}</td>
-                  <td>{{ row.amount.toLocaleString() }}</td>
-                  <td>{{ row.percent }}%</td>
+                  <td class="cell-dict">{{ row.name }}</td>
+                  <td class="cell-num">{{ row.amount.toLocaleString() }}</td>
+                  <td class="cell-num">{{ row.percent }}%</td>
                 </tr>
               </tbody>
             </table>
@@ -603,10 +603,10 @@
               <thead><tr><th>楼层</th><th>面积（㎡）</th><th>房间数</th><th>主要用途</th></tr></thead>
               <tbody>
                 <tr v-for="f in floorRows" :key="f.floor">
-                  <td>{{ f.floor }}F</td>
-                  <td>{{ f.area.toLocaleString() }}</td>
-                  <td>{{ f.rooms }}</td>
-                  <td>{{ f.use }}</td>
+                  <td class="cell-dict">{{ f.floor }}F</td>
+                  <td class="cell-num">{{ f.area.toLocaleString() }}</td>
+                  <td class="cell-num">{{ f.rooms }}</td>
+                  <td class="cell-dict">{{ f.use }}</td>
                 </tr>
               </tbody>
             </table>
@@ -4099,7 +4099,6 @@ select.detail-input option { background: #ffffff; color: #1e293b; }
 .asset-table--detail tbody tr.asset-row--selected td.asset-ops { background: #e3f2fd; }
 .asset-table--detail thead th:last-child { z-index: 2; background: #eef4fa; }
 .asset-code { color: #0369a1; }
-.asset-num { text-align: right; font-variant-numeric: tabular-nums; }
 .asset-status {
   font-size: 11px; padding: 2px 6px; border-radius: 4px;
   color: #047857; background: #d1fae5;
@@ -4123,6 +4122,16 @@ select.detail-input option { background: #ffffff; color: #1e293b; }
 .asset-table th { color: #334155; font-weight: 600; background: #eef4fa; }
 .asset-table td { color: #1e293b; background: #ffffff; }
 .asset-table tbody tr:hover td { background: #f0f7fd; }
+
+/* 数据单元格对齐：字符串居左 / 纯数字居右 / 枚举字典值居中（表头仍统一居中） */
+.detail-tabpane td.cell-text { text-align: left; }
+.detail-tabpane td.cell-num { text-align: right; }
+.detail-tabpane td.cell-dict { text-align: center; }
+/* flex 单元格需改用 justify-content 才能生效 */
+.attach-table td.attach-name-cell { justify-content: flex-start; }
+.attach-table td.attach-ops, .asset-table--detail td.asset-ops { justify-content: center; }
+/* 金额列沿用数字居右规则 */
+.asset-num { text-align: right; font-variant-numeric: tabular-nums; }
 
 /* 通用分页条（附件信息 / 资产信息） */
 .table-pager {

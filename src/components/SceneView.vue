@@ -659,21 +659,28 @@
           </div>
         </div>
 
-        <!-- 底部横线上方的操作行：基础信息=导出 Excel，附件/资产=批量删除（样式与位置一致） -->
-        <div v-if="detailTab === '基础信息' || detailTab === '附件信息' || detailTab === '资产信息'" class="detail-export-row">
+        <!-- 底部横线上方的操作行：各页导出 Excel，附件/资产另加批量删除（样式与位置一致） -->
+        <div v-if="detailTab === '基础信息' || detailTab === '附件信息' || detailTab === '资产信息' || detailTab === '楼栋资产'" class="detail-export-row">
           <button v-if="detailTab === '基础信息'" class="detail-footer-btn detail-footer-btn--export" @click="exportDetailExcel" title="导出当前楼宇基础信息为 Excel">导出 Excel</button>
           <button
-            v-else-if="detailTab === '附件信息'" class="detail-footer-btn detail-footer-btn--export attach-batch-del"
+            v-else-if="detailTab === '楼栋资产'" class="detail-footer-btn detail-footer-btn--export"
+            @click="exportBuildingAssetExcel" title="导出当前楼宇楼栋资产为 Excel"
+          >导出 Excel</button>
+          <template v-else-if="detailTab === '资产信息'">
+            <button class="detail-footer-btn detail-footer-btn--export" @click="exportAssetInfoExcel" title="导出当前筛选的资产信息为 Excel">导出 Excel</button>
+            <button
+              class="detail-footer-btn detail-footer-btn--export asset-batch-del"
+              :disabled="!selectedAssetCodes.length"
+              title="删除当前勾选的资产（需二次确认，示例数据仅本次页面生效）"
+              @click="deleteAssets(selectedAssetCodes)"
+            >批量删除<template v-if="selectedAssetCodes.length">（{{ selectedAssetCodes.length }}）</template></button>
+          </template>
+          <button
+            v-else class="detail-footer-btn detail-footer-btn--export attach-batch-del"
             :disabled="!selectedAttachNames.length"
             title="删除当前勾选的附件（需二次确认，示例数据仅本次页面生效）"
             @click="deleteAttachments(selectedAttachNames)"
           >批量删除<template v-if="selectedAttachNames.length">（{{ selectedAttachNames.length }}）</template></button>
-          <button
-            v-else class="detail-footer-btn detail-footer-btn--export asset-batch-del"
-            :disabled="!selectedAssetCodes.length"
-            title="删除当前勾选的资产（需二次确认，示例数据仅本次页面生效）"
-            @click="deleteAssets(selectedAssetCodes)"
-          >批量删除<template v-if="selectedAssetCodes.length">（{{ selectedAssetCodes.length }}）</template></button>
         </div>
 
         <!-- 底部操作栏：关闭 / 修改居中排列，按钮之间留间隔 -->
@@ -2467,6 +2474,84 @@ ${rows}
   ElMessage.success(`附件清单已导出（${filteredAttachments.value.length} 条）`);
 }
 
+/** 导出资产信息：零依赖 SpreadsheetML .xls，导出当前筛选结果 */
+function exportAssetInfoExcel(): void {
+  const p = selectedProps.value;
+  if (!p.name) return;
+  const esc = xmlEscape;
+  const exportName = shownBuildingName() || p.name;
+  const now = new Date();
+  const stamp = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+  const headers = ['资产编号', '资产名称', '资产类别', '规格型号', '数量', '原值（元）', '净值（元）', '使用状态', '取得日期'];
+  const headerRow = `<Row>${headers.map((h) => `<Cell><Data ss:Type="String">${esc(h)}</Data></Cell>`).join('')}</Row>`;
+  const rows = filteredAssetRows.value.map((r) => {
+    const cells = [r.code, r.name, r.category, r.spec, String(r.count), String(r.original), String(r.net), r.status, r.date];
+    return `<Row>${cells.map((c) => `<Cell><Data ss:Type="String">${esc(c)}</Data></Cell>`).join('')}</Row>`;
+  }).join('');
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<?mso-application progid="Excel.Sheet"?>
+<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"
+ xmlns:o="urn:schemas-microsoft-com:office:office"
+ xmlns:x="urn:schemas-microsoft-com:office:excel"
+ xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">
+<Worksheet ss:Name="资产信息"><Table>
+<Row><Cell><Data ss:Type="String">${esc(exportName)} · 资产信息</Data></Cell><Cell><Data ss:Type="String">导出时间：${esc(stamp)}</Data></Cell></Row>
+${headerRow}
+${rows}
+</Table></Worksheet>
+</Workbook>`;
+  const blob = new Blob(['\ufeff', xml], { type: 'application/vnd.ms-excel;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${exportName}_资产信息.xls`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  ElMessage.success(`资产信息已导出（${filteredAssetRows.value.length} 条）`);
+}
+
+/** 导出楼栋资产：按分块表单的 20 个字段，每块一个工作表（字段/值两列） */
+function exportBuildingAssetExcel(): void {
+  const p = selectedProps.value;
+  if (!p.name) return;
+  const esc = xmlEscape;
+  const exportName = shownBuildingName() || p.name;
+  const now = new Date();
+  const stamp = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+  const sheets = buildingAssetForm.value.map((sec) => {
+    const rows = sec.fields.map((f) => {
+      const label = esc(f.label);
+      const value = esc(f.value);
+      return `<Row><Cell><Data ss:Type="String">${label}</Data></Cell><Cell><Data ss:Type="String">${value}</Data></Cell></Row>`;
+    }).join('');
+    return `<Worksheet ss:Name="${esc(sec.title)}"><Table>
+      <Row><Cell><Data ss:Type="String">${esc(exportName)} · ${esc(sec.title)}</Data></Cell><Cell><Data ss:Type="String">导出时间：${esc(stamp)}</Data></Cell></Row>
+      <Row><Cell><Data ss:Type="String">字段</Data></Cell><Cell><Data ss:Type="String">值</Data></Cell></Row>
+      ${rows}
+      </Table></Worksheet>`;
+  }).join('');
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<?mso-application progid="Excel.Sheet"?>
+<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"
+ xmlns:o="urn:schemas-microsoft-com:office:office"
+ xmlns:x="urn:schemas-microsoft-com:office:excel"
+ xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">
+${sheets}
+</Workbook>`;
+  const blob = new Blob(['\ufeff', xml], { type: 'application/vnd.ms-excel;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${exportName}_楼栋资产.xls`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  ElMessage.success('楼栋资产已导出为 Excel');
+}
+
 // ---------------------------------------------------------------------------
 // 楼盘表模式
 // ---------------------------------------------------------------------------
@@ -3956,7 +4041,7 @@ select.detail-input option { background: #ffffff; color: #1e293b; }
 /* 导出 Excel：贴在底部横线上方，固定在内容区与操作栏之间 */
 .detail-export-row {
   flex: none;
-  display: flex; justify-content: flex-start;
+  display: flex; justify-content: flex-start; gap: 10px;
   padding: 4px 16px 8px;
   background: #ffffff;
 }

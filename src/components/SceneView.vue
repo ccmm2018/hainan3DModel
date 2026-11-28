@@ -611,21 +611,18 @@
             <p class="tab-note">资产信息为指定楼栋的示例明细，金额按建筑面积测算；正式数据由资产台账同步。</p>
           </div>
 
-          <!-- 楼栋资产 -->
+          <!-- 楼栋资产：按字段分块的表单展示 -->
           <div v-else-if="detailTab === '楼栋资产'" class="detail-tabpane">
-            <div class="asset-table-wrap">
-            <table class="asset-table" v-col-resizable>
-              <thead><tr><th>资产大类</th><th>金额（元）</th><th>占比</th></tr></thead>
-              <tbody>
-                <tr v-for="row in buildingAssetRows" :key="row.name">
-                  <td class="cell-dict">{{ row.name }}</td>
-                  <td class="cell-num">{{ row.amount.toLocaleString() }}</td>
-                  <td class="cell-num">{{ row.percent }}%</td>
-                </tr>
-              </tbody>
-            </table>
-            </div>
-            <p class="tab-note">楼栋资产按大类拆分，金额为示例测算值。</p>
+            <section v-for="sec in buildingAssetForm" :key="sec.title" class="detail-block">
+              <h4 class="detail-block__title"><span class="detail-block__bar"></span>{{ sec.title }}</h4>
+              <dl class="detail-modal__grid detail-modal__grid--asset">
+                <div v-for="f in sec.fields" :key="f.label" class="detail-field">
+                  <dt>{{ f.label }}</dt>
+                  <dd><span class="detail-value">{{ f.value }}</span></dd>
+                </div>
+              </dl>
+            </section>
+            <p class="tab-note">楼栋资产为示例数据，按楼宇信息派生；正式信息由资产台账同步。</p>
           </div>
 
           <!-- 楼层信息 -->
@@ -2329,19 +2326,47 @@ async function deleteAssets(codes: string[]): Promise<void> {
   ElMessage.success(`已删除 ${targets.length} 条资产（本次页面生效，刷新后还原）`);
 }
 
-/** 楼栋资产：按大类拆分（示例测算） */
-const buildingAssetRows = computed(() => {
-  const total = assetSummary.value.original || 1;
-  const cats = [
-    { name: '房屋建筑物', ratio: 0.86 },
-    { name: '通用设备', ratio: 0.07 },
-    { name: '专用设备', ratio: 0.05 },
-    { name: '家具用具', ratio: 0.02 },
+/** 楼栋资产：按字段分块展示（示例数据，按楼宇信息派生） */
+const buildingAssetForm = computed(() => {
+  const p = selectedProps.value;
+  const a = assetSummary.value;
+  const code = a.code;
+  const seed = Number(code.replace(/\D/g, '')) || 1;
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const builtYear = 2010 + (seed % 12);
+  const fields = [
+    { label: '资产编号', value: code },
+    { label: '资产名称', value: `${p.name} 房产` },
+    { label: '数量', value: '1 处' },
+    { label: '总价', value: `${a.original.toLocaleString()} 元` },
+    { label: '购置日期', value: `${builtYear}-${pad(seed % 12 + 1)}-${pad(seed % 27 + 1)}` },
+    { label: '使用单位', value: p.managementDept || p.department || '—' },
+    { label: '使用人', value: `${p.name}管理部门` },
+    { label: '存放地点', value: `${p.campus || '校本部'} · ${p.name}` },
+    { label: '二级国标分类', value: '0101' },
+    { label: '二级国标分类名称', value: '房屋及构筑物' },
+    { label: '采购组织形式', value: '政府集中采购' },
+    { label: '设备来源', value: '财政拨款' },
+    { label: '房间面积', value: `${(Number(p.usableArea) || Number(p.buildingArea) || 0).toLocaleString()} ㎡` },
+    { label: '权属证号', value: `房权证字第 ${code} 号` },
+    { label: '建成年份', value: String(builtYear) },
+    { label: '竣工日期', value: `${builtYear}-${pad(seed % 12 + 1)}-${pad(seed % 27 + 1)}` },
+    { label: '取得日期', value: `${builtYear + 1}-${pad(seed % 12 + 1)}-${pad(seed % 27 + 1)}` },
+    { label: '验收日期', value: `${builtYear + 1}-${pad(seed % 12 + 1)}-${pad(seed % 27 + 2)}` },
+    { label: '投入使用日期', value: `${builtYear + 1}-${pad(seed % 12 + 2)}-${pad(seed % 27 + 1)}` },
+    { label: '入账形式', value: '直接入账' },
   ];
-  return cats.map((c) => ({
-    name: c.name,
-    amount: Math.round(total * c.ratio),
-    percent: Math.round(c.ratio * 100),
+  // 按语义分块，保持用户给出的字段顺序不变
+  const groups = [
+    { title: '资产基本信息', labels: ['资产编号', '资产名称', '数量', '总价', '购置日期'] },
+    { title: '使用与存放', labels: ['使用单位', '使用人', '存放地点'] },
+    { title: '分类与来源', labels: ['二级国标分类', '二级国标分类名称', '采购组织形式', '设备来源'] },
+    { title: '面积与权属', labels: ['房间面积', '权属证号'] },
+    { title: '日期与入账', labels: ['建成年份', '竣工日期', '取得日期', '验收日期', '投入使用日期', '入账形式'] },
+  ];
+  return groups.map((g) => ({
+    title: g.title,
+    fields: fields.filter((f) => g.labels.includes(f.label)),
   }));
 });
 
@@ -3898,6 +3923,8 @@ onBeforeUnmount(() => {
 }
 .detail-block__bar { width: 3px; height: 13px; border-radius: 2px; background: #0284c7; }
 .detail-modal__grid--edit { padding-top: 6px; }
+/* 楼栋资产表单：字段标签较长，加宽标签列避免挤压 */
+.detail-modal__grid--asset .detail-field { grid-template-columns: 104px minmax(0, 1fr); }
 .detail-modal__grid .detail-field--wide { grid-column: 1 / -1; grid-template-columns: 80px minmax(0, 1fr); }
 .detail-field dt { display: flex; align-items: center; gap: 3px; }
 .detail-req { color: #dc2626; font-style: normal; font-weight: 700; }

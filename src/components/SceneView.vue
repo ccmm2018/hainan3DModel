@@ -453,7 +453,7 @@
             </div>
             <!-- 字段列表格（宽表横向滚动，操作列固定右侧） -->
             <div class="attach-table-wrap">
-            <table class="attach-table">
+            <table class="attach-table" v-col-resizable>
               <thead>
                 <tr>
                   <th class="attach-col-check">
@@ -522,7 +522,7 @@
               <button class="attach-reset" @click="resetAssetQuery">重置</button>
             </div>
             <div class="asset-table-wrap">
-              <table class="asset-table asset-table--detail">
+              <table class="asset-table asset-table--detail" v-col-resizable>
                 <colgroup>
                   <col style="width: 34px" />
                   <col style="width: 94px" /><col style="width: 112px" /><col style="width: 66px" />
@@ -582,7 +582,7 @@
           <!-- 楼栋资产 -->
           <div v-else-if="detailTab === '楼栋资产'" class="detail-tabpane">
             <div class="asset-table-wrap">
-            <table class="asset-table">
+            <table class="asset-table" v-col-resizable>
               <thead><tr><th>资产大类</th><th>金额（元）</th><th>占比</th></tr></thead>
               <tbody>
                 <tr v-for="row in buildingAssetRows" :key="row.name">
@@ -599,7 +599,7 @@
           <!-- 楼层信息 -->
           <div v-else-if="detailTab === '楼层信息'" class="detail-tabpane">
             <div class="asset-table-wrap">
-            <table class="asset-table">
+            <table class="asset-table" v-col-resizable>
               <thead><tr><th>楼层</th><th>面积（㎡）</th><th>房间数</th><th>主要用途</th></tr></thead>
               <tbody>
                 <tr v-for="f in floorRows" :key="f.floor">
@@ -811,7 +811,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch, type Ref } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch, type Directive, type Ref } from 'vue';
 import * as THREE from 'three';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import { loadAMap } from '../utils/loadAMap';
@@ -843,6 +843,102 @@ import { useBuildingStore } from '../stores/building';
 import { computeTotalArea, submitAllocation } from '../utils/allocation';
 
 type Status = 'loading-amap' | 'loading-model' | 'ready' | 'error';
+
+/* ---- 弹窗表格列宽拖拽：表头右缘把手，拖动改 colgroup 宽度 ---- */
+interface ResizeState {
+  cols: HTMLTableColElement[];
+  cleanup: () => void;
+  addHandle: (th: HTMLTableCellElement, index: number) => void;
+}
+const resizeStates = new WeakMap<HTMLTableElement, ResizeState>();
+
+function setupResizableColumns(table: HTMLTableElement): void {
+  const headRow = table.querySelector<HTMLTableRowElement>('thead tr');
+  if (!headRow) return;
+  const ths = Array.from(headRow.children).filter((n): n is HTMLTableCellElement => n.tagName === 'TH');
+  if (!ths.length) return;
+
+  let colgroup = table.querySelector<HTMLElement>('colgroup');
+  if (!colgroup) {
+    colgroup = document.createElement('colgroup');
+    const thead = table.querySelector('thead');
+    table.insertBefore(colgroup, thead ?? table.firstChild);
+  }
+  const cg = colgroup;
+  while (cg.children.length < ths.length) cg.appendChild(document.createElement('col'));
+  const cols = Array.from(cg.children).slice(0, ths.length) as HTMLTableColElement[];
+
+  // 以当前渲染宽度为基准，按比例分配到每一列；总宽锁定为表格现宽，保证拖动后能触发横向滚动
+  const tableWidth = table.getBoundingClientRect().width;
+  const measured = ths.map((th) => th.getBoundingClientRect().width);
+  const sum = measured.reduce((a, b) => a + b, 0) || tableWidth;
+  cols.forEach((col, i) => {
+    col.style.width = `${Math.max(28, Math.round((measured[i] / sum) * tableWidth))}px`;
+  });
+  const applyTableWidth = () => {
+    const total = cols.reduce((s, c) => s + (parseFloat(c.style.width) || c.getBoundingClientRect().width), 0);
+    table.style.width = `${Math.round(total)}px`;
+  };
+  table.style.tableLayout = 'fixed';
+  applyTableWidth();
+
+  const unbinders: Array<() => void> = [];
+  let active: { col: HTMLTableColElement; handle: HTMLElement; startX: number; startW: number } | null = null;
+  const onMove = (e: MouseEvent) => {
+    if (!active) return;
+    active.col.style.width = `${Math.max(28, Math.round(active.startW + e.clientX - active.startX))}px`;
+    applyTableWidth();
+  };
+  const onUp = () => {
+    if (active) active.handle.classList.remove('col-resize-handle--active');
+    active = null;
+    document.removeEventListener('mousemove', onMove);
+    document.removeEventListener('mouseup', onUp);
+    document.body.style.userSelect = '';
+  };
+  // scoped 样式需要作用域属性，动态创建的把手必须带上，否则样式不生效（宽高为 0）
+  const scopeAttr = Array.from(table.attributes).find((a) => a.name.startsWith('data-v-'));
+  const addHandle = (th: HTMLTableCellElement, i: number) => {
+    if (th.querySelector('.col-resize-handle')) return;
+    if (getComputedStyle(th).position === 'static') th.style.position = 'relative';
+    const handle = document.createElement('span');
+    handle.className = 'col-resize-handle';
+    handle.title = '拖动调整列宽';
+    if (scopeAttr) handle.setAttribute(scopeAttr.name, scopeAttr.value);
+    const onDown = (e: MouseEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      active = { col: cols[i], handle, startX: e.clientX, startW: cols[i].getBoundingClientRect().width };
+      handle.classList.add('col-resize-handle--active');
+      document.body.style.userSelect = 'none';
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    };
+    handle.addEventListener('mousedown', onDown);
+    th.appendChild(handle);
+    unbinders.push(() => handle.removeEventListener('mousedown', onDown));
+  };
+  ths.forEach((th, i) => addHandle(th, i));
+  resizeStates.set(table, {
+    cols,
+    addHandle,
+    cleanup: () => { onUp(); unbinders.forEach((fn) => fn()); table.querySelectorAll('.col-resize-handle').forEach((n) => n.remove()); },
+  });
+}
+
+const vColResizable: Directive<HTMLTableElement> = {
+  mounted: setupResizableColumns,
+  updated(el) {
+    const st = resizeStates.get(el);
+    if (!st) return;
+    // 表头被 Vue 重绘后补齐把手，已拖动的列宽保持不变
+    el.querySelectorAll<HTMLTableCellElement>('thead tr:first-child th').forEach((th, i) => st.addHandle(th, i));
+  },
+  unmounted(el) {
+    resizeStates.get(el)?.cleanup();
+    resizeStates.delete(el);
+  },
+};
 
 const mapContainer = ref<HTMLDivElement | null>(null);
 const status = ref<Status>('loading-amap');
@@ -2102,14 +2198,14 @@ function onSelectOneAsset(e: Event, code: string): void {
 function viewAsset(row: AssetDetailRow): void {
   const esc = (v: string) => v.replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c] ?? c));
   const field = (k: string, v: string) =>
-    `<div style="display:flex;gap:8px;padding:3px 0"><span style="min-width:80px;color:#8a97ad">${k}</span><b style="color:#eaf2ff;font-weight:500">${esc(v)}</b></div>`;
+    `<div style="display:flex;gap:8px;padding:3px 0"><span style="min-width:80px;color:#64748b">${k}</span><b style="color:#1e293b;font-weight:500">${esc(v)}</b></div>`;
   ElMessageBox.alert(
     '<div style="font-size:12.5px;line-height:1.7">' +
       field('资产编码', row.code) + field('资产名称', row.name) + field('资产类别', row.category) +
       field('规格型号', row.spec) + field('数量', String(row.count)) +
       field('原值', row.original.toLocaleString() + ' 元') + field('净值', row.net.toLocaleString() + ' 元') +
       field('使用状态', row.status) + field('取得日期', row.date) +
-      '<p style="margin:8px 0 0;color:#7d8aa3;font-size:11px">示例数据，正式信息由资产台账同步。</p></div>',
+      '<p style="margin:8px 0 0;color:#64748b;font-size:11px">示例数据，正式信息由资产台账同步。</p></div>',
     '资产详情',
     { dangerouslyUseHTMLString: true, confirmButtonText: '关闭' },
   );
@@ -3536,7 +3632,7 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(6, 10, 20, 0.55);
+  background: rgba(30, 41, 59, 0.42);
   backdrop-filter: blur(3px);
 }
 .detail-modal__card {
@@ -3547,11 +3643,12 @@ onBeforeUnmount(() => {
   height: 80vh;
   max-height: 80vh;
   overflow: hidden; /* 整体不滚动，仅 body 滚动，footer 永远固定底部 */
-  border: 1px solid #2b3a56;
+  border: 1px solid #d5dfea;
   border-radius: 10px;
-  /* 上浅下深的深蓝灰渐变，替代纯黑，更有层次 */
-  background: linear-gradient(180deg, rgba(28, 38, 58, 0.98) 0%, rgba(16, 22, 37, 0.98) 100%);
-  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.5);
+  /* 浅色主题：白到浅蓝灰渐变，深色文字 */
+  color: #1e293b;
+  background: linear-gradient(180deg, #ffffff 0%, #f4f7fb 100%);
+  box-shadow: 0 24px 70px rgba(15, 35, 70, 0.22);
   will-change: transform;
   transition: width 0.2s, height 0.2s, max-width 0.2s, max-height 0.2s;
 }
@@ -3568,33 +3665,35 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 8px;
   padding: 14px 16px;
-  border-bottom: 1px solid #24324a;
-  color: #eaf2ff;
+  border-bottom: 1px solid #e2e8f0;
+  color: #1e293b;
   cursor: move;
   user-select: none;
   position: sticky;
   top: 0;
   z-index: 3;
-  background: rgba(20, 27, 43, 0.98);
+  background: #f8fafc;
 }
 .detail-modal__head:active { cursor: grabbing; }
 .detail-modal__head strong { flex: 1; font-size: 15px; font-weight: 600; }
+.detail-modal__head .property-panel__close { color: #64748b; border-radius: 5px; }
+.detail-modal__head .property-panel__close:hover { color: #c0392b; background: #fee2e2; }
 .detail-modal__drag-hint {
-  font-size: 10px; color: #7c8ba3; font-weight: 400;
+  font-size: 10px; color: #64748b; font-weight: 400;
   letter-spacing: .5px; padding: 2px 7px;
-  border: 1px dashed #3a4a66; border-radius: 4px;
+  border: 1px dashed #cbd5e1; border-radius: 4px;
 }
 .detail-modal__maxbtn {
   appearance: none; cursor: pointer; flex: none;
   width: 22px; height: 22px; line-height: 20px; text-align: center;
-  font-size: 15px; color: #9fb0c9;
+  font-size: 15px; color: #475569;
   border: 1px solid transparent; border-radius: 5px; background: transparent;
 }
-.detail-modal__maxbtn:hover { color: #eaf2ff; border-color: #3a4a66; background: rgba(56, 189, 248, 0.08); }
+.detail-modal__maxbtn:hover { color: #0b6fb8; border-color: #cbd5e1; background: #eaf2fb; }
 .detail-modal__image {
   height: 200px;
-  border-bottom: 1px solid #24324a;
-  background: #141c2e;
+  border-bottom: 1px solid #e2e8f0;
+  background: #e8eef6;
   overflow: hidden;
 }
 .detail-modal__image img {
@@ -3619,16 +3718,16 @@ onBeforeUnmount(() => {
   min-width: 0;
   padding: 7px 0;
   font-size: 13px;
-  border-bottom: 1px dashed #1e2a40;
+  border-bottom: 1px dashed #e2e8f0;
 }
 .detail-modal__grid dt {
-  color: #8a97ad;
+  color: #64748b;
   white-space: nowrap;
   line-height: 1.9;
 }
 .detail-modal__grid dd {
   margin: 0;
-  color: #eaf2ff;
+  color: #1e293b;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -3637,7 +3736,7 @@ onBeforeUnmount(() => {
 .detail-modal__desc {
   margin: 0;
   padding: 4px 16px 16px;
-  color: #a7b4c8;
+  color: #475569;
   font-size: 12px;
   line-height: 1.7;
 }
@@ -3649,28 +3748,28 @@ onBeforeUnmount(() => {
   flex-wrap: wrap;
   gap: 4px;
   padding: 8px 12px 0;
-  border-bottom: 1px solid #24324a;
+  border-bottom: 1px solid #dbe3ed;
   position: sticky;
   top: 0;
-  background: rgba(20, 27, 43, 0.98);
+  background: #f8fafc;
   z-index: 2;
 }
 .detail-tab {
   appearance: none;
   border: 1px solid transparent;
   background: transparent;
-  color: #9fb0c9;
+  color: #5b6b82;
   font-size: 12.5px;
   padding: 7px 11px;
   border-radius: 7px 7px 0 0;
   cursor: pointer;
   transition: color 0.15s, background 0.15s, border-color 0.15s;
 }
-.detail-tab:hover { color: #eaf2ff; background: rgba(56, 189, 248, 0.08); }
+.detail-tab:hover { color: #0b6fb8; background: #eaf2fb; }
 .detail-tab.active {
-  color: #eaf2ff;
-  background: rgba(56, 189, 248, 0.14);
-  border-color: #24324a;
+  color: #0b6fb8;
+  background: #ffffff;
+  border-color: #dbe3ed;
   border-bottom-color: transparent;
   font-weight: 600;
 }
@@ -3680,9 +3779,9 @@ onBeforeUnmount(() => {
 /* 楼宇详情 · 基础信息分块 */
 .detail-block {
   margin: 10px 12px 0;
-  border: 1px solid #26344d;
+  border: 1px solid #dbe3ed;
   border-radius: 8px;
-  background: rgba(12, 18, 31, 0.45);
+  background: #ffffff;
   overflow: hidden;
 }
 .detail-block__title {
@@ -3693,81 +3792,81 @@ onBeforeUnmount(() => {
   padding: 9px 12px;
   font-size: 13px;
   font-weight: 600;
-  color: #dce8fb;
-  border-bottom: 1px solid #26344d;
+  color: #1e293b;
+  border-bottom: 1px solid #e2e8f0;
 }
-.detail-block__bar { width: 3px; height: 13px; border-radius: 2px; background: #38bdf8; }
+.detail-block__bar { width: 3px; height: 13px; border-radius: 2px; background: #0284c7; }
 .detail-modal__grid--edit { padding-top: 6px; }
 .detail-modal__grid .detail-field--wide { grid-column: 1 / -1; grid-template-columns: 80px minmax(0, 1fr); }
 .detail-field dt { display: flex; align-items: center; gap: 3px; }
-.detail-req { color: #ff6b6b; font-style: normal; font-weight: 700; }
+.detail-req { color: #dc2626; font-style: normal; font-weight: 700; }
 .detail-field dd { display: flex; align-items: center; justify-content: flex-start; gap: 6px; min-width: 0; }
-.detail-value--locked { color: #8fa0b8; }
+.detail-value--locked { color: #64748b; }
 .detail-field-tag {
-  flex: none; font-size: 10px; line-height: 1; color: #7c8ba3;
-  border: 1px solid #3a4a66; border-radius: 3px; padding: 2px 4px;
+  flex: none; font-size: 10px; line-height: 1; color: #64748b;
+  border: 1px solid #cbd5e1; border-radius: 3px; padding: 2px 4px;
 }
 /* 所有输入控件占满值列，宽度完全一致 */
 .detail-input {
   display: block; width: 100%; min-width: 0; box-sizing: border-box;
   padding: 5px 8px; font-size: 12.5px;
-  color: #eaf2ff; background: #0e1626;
-  border: 1px solid #35507a; border-radius: 5px; outline: none;
+  color: #1e293b; background: #ffffff;
+  border: 1px solid #cbd5e1; border-radius: 5px; outline: none;
 }
-.detail-input:focus { border-color: #38bdf8; box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.14); }
-.detail-input--error { border-color: #ff6b6b !important; }
-/* 日期框：深色主题让日历图标/占位文字可见，整框可点击 */
-.detail-input--date { color-scheme: dark; cursor: pointer; }
+.detail-input:focus { border-color: #0284c7; box-shadow: 0 0 0 2px rgba(2, 132, 199, 0.15); }
+.detail-input--error { border-color: #dc2626 !important; }
+/* 日期框：浅色主题让日历图标/占位文字可见，整框可点击 */
+.detail-input--date { color-scheme: light; cursor: pointer; }
 .detail-input--date::-webkit-calendar-picker-indicator {
-  cursor: pointer; opacity: .9;
+  cursor: pointer; opacity: .75;
 }
-.detail-input--date::-webkit-datetime-edit { color: #eaf2ff; }
-.detail-input--date::-webkit-datetime-edit-fields-wrapper { color: #eaf2ff; }
+.detail-input--date::-webkit-datetime-edit { color: #1e293b; }
+.detail-input--date::-webkit-datetime-edit-fields-wrapper { color: #1e293b; }
 .detail-textarea { resize: vertical; }
 select.detail-input { cursor: pointer; }
-select.detail-input option { background: #0e1626; color: #eaf2ff; }
+select.detail-input option { background: #ffffff; color: #1e293b; }
 /* 导出 Excel：贴在底部横线上方，固定在内容区与操作栏之间 */
 .detail-export-row {
   flex: none;
   display: flex; justify-content: flex-start;
   padding: 4px 16px 8px;
-  background: rgba(16, 22, 37, 0.98);
+  background: #ffffff;
 }
 /* 底部操作栏：关闭 / 修改居中，按钮间留间隔 */
 .detail-modal__footer {
   flex: none; z-index: 3;
   display: flex; align-items: center; justify-content: center;
   padding: 10px 16px 12px;
-  border-top: 1px solid #2b3a56;
-  background: rgba(16, 22, 37, 0.98);
+  border-top: 1px solid #dbe3ed;
+  background: #ffffff;
 }
 .detail-footer-actions { display: flex; align-items: center; justify-content: center; gap: 18px; }
 .detail-footer-btn {
   appearance: none; cursor: pointer; font-size: 12.5px;
   padding: 7px 18px; border-radius: 6px;
-  border: 1px solid #3a4a66; background: #1b2740; color: #c8d6ea;
+  border: 1px solid #cbd5e1; background: #ffffff; color: #334155;
 }
-.detail-footer-btn:hover { border-color: #0b6fb8; color: #fff; }
+.detail-footer-btn:hover { border-color: #0b6fb8; color: #0b6fb8; }
 .detail-footer-btn--primary {
   border-color: #0b6fb8; color: #fff;
   background: linear-gradient(180deg, #1a86cf, #0b6fb8);
-  box-shadow: 0 2px 6px rgba(11, 111, 184, 0.28);
+  box-shadow: 0 2px 6px rgba(11, 111, 184, 0.22);
 }
-.detail-footer-btn--primary:hover { background: linear-gradient(180deg, #0b6fb8, #095a99); }
+.detail-footer-btn--primary:hover { background: linear-gradient(180deg, #0b6fb8, #095a99); color: #fff; }
 .detail-footer-btn--close {
-  border-color: #b5485e; color: #ffd9e0; font-weight: 600;
-  background: linear-gradient(180deg, #a33b50, #832c3e);
-  box-shadow: 0 2px 6px rgba(163, 59, 80, 0.28);
+  border-color: #dc2626; color: #fff; font-weight: 600;
+  background: linear-gradient(180deg, #e34d5f, #c6283f);
+  box-shadow: 0 2px 6px rgba(198, 40, 63, 0.22);
 }
-.detail-footer-btn--close:hover { background: linear-gradient(180deg, #b5485e, #93344a); color: #fff; }
+.detail-footer-btn--close:hover { background: linear-gradient(180deg, #c6283f, #a51e32); color: #fff; }
 .detail-footer-btn--export {
-  border-color: #2f7d6b; color: #b8e6d9;
-  background: linear-gradient(180deg, #1c7a68, #14614f);
+  border-color: #0f9d80; color: #fff;
+  background: linear-gradient(180deg, #20a588, #0f8268);
 }
-.detail-footer-btn--export:hover:not(:disabled) { background: linear-gradient(180deg, #14614f, #0f4c3e); color: #fff; }
+.detail-footer-btn--export:hover:not(:disabled) { background: linear-gradient(180deg, #0f8268, #0b6b55); color: #fff; }
 .detail-footer-btn--export:disabled { cursor: not-allowed; opacity: .45; filter: grayscale(.4); }
-.detail-error { color: #ff8f8f; font-size: 12px; }
-.detail-footer-hint { color: #7c8ba3; font-size: 11.5px; }
+.detail-error { color: #dc2626; font-size: 12px; }
+.detail-footer-hint { color: #64748b; font-size: 11.5px; }
 
 /* 房间管理面板：右侧停靠，宽 20%，无遮罩层 */
 .room-mgmt-modal {
@@ -3882,53 +3981,54 @@ select.detail-input option { background: #0e1626; color: #eaf2ff; }
 .attach-search, .attach-filter {
   appearance: none; outline: none;
   height: 30px; padding: 0 9px; font-size: 12.5px;
-  color: #eaf2ff; background: #0e1626;
-  border: 1px solid #35507a; border-radius: 5px;
+  color: #1e293b; background: #ffffff;
+  border: 1px solid #cbd5e1; border-radius: 5px;
 }
 .attach-search { width: 260px; flex: none; }
-.attach-search::placeholder { color: #70809a; }
-.attach-search:focus, .attach-filter:focus { border-color: #38bdf8; box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.14); }
+.attach-search::placeholder { color: #94a3b8; }
+.attach-search:focus, .attach-filter:focus { border-color: #0284c7; box-shadow: 0 0 0 2px rgba(2, 132, 199, 0.15); }
 .attach-filter { width: 110px; cursor: pointer; }
-.attach-filter option { background: #0e1626; color: #eaf2ff; }
+.attach-filter option { background: #ffffff; color: #1e293b; }
 .attach-reset {
   appearance: none; cursor: pointer; font-size: 12px;
   height: 30px; padding: 0 12px; border-radius: 5px;
-  border: 1px solid #3a4a66; background: transparent; color: #9fb0c8;
+  border: 1px solid #cbd5e1; background: #ffffff; color: #475569;
 }
-.attach-reset:hover { border-color: #38bdf8; color: #38bdf8; }
+.attach-reset:hover { border-color: #0284c7; color: #0284c7; }
 .attach-export {
   appearance: none; cursor: pointer; font-size: 12px; white-space: nowrap;
   height: 30px; padding: 0 12px; border-radius: 5px;
   margin-left: auto; /* 靠右对齐 */
-  border: 1px solid #0b6fb8; color: #d7ecff;
-  background: linear-gradient(180deg, #0d6fa8, #0a5686);
+  border: 1px solid #0b6fb8; color: #fff;
+  background: linear-gradient(180deg, #1583c6, #0b6fb8);
 }
 .attach-export:hover { filter: brightness(1.15); }
 .attach-table-wrap { overflow-x: auto; }
 .attach-table {
   width: calc(100% - 24px); border-collapse: collapse;
   margin: 0 12px; font-size: 12px;
-  border: 1px solid #2b3a56; /* 列边界清晰 */
+  border: 1px solid #d5dfea; /* 列边界清晰 */
 }
 .attach-table th {
   text-align: center; padding: 8px 8px; white-space: nowrap;
-  color: #9fb0c8; font-weight: 500; font-size: 11.5px;
-  background: #202a3f;
-  border: 1px solid #2b3a56;
+  color: #334155; font-weight: 600; font-size: 11.5px;
+  background: #eef4fa;
+  border: 1px solid #d5dfea;
 }
 .attach-table td {
-  padding: 8px; color: #d7e2f2; vertical-align: middle;
-  border: 1px solid #2b3a56;
+  padding: 8px; color: #1e293b; vertical-align: middle;
+  background: #ffffff;
+  border: 1px solid #d5dfea;
 }
-.attach-table tbody tr:hover { background: rgba(56, 189, 248, 0.06); }
-.attach-table tbody tr.attach-row--selected { background: rgba(56, 189, 248, 0.10); }
+.attach-table tbody tr:hover td { background: #f0f7fd; }
+.attach-table tbody tr.attach-row--selected td { background: #e3f2fd; }
 .attach-col-check { width: 34px; }
 .attach-check {
   appearance: none; position: relative; margin: 0;
   width: 14px; height: 14px; cursor: pointer;
-  border: 1px solid #4a5a76; border-radius: 3px; background: #0e1626;
+  border: 1px solid #94a3b8; border-radius: 3px; background: #ffffff;
 }
-.attach-check:checked { border-color: #38bdf8; background: #0b6fb8; }
+.attach-check:checked { border-color: #0b6fb8; background: #0b6fb8; }
 .attach-check:checked::after {
   content: ''; position: absolute; left: 3px; top: 0;
   width: 4px; height: 8px; border: solid #fff; border-width: 0 2px 2px 0;
@@ -3944,106 +4044,117 @@ select.detail-input option { background: #0e1626; color: #eaf2ff; }
 /* 操作列固定右侧：横向滚动时不随内容移动 */
 .attach-table .attach-col-op, .attach-table td.attach-ops {
   position: sticky; right: 0; z-index: 1;
-  background: #141b2b; box-shadow: -3px 0 6px rgba(0, 0, 0, 0.3);
+  background: #ffffff; box-shadow: -3px 0 6px rgba(15, 35, 70, 0.08);
 }
-.attach-table thead .attach-col-op { z-index: 2; background: #202a3f; }
-.attach-idx { color: #7c8ba3; }
+.attach-table tr:hover td.attach-ops { background: #f0f7fd; }
+.attach-table tr.attach-row--selected td.attach-ops { background: #e3f2fd; }
+.attach-table thead .attach-col-op { z-index: 2; background: #eef4fa; }
+.attach-idx { color: #64748b; }
 .attach-name-cell { display: flex; align-items: center; gap: 7px; min-width: 0; }
 .attach-icon {
   flex: none; width: 26px; height: 26px; border-radius: 6px;
   display: flex; align-items: center; justify-content: center;
-  font-size: 11px; font-weight: 700; color: #fff; background: #3a4a66;
+  font-size: 11px; font-weight: 700; color: #fff; background: #64748b;
 }
-.attach-icon--img { background: #1d7a5a; }
-.attach-name { color: #eaf2ff; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.attach-icon--img { background: #0f9d80; }
+.attach-name { color: #1e293b; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tag-sample {
   flex: none; font-style: normal; font-size: 10px;
-  color: #f0b429; border: 1px solid #5a4a1e;
-  background: rgba(240, 180, 41, 0.12);
+  color: #b45309; border: 1px solid #fcd34d;
+  background: #fef3c7;
   border-radius: 4px; padding: 0 5px;
 }
-.attach-ops { display: flex; gap: 5px; }
-.attach-op {
+/* 操作列：纯文字按钮，无边框无背景 */
+.attach-ops { display: flex; gap: 10px; }
+.attach-op, .asset-op {
   appearance: none; cursor: pointer; font-size: 11.5px;
-  padding: 3px 8px; border-radius: 5px;
-  border: 1px solid #2c3c58; background: transparent; color: #9fc6ff;
+  padding: 2px 1px; border: 0; background: transparent;
+  color: #0b6fb8; line-height: 1.4;
 }
-.attach-op:hover { border-color: #38bdf8; color: #38bdf8; }
-.attach-op--primary { border-color: #0b6fb8; color: #d7ecff; background: rgba(11, 111, 184, 0.25); }
-.attach-op--danger { border-color: #7b3a49; color: #f3a7b5; }
-.attach-op--danger:hover { border-color: #d0637a; color: #ffd0d9; }
+.attach-op:hover, .asset-op:hover { color: #095a99; text-decoration: underline; }
+.attach-op--primary { color: #0b6fb8; }
+.attach-op--danger, .asset-op--danger { color: #dc2626; }
+.attach-op--danger:hover, .asset-op--danger:hover { color: #b91c1c; text-decoration: underline; }
 
 /* 资产明细 / 资产大类 / 楼层表格 */
 .asset-table-wrap { overflow-x: auto; }
 .asset-table--detail { table-layout: fixed; font-size: 11.5px; }
 /* 表头绝不省略；单元格内容过长才省略（有 title 可看全） */
 .asset-table--detail th {
-  padding: 6px; white-space: nowrap; overflow: visible; color: #9fb0c8; background: #202a3f;
+  position: relative;
+  padding: 6px; white-space: nowrap; overflow: visible; color: #334155; background: #eef4fa;
 }
 .asset-table--detail td {
   padding: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  background: #ffffff;
 }
+.asset-table--detail tbody tr:hover td { background: #f0f7fd; }
 /* 操作列固定右侧 */
 .asset-table--detail th:last-child, .asset-table--detail td.asset-ops {
   position: sticky; right: 0; z-index: 1;
-  background: #141b2b; box-shadow: -3px 0 6px rgba(0, 0, 0, 0.3);
+  background: #ffffff; box-shadow: -3px 0 6px rgba(15, 35, 70, 0.08);
 }
-.asset-table--detail thead th:last-child { z-index: 2; background: #202a3f; }
-.asset-code { color: #8fb8e8; }
+.asset-table--detail tbody tr:hover td.asset-ops { background: #f0f7fd; }
+.asset-table--detail tbody tr.asset-row--selected td { background: #e3f2fd; }
+.asset-table--detail tbody tr.asset-row--selected td.asset-ops { background: #e3f2fd; }
+.asset-table--detail thead th:last-child { z-index: 2; background: #eef4fa; }
+.asset-code { color: #0369a1; }
 .asset-num { text-align: right; font-variant-numeric: tabular-nums; }
 .asset-status {
   font-size: 11px; padding: 2px 6px; border-radius: 4px;
-  color: #a7e3c4; background: rgba(45, 160, 100, .16);
+  color: #047857; background: #d1fae5;
 }
-.asset-status--idle { color: #f0c274; background: rgba(240, 180, 41, .14); }
-.asset-ops { display: flex; gap: 5px; }
-.asset-op {
-  appearance: none; cursor: pointer; font-size: 11px;
-  padding: 3px 6px; border-radius: 4px;
-  border: 1px solid #2c3c58; background: transparent; color: #9fc6ff;
-}
-.asset-op:hover { border-color: #38bdf8; color: #38bdf8; }
-.asset-op--danger { border-color: #7b3a49; color: #f3a7b5; }
-.asset-op--danger:hover { border-color: #d0637a; color: #ffd0d9; }
-.asset-table tbody tr.asset-row--selected { background: rgba(56, 189, 248, 0.10); }
+.asset-status--idle { color: #b45309; background: #fef3c7; }
+.asset-ops { display: flex; gap: 10px; }
 
 .asset-table {
   width: calc(100% - 24px);
   margin: 10px 12px;
   border-collapse: collapse;
   font-size: 12.5px;
-  border: 1px solid #2b3a56;
+  border: 1px solid #d5dfea;
 }
 .asset-table th, .asset-table td {
   padding: 8px 10px;
-  border: 1px solid #2b3a56;
+  border: 1px solid #d5dfea;
 }
 .asset-table th { text-align: center; }
 .asset-table td { text-align: left; }
-.asset-table th { color: #8a97ad; font-weight: 600; }
-.asset-table td { color: #eaf2ff; }
-.asset-table tbody tr:hover { background: rgba(56, 189, 248, 0.06); }
+.asset-table th { color: #334155; font-weight: 600; background: #eef4fa; }
+.asset-table td { color: #1e293b; background: #ffffff; }
+.asset-table tbody tr:hover td { background: #f0f7fd; }
 
 /* 通用分页条（附件信息 / 资产信息） */
 .table-pager {
   display: flex; align-items: center; justify-content: flex-end; gap: 5px;
-  padding: 4px 12px 8px; color: #8a97ad; font-size: 11.5px;
+  padding: 4px 12px 8px; color: #64748b; font-size: 11.5px;
 }
 .table-pager__total { white-space: nowrap; }
-.table-pager__count { margin-right: 4px; white-space: nowrap; color: #b7c6dc; }
+.table-pager__count { margin-right: 4px; white-space: nowrap; color: #334155; }
 .table-pager button {
   appearance: none; cursor: pointer; min-width: 26px; height: 24px;
   padding: 0 6px; font-size: 11.5px; border-radius: 4px;
-  border: 1px solid #3a4a66; background: transparent; color: #9fb0c8;
+  border: 1px solid #cbd5e1; background: #ffffff; color: #475569;
 }
-.table-pager button:hover:not(:disabled) { border-color: #38bdf8; color: #38bdf8; }
+.table-pager button:hover:not(:disabled) { border-color: #0284c7; color: #0284c7; }
 .table-pager button.active {
-  border-color: #0b6fb8; color: #fff; background: rgba(11, 111, 184, 0.35);
+  border-color: #0b6fb8; color: #fff; background: #0b6fb8;
 }
-.table-pager button:disabled { cursor: not-allowed; opacity: .4; }
+.table-pager button:disabled { cursor: not-allowed; opacity: .45; }
 
-.tab-note { margin: 4px 16px 14px; color: #7d8aa3; font-size: 11px; line-height: 1.6; }
-.tab-empty { margin: 18px 16px; color: #7d8aa3; font-size: 13px; text-align: center; }
+.tab-note { margin: 4px 16px 14px; color: #64748b; font-size: 11px; line-height: 1.6; }
+.tab-empty { margin: 18px 16px; color: #64748b; font-size: 13px; text-align: center; }
+
+/* 表头列宽拖拽把手 */
+.col-resize-handle {
+  position: absolute; right: -3px; top: 0; bottom: 0; width: 7px;
+  cursor: col-resize; z-index: 4; touch-action: none;
+}
+.col-resize-handle::after {
+  content: ''; position: absolute; left: 3px; top: 22%; bottom: 22%;
+  width: 2px; border-radius: 1px; background: transparent;
+}
+.col-resize-handle:hover::after, .col-resize-handle--active::after { background: #0284c7; }
 
 /* 变更记录时间线 */
 .change-list { list-style: none; margin: 0; padding: 12px 16px; }
@@ -4055,7 +4166,7 @@ select.detail-input option { background: #0e1626; color: #eaf2ff; }
   top: 14px;
   bottom: 0;
   width: 1px;
-  background: #24324a;
+  background: #dbe3ed;
 }
 .change-dot {
   flex: none;
@@ -4063,16 +4174,16 @@ select.detail-input option { background: #0e1626; color: #eaf2ff; }
   height: 11px;
   margin-top: 3px;
   border-radius: 50%;
-  background: #38bdf8;
-  box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.18);
+  background: #0284c7;
+  box-shadow: 0 0 0 3px rgba(2, 132, 199, 0.16);
   z-index: 1;
 }
 .change-body { flex: 1; min-width: 0; }
 .change-top { display: flex; justify-content: space-between; align-items: baseline; }
-.change-top b { color: #eaf2ff; font-size: 13px; }
-.change-top span { color: #8a97ad; font-size: 11px; }
-.change-desc { color: #a7b4c8; font-size: 12px; line-height: 1.6; margin-top: 3px; }
-.change-by { color: #7d8aa3; font-size: 11px; margin-top: 3px; }
+.change-top b { color: #1e293b; font-size: 13px; }
+.change-top span { color: #64748b; font-size: 11px; }
+.change-desc { color: #475569; font-size: 12px; line-height: 1.6; margin-top: 3px; }
+.change-by { color: #64748b; font-size: 11px; margin-top: 3px; }
 
 
 /* 楼盘表面板 */

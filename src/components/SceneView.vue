@@ -450,47 +450,64 @@
               </select>
               <button class="attach-reset" @click="resetAttachQuery">重置</button>
               <button class="attach-export" @click="exportAttachmentsExcel">导出清单</button>
+              <div class="col-picker">
+                <button class="col-picker__btn" @click.stop="colPanel = colPanel === 'attach' ? null : 'attach'">列显示 {{ attachVisibleCols.length }}/{{ ATTACH_COLUMNS.length }}</button>
+                <div v-if="colPanel === 'attach'" class="col-picker__panel" @click.stop>
+                  <div class="col-picker__title">选择要显示的列</div>
+                  <div class="col-picker__hint">勾选即显示，取消即隐藏；数据不会被删除</div>
+                  <label v-for="c in ATTACH_COLUMNS" :key="c.key" class="col-picker__item" :class="{ 'col-picker__item--fixed': c.fixed }">
+                    <input type="checkbox" class="col-picker__check" :checked="colOn(attachVisibleCols, c.key)" :disabled="c.fixed" @change="toggleColumn(ATTACH_COLUMNS, attachVisibleCols, c.key)" />
+                    <span>{{ c.label }}</span>
+                    <em v-if="c.fixed">固定</em>
+                  </label>
+                  <div class="col-picker__foot">
+                    <span>当前显示 {{ attachVisibleCols.length }} / {{ ATTACH_COLUMNS.length }} 列</span>
+                    <button @click.stop="selectAllColumns(ATTACH_COLUMNS, attachVisibleCols)">全选</button>
+                    <button @click.stop="resetColumns(ATTACH_COLUMNS, attachVisibleCols, ATTACH_COLS_KEY)">恢复默认</button>
+                  </div>
+                </div>
+              </div>
             </div>
             <!-- 字段列表格（宽表横向滚动，操作列固定右侧） -->
             <div class="attach-table-wrap">
-            <table class="attach-table" v-col-resizable>
+            <table class="attach-table" v-col-resizable :key="'attach-' + attachVisibleCols.join(',')">
               <thead>
                 <tr>
-                  <th class="attach-col-check">
+                  <th v-if="colOn(attachVisibleCols, 'check')" class="attach-col-check">
                     <input
                       type="checkbox" class="attach-check"
                       :checked="allPageSelected" :disabled="!pagedAttachments.length"
                       title="全选当前页" @change="onSelectAll"
                     />
                   </th>
-                  <th class="attach-col-idx">序号</th>
-                  <th>文件名称</th>
-                  <th class="attach-col-type">附件分类</th>
-                  <th class="attach-col-fmt">格式</th>
-                  <th class="attach-col-size">大小</th>
-                  <th class="attach-col-time">上传时间</th>
-                  <th class="attach-col-op">操作</th>
+                  <th v-if="colOn(attachVisibleCols, 'idx')" class="attach-col-idx">序号</th>
+                  <th v-if="colOn(attachVisibleCols, 'name')">文件名称</th>
+                  <th v-if="colOn(attachVisibleCols, 'type')" class="attach-col-type">附件分类</th>
+                  <th v-if="colOn(attachVisibleCols, 'format')" class="attach-col-fmt">格式</th>
+                  <th v-if="colOn(attachVisibleCols, 'size')" class="attach-col-size">大小</th>
+                  <th v-if="colOn(attachVisibleCols, 'time')" class="attach-col-time">上传时间</th>
+                  <th v-if="colOn(attachVisibleCols, 'op')" class="attach-col-op">操作</th>
                 </tr>
               </thead>
               <tbody>
                 <tr v-for="(a, i) in pagedAttachments" :key="a.name" :class="{ 'attach-row--selected': selectedAttachNames.includes(a.name) }">
-                  <td class="attach-check-cell cell-dict">
+                  <td v-if="colOn(attachVisibleCols, 'check')" class="attach-check-cell cell-dict">
                     <input
                       type="checkbox" class="attach-check"
                       :checked="selectedAttachNames.includes(a.name)" @change="onSelectOne($event, a.name)"
                     />
                   </td>
-                  <td class="attach-idx cell-num">{{ (attachPage - 1) * PAGE_SIZE + i + 1 }}</td>
-                  <td class="attach-name-cell cell-text">
+                  <td v-if="colOn(attachVisibleCols, 'idx')" class="attach-idx cell-num">{{ (attachPage - 1) * PAGE_SIZE + i + 1 }}</td>
+                  <td v-if="colOn(attachVisibleCols, 'name')" class="attach-name-cell cell-text">
                     <span class="attach-icon" :class="`attach-icon--${a.type}`">{{ a.type === 'img' ? '图' : '档' }}</span>
                     <span class="attach-name">{{ a.name }}</span>
                     <em v-if="a.sample" class="tag-sample">示例</em>
                   </td>
-                  <td class="cell-dict">{{ a.typeLabel }}</td>
-                  <td class="cell-dict">{{ a.format }}</td>
-                  <td class="cell-text">{{ a.size }}</td>
-                  <td class="cell-text">{{ a.time }}</td>
-                  <td class="attach-ops cell-dict">
+                  <td v-if="colOn(attachVisibleCols, 'type')" class="cell-dict">{{ a.typeLabel }}</td>
+                  <td v-if="colOn(attachVisibleCols, 'format')" class="cell-dict">{{ a.format }}</td>
+                  <td v-if="colOn(attachVisibleCols, 'size')" class="cell-text">{{ a.size }}</td>
+                  <td v-if="colOn(attachVisibleCols, 'time')" class="cell-text">{{ a.time }}</td>
+                  <td v-if="colOn(attachVisibleCols, 'op')" class="attach-ops cell-dict">
                     <button class="attach-op" @click="previewAttachment(a)">预览</button>
                     <button class="attach-op attach-op--primary" @click="downloadAttachment(a)">下载</button>
                     <button class="attach-op attach-op--danger" @click="deleteAttachments([a.name])">删除</button>
@@ -520,47 +537,64 @@
                 <option v-for="c in assetCategoryOptions" :key="c" :value="c">{{ c }}</option>
               </select>
               <button class="attach-reset" @click="resetAssetQuery">重置</button>
+              <div class="col-picker">
+                <button class="col-picker__btn" @click.stop="colPanel = colPanel === 'asset' ? null : 'asset'">列显示 {{ assetVisibleCols.length }}/{{ ASSET_COLUMNS.length }}</button>
+                <div v-if="colPanel === 'asset'" class="col-picker__panel" @click.stop>
+                  <div class="col-picker__title">选择要显示的列</div>
+                  <div class="col-picker__hint">勾选即显示，取消即隐藏；数据不会被删除</div>
+                  <label v-for="c in ASSET_COLUMNS" :key="c.key" class="col-picker__item" :class="{ 'col-picker__item--fixed': c.fixed }">
+                    <input type="checkbox" class="col-picker__check" :checked="colOn(assetVisibleCols, c.key)" :disabled="c.fixed" @change="toggleColumn(ASSET_COLUMNS, assetVisibleCols, c.key)" />
+                    <span>{{ c.label }}</span>
+                    <em v-if="c.fixed">固定</em>
+                  </label>
+                  <div class="col-picker__foot">
+                    <span>当前显示 {{ assetVisibleCols.length }} / {{ ASSET_COLUMNS.length }} 列</span>
+                    <button @click.stop="selectAllColumns(ASSET_COLUMNS, assetVisibleCols)">全选</button>
+                    <button @click.stop="resetColumns(ASSET_COLUMNS, assetVisibleCols, ASSET_COLS_KEY)">恢复默认</button>
+                  </div>
+                </div>
+              </div>
             </div>
             <div class="asset-table-wrap">
-              <table class="asset-table asset-table--detail" v-col-resizable>
+              <table class="asset-table asset-table--detail" v-col-resizable :key="'asset-' + assetVisibleCols.join(',')">
                 <colgroup>
-                  <col style="width: 34px" />
-                  <col style="width: 94px" /><col style="width: 112px" /><col style="width: 66px" />
-                  <col style="width: 62px" /><col style="width: 44px" /><col style="width: 78px" />
-                  <col style="width: 78px" /><col style="width: 62px" /><col style="width: 86px" />
-                  <col style="width: 84px" />
+                  <col v-if="colOn(assetVisibleCols, 'check')" style="width: 34px" />
+                  <col v-if="colOn(assetVisibleCols, 'code')" style="width: 94px" /><col v-if="colOn(assetVisibleCols, 'name')" style="width: 112px" /><col v-if="colOn(assetVisibleCols, 'category')" style="width: 66px" />
+                  <col v-if="colOn(assetVisibleCols, 'spec')" style="width: 62px" /><col v-if="colOn(assetVisibleCols, 'count')" style="width: 44px" /><col v-if="colOn(assetVisibleCols, 'original')" style="width: 78px" />
+                  <col v-if="colOn(assetVisibleCols, 'net')" style="width: 78px" /><col v-if="colOn(assetVisibleCols, 'status')" style="width: 62px" /><col v-if="colOn(assetVisibleCols, 'date')" style="width: 86px" />
+                  <col v-if="colOn(assetVisibleCols, 'op')" style="width: 84px" />
                 </colgroup>
                 <thead>
                   <tr>
-                    <th>
+                    <th v-if="colOn(assetVisibleCols, 'check')">
                       <input
                         type="checkbox" class="attach-check"
                         :checked="allAssetPageSelected" :disabled="!pagedAssetRows.length"
                         title="全选当前页" @change="onSelectAllAsset"
                       />
                     </th>
-                    <th>资产编码</th><th>资产名称</th><th>资产类别</th><th>规格型号</th>
-                    <th>数量</th><th>原值（元）</th><th>净值（元）</th><th>使用状态</th><th>取得日期</th><th>操作</th>
+                    <th v-if="colOn(assetVisibleCols, 'code')">资产编码</th><th v-if="colOn(assetVisibleCols, 'name')">资产名称</th><th v-if="colOn(assetVisibleCols, 'category')">资产类别</th><th v-if="colOn(assetVisibleCols, 'spec')">规格型号</th>
+                    <th v-if="colOn(assetVisibleCols, 'count')">数量</th><th v-if="colOn(assetVisibleCols, 'original')">原值（元）</th><th v-if="colOn(assetVisibleCols, 'net')">净值（元）</th><th v-if="colOn(assetVisibleCols, 'status')">使用状态</th><th v-if="colOn(assetVisibleCols, 'date')">取得日期</th><th v-if="colOn(assetVisibleCols, 'op')">操作</th>
                   </tr>
                 </thead>
                 <tbody>
                   <tr v-for="row in pagedAssetRows" :key="row.code" :class="{ 'asset-row--selected': selectedAssetCodes.includes(row.code) }">
-                    <td class="cell-dict">
+                    <td v-if="colOn(assetVisibleCols, 'check')" class="cell-dict">
                       <input
                         type="checkbox" class="attach-check"
                         :checked="selectedAssetCodes.includes(row.code)" @change="onSelectOneAsset($event, row.code)"
                       />
                     </td>
-                    <td class="asset-code cell-text">{{ row.code }}</td>
-                    <td class="cell-text" :title="row.name">{{ row.name }}</td>
-                    <td class="cell-dict" :title="row.category">{{ row.category }}</td>
-                    <td class="cell-text" :title="row.spec">{{ row.spec }}</td>
-                    <td class="cell-num">{{ row.count }}</td>
-                    <td class="asset-num cell-num">{{ row.original.toLocaleString() }}</td>
-                    <td class="asset-num cell-num">{{ row.net.toLocaleString() }}</td>
-                    <td class="cell-dict"><span class="asset-status" :class="{ 'asset-status--idle': row.status !== '在用' }">{{ row.status }}</span></td>
-                    <td class="cell-text">{{ row.date }}</td>
-                    <td class="asset-ops cell-dict">
+                    <td v-if="colOn(assetVisibleCols, 'code')" class="asset-code cell-text">{{ row.code }}</td>
+                    <td v-if="colOn(assetVisibleCols, 'name')" class="cell-text" :title="row.name">{{ row.name }}</td>
+                    <td v-if="colOn(assetVisibleCols, 'category')" class="cell-dict" :title="row.category">{{ row.category }}</td>
+                    <td v-if="colOn(assetVisibleCols, 'spec')" class="cell-text" :title="row.spec">{{ row.spec }}</td>
+                    <td v-if="colOn(assetVisibleCols, 'count')" class="cell-num">{{ row.count }}</td>
+                    <td v-if="colOn(assetVisibleCols, 'original')" class="asset-num cell-num">{{ row.original.toLocaleString() }}</td>
+                    <td v-if="colOn(assetVisibleCols, 'net')" class="asset-num cell-num">{{ row.net.toLocaleString() }}</td>
+                    <td v-if="colOn(assetVisibleCols, 'status')" class="cell-dict"><span class="asset-status" :class="{ 'asset-status--idle': row.status !== '在用' }">{{ row.status }}</span></td>
+                    <td v-if="colOn(assetVisibleCols, 'date')" class="cell-text">{{ row.date }}</td>
+                    <td v-if="colOn(assetVisibleCols, 'op')" class="asset-ops cell-dict">
                       <button class="asset-op" @click="viewAsset(row)">查看</button>
                       <button class="asset-op asset-op--danger" @click="deleteAssets([row.code])">删除</button>
                     </td>
@@ -2025,6 +2059,73 @@ watch(
   { immediate: true },
 );
 
+/* ---- 弹窗表格：列显示/隐藏（勾选=显示，取消=隐藏，数据不删除） ---- */
+interface ColumnDef { key: string; label: string; fixed?: boolean }
+const ATTACH_COLUMNS: ColumnDef[] = [
+  { key: 'check', label: '勾选列', fixed: true },
+  { key: 'idx', label: '序号' },
+  { key: 'name', label: '文件名称' },
+  { key: 'type', label: '附件分类' },
+  { key: 'format', label: '格式' },
+  { key: 'size', label: '大小' },
+  { key: 'time', label: '上传时间' },
+  { key: 'op', label: '操作', fixed: true },
+];
+const ASSET_COLUMNS: ColumnDef[] = [
+  { key: 'check', label: '勾选列', fixed: true },
+  { key: 'code', label: '资产编码' },
+  { key: 'name', label: '资产名称' },
+  { key: 'category', label: '资产类别' },
+  { key: 'spec', label: '规格型号' },
+  { key: 'count', label: '数量' },
+  { key: 'original', label: '原值（元）' },
+  { key: 'net', label: '净值（元）' },
+  { key: 'status', label: '使用状态' },
+  { key: 'date', label: '取得日期' },
+  { key: 'op', label: '操作', fixed: true },
+];
+const ATTACH_COLS_KEY = 'hnjcxy.attach.visibleCols';
+const ASSET_COLS_KEY = 'hnjcxy.asset.visibleCols';
+
+function loadVisibleCols(key: string, defs: ColumnDef[]): string[] {
+  try {
+    const raw = localStorage.getItem(key);
+    if (raw) {
+      const saved = JSON.parse(raw) as string[];
+      if (Array.isArray(saved)) {
+        const valid = saved.filter((k) => defs.some((d) => d.key === k));
+        const fixed = defs.filter((d) => d.fixed).map((d) => d.key);
+        const merged = [...new Set([...valid, ...fixed])];
+        if (merged.length) return defs.filter((d) => merged.includes(d.key)).map((d) => d.key);
+      }
+    }
+  } catch { /* 存储不可用时使用默认全显 */ }
+  return defs.map((d) => d.key);
+}
+const attachVisibleCols = ref<string[]>(loadVisibleCols(ATTACH_COLS_KEY, ATTACH_COLUMNS));
+const assetVisibleCols = ref<string[]>(loadVisibleCols(ASSET_COLS_KEY, ASSET_COLUMNS));
+const colPanel = ref<'attach' | 'asset' | null>(null);
+
+function colOn(cols: string[], key: string): boolean { return cols.includes(key); }
+function toggleColumn(defs: ColumnDef[], cols: string[], key: string): void {
+  const def = defs.find((d) => d.key === key);
+  if (!def || def.fixed) return;
+  cols.splice(0, cols.length, ...(cols.includes(key) ? cols.filter((k) => k !== key) : defs.filter((d) => d.key === key || cols.includes(d.key)).map((d) => d.key)));
+}
+function selectAllColumns(defs: ColumnDef[], cols: string[]): void {
+  cols.splice(0, cols.length, ...defs.map((d) => d.key));
+}
+function resetColumns(defs: ColumnDef[], cols: string[], storageKey: string): void {
+  try { localStorage.removeItem(storageKey); } catch { /* 忽略存储不可用 */ }
+  cols.splice(0, cols.length, ...defs.map((d) => d.key));
+}
+watch(attachVisibleCols, (v) => { try { localStorage.setItem(ATTACH_COLS_KEY, JSON.stringify(v)); } catch { /* 忽略 */ } }, { deep: true });
+watch(assetVisibleCols, (v) => { try { localStorage.setItem(ASSET_COLS_KEY, JSON.stringify(v)); } catch { /* 忽略 */ } }, { deep: true });
+// 点击面板外部关闭
+function onDocClickForColPanel(e: MouseEvent): void {
+  if (!(e.target as HTMLElement)?.closest?.('.col-picker')) colPanel.value = null;
+}
+
 // ---- 通用分页：每页条数（弹窗内表格） ----
 const PAGE_SIZE = 3;
 
@@ -2765,6 +2866,7 @@ onMounted(async () => {
   });
 
   window.addEventListener('keydown', handleEscKey);
+  document.addEventListener('click', onDocClickForColPanel);
 
   const key = import.meta.env.VITE_AMAP_KEY;
   const securityCode = import.meta.env.VITE_AMAP_SECURITY_CODE;
@@ -2920,6 +3022,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', handleEscKey);
+  document.removeEventListener('click', onDocClickForColPanel);
   onDetailDragEnd(); // 清理详情弹窗拖拽的全局监听
   unobserveContainer();
   scene?.destroy();
@@ -4003,6 +4106,51 @@ select.detail-input option { background: #ffffff; color: #1e293b; }
   background: linear-gradient(180deg, #1583c6, #0b6fb8);
 }
 .attach-export:hover { filter: brightness(1.15); }
+
+/* 列显示/隐藏：入口按钮 + 勾选面板 */
+.col-picker { position: relative; }
+.col-picker__btn {
+  appearance: none; cursor: pointer; font-size: 12px; white-space: nowrap;
+  height: 30px; padding: 0 12px; border-radius: 5px;
+  border: 1px solid #0b6fb8; color: #0b6fb8; background: #ffffff;
+}
+.col-picker__btn:hover { background: #eaf2fb; }
+.col-picker__panel {
+  position: absolute; right: 0; top: calc(100% + 6px); z-index: 30;
+  width: 290px; padding: 12px; border: 1px solid #d5dfea; border-radius: 8px;
+  background: #ffffff; box-shadow: 0 12px 32px rgba(15, 35, 70, 0.16);
+}
+.col-picker__title { font-size: 13px; font-weight: 600; color: #1e293b; margin-bottom: 4px; }
+.col-picker__hint { font-size: 11.5px; color: #64748b; line-height: 1.5; margin-bottom: 8px; }
+.col-picker__item {
+  display: flex; align-items: center; gap: 8px; padding: 5px 2px;
+  font-size: 12px; color: #334155; cursor: pointer; border-bottom: 1px dashed #eef2f7;
+}
+.col-picker__item em { margin-left: auto; font-style: normal; font-size: 10px; color: #94a3b8; }
+.col-picker__item--fixed { cursor: default; color: #64748b; }
+.col-picker__check {
+  appearance: none; position: relative; margin: 0; flex: none;
+  width: 14px; height: 14px; cursor: pointer;
+  border: 1px solid #94a3b8; border-radius: 3px; background: #ffffff;
+}
+.col-picker__check:checked { border-color: #0b6fb8; background: #0b6fb8; }
+.col-picker__check:checked::after {
+  content: ''; position: absolute; left: 3px; top: 0;
+  width: 4px; height: 8px; border: solid #fff; border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+.col-picker__check:disabled { opacity: .6; cursor: default; }
+.col-picker__foot {
+  display: flex; align-items: center; gap: 8px; margin-top: 10px; padding-top: 10px;
+  border-top: 1px solid #e2e8f0; font-size: 11.5px; color: #64748b;
+}
+.col-picker__foot > span { margin-right: auto; }
+.col-picker__foot button {
+  appearance: none; cursor: pointer; font-size: 11.5px; padding: 3px 8px;
+  border: 1px solid #cbd5e1; border-radius: 4px; background: #ffffff; color: #475569;
+}
+.col-picker__foot button:hover { border-color: #0b6fb8; color: #0b6fb8; }
+
 .attach-table-wrap { overflow-x: auto; }
 .attach-table {
   width: calc(100% - 24px); border-collapse: collapse;

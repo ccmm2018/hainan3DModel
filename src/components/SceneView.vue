@@ -78,7 +78,6 @@
         <span class="toolbar__label">量算</span>
         <button class="toolbar__btn" :class="{ active: measureTool === 'distance' }" @click="startMeasure('distance')">测距</button>
         <button class="toolbar__btn" :class="{ active: measureTool === 'area' }" @click="startMeasure('area')">测面</button>
-        <button v-if="measureActive" class="toolbar__btn toolbar__btn--ok" title="结束本次测量并保留结果（也可双击地图或按 Enter）" @click="completeMeasure">完成</button>
         <button class="toolbar__btn toolbar__btn--ghost" @click="stopMeasure">清除</button>
       </div>
       <!-- 工具按钮：底图为浅色（白/淡蓝）时，透明底 + 浅色字会糊成一片。
@@ -140,9 +139,8 @@
         <strong>{{ measureTool === 'area' ? '测面中' : '测距中' }}</strong>
         <span>{{ measureGuideText }}</span>
       </div>
-      <button class="measure-guide__finish" @click="completeMeasure">✓ 完成测量 <kbd>Enter</kbd></button>
       <button class="measure-guide__cancel" @click="stopMeasure">清除 <kbd>Esc</kbd></button>
-      <div class="measure-guide__sub">已临时切到俯视便于准确测量，点「清除」后自动恢复原视角。结束方式：点「完成测量」、双击地图空白处，或按 Enter；按 Esc 清除本次测量</div>
+      <div class="measure-guide__sub">已临时切到俯视便于准确测量，点「清除」后自动恢复原视角。结束方式：双击地图空白处，或按 Enter；按 Esc 清除本次测量</div>
     </div>
 
     <!-- 量算结果：锚定在测绘范围内（图形质心 / 折线中点），随视角变化跟随图形 -->
@@ -1194,7 +1192,7 @@ const measureGuideText = computed(() => {
   }
   if (isArea && pts < 3) return `已打 ${pts} 个点，还需 ${3 - pts} 个点才能围成面`;
   if (!isArea && pts < 2) return `已打 ${pts} 个点，再点 1 个点即可连成线`;
-  return `已打 ${pts} 个点，现在可以点「完成测量」结束`;
+  return `已打 ${pts} 个点，双击地图或按 Enter 即可结束`;
 });
 
 // ---------------------------------------------------------------------------
@@ -4670,7 +4668,6 @@ select.detail-input option { background: #ffffff; color: #1e293b; }
 }
 .rotate-guide__exit:hover { border-color: #a78bfa; background: rgba(167, 139, 250, 0.2); }
 .rotate-guide__exit kbd,
-.measure-guide__finish kbd,
 .measure-guide__cancel kbd {
   margin-left: 4px;
   padding: 1px 4px;
@@ -4781,19 +4778,6 @@ select.detail-input option { background: #ffffff; color: #1e293b; }
 .measure-guide__text { display: flex; flex-direction: column; gap: 2px; min-width: 210px; }
 .measure-guide__text strong { font-size: 13px; font-weight: 700; color: #eaf2ff; }
 .measure-guide__text span { font-size: 12px; color: #b6c4da; }
-.measure-guide__finish {
-  border: 0;
-  border-radius: 8px;
-  padding: 9px 15px;
-  background: #22c55e;
-  color: #052e16;
-  font-size: 13px;
-  font-weight: 700;
-  white-space: nowrap;
-  cursor: pointer;
-  box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.18);
-}
-.measure-guide__finish:hover { background: #4ade80; }
 .measure-guide__cancel {
   border: 1px solid #3a4a63;
   border-radius: 8px;

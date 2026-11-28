@@ -627,10 +627,11 @@
 
           <!-- 楼层信息：可新增/修改/删除/上传CAD，示例数据仅本次页面生效 -->
           <div v-else-if="detailTab === '楼层信息'" class="detail-tabpane">
-            <!-- 工具栏：新增按钮 -->
+            <!-- 工具栏：新增按钮（直接在表格内追加一行编辑） -->
             <div class="attach-toolbar">
               <button class="floor-add-btn" @click="openFloorCreate">+ 新增楼层</button>
             </div>
+            <p v-if="floorEditError" class="floor-edit-error">{{ floorEditError }}</p>
             <div class="asset-table-wrap">
             <table class="asset-table asset-table--floor" v-col-resizable>
               <colgroup>
@@ -643,18 +644,35 @@
                 <th>楼层号</th><th>楼层CAD</th><th>CAD上传时间</th><th>操作</th>
               </tr></thead>
               <tbody>
-                <tr v-for="f in pagedFloorRows" :key="f.code">
+                <tr v-for="f in pagedFloorRows" :key="f.code" :class="{ 'floor-row--editing': floorEditingRow === f }">
+                  <!-- 楼栋名称：行内编辑时也只读 -->
                   <td class="cell-text" :title="f.buildingName">{{ f.buildingName }}</td>
-                  <td class="cell-text" :title="f.floorName">{{ f.floorName }}</td>
-                  <td class="cell-text">{{ f.code }}</td>
-                  <td class="cell-dict">{{ f.graphicMark }}</td>
-                  <td class="cell-num">{{ f.floorNo }}</td>
+                  <!-- 编辑态：字段直接变成输入框 -->
+                  <template v-if="floorEditingRow === f">
+                    <td class="cell-text"><input v-model="floorDraft.floorName" class="floor-cell-input" placeholder="如 3F" /></td>
+                    <td class="cell-text"><input v-model="floorDraft.code" class="floor-cell-input" /></td>
+                    <td class="cell-dict"><input v-model="floorDraft.graphicMark" class="floor-cell-input floor-cell-input--center" /></td>
+                    <td class="cell-num"><input v-model.number="floorDraft.floorNo" type="number" class="floor-cell-input floor-cell-input--right" /></td>
+                  </template>
+                  <!-- 非编辑态：普通文本 -->
+                  <template v-else>
+                    <td class="cell-text" :title="f.floorName">{{ f.floorName }}</td>
+                    <td class="cell-text">{{ f.code }}</td>
+                    <td class="cell-dict">{{ f.graphicMark }}</td>
+                    <td class="cell-num">{{ f.floorNo }}</td>
+                  </template>
                   <td class="cell-text" :title="f.cadFile">{{ f.cadFile || '未上传' }}</td>
                   <td class="cell-text">{{ f.cadTime || '—' }}</td>
                   <td class="floor-ops cell-dict">
-                    <button class="asset-op" @click="uploadFloorCad(f)">上传CAD</button>
-                    <button class="asset-op" @click="editFloor(f)">修改</button>
-                    <button class="asset-op asset-op--danger" @click="deleteFloor(f)">删除</button>
+                    <template v-if="floorEditingRow === f">
+                      <button class="asset-op" @click="saveFloorEdit">保存</button>
+                      <button class="asset-op asset-op--danger" @click="cancelFloorEdit">取消</button>
+                    </template>
+                    <template v-else>
+                      <button class="asset-op" @click="uploadFloorCad(f)">上传CAD</button>
+                      <button class="asset-op" @click="editFloor(f)">修改</button>
+                      <button class="asset-op asset-op--danger" @click="deleteFloor(f)">删除</button>
+                    </template>
                   </td>
                 </tr>
               </tbody>
@@ -726,43 +744,6 @@
             </template>
             <span v-else class="detail-footer-hint">该页数据由业务系统同步，仅供查看</span>
           </div>
-        </div>
-      </div>
-    </div>
-
-    <!-- 楼层新增 / 修改弹窗（覆盖在详情弹窗之上） -->
-    <div v-if="floorEditOpen" class="floor-edit-modal" @click.self="floorEditOpen = false">
-      <div class="floor-edit-card">
-        <div class="floor-edit__head">
-          <strong>{{ floorEditingCode === null ? '新增楼层' : '修改楼层' }}</strong>
-          <button class="property-panel__close" aria-label="关闭" @click="floorEditOpen = false">×</button>
-        </div>
-        <dl class="detail-modal__grid detail-modal__grid--asset">
-          <div class="detail-field">
-            <dt>楼栋名称</dt>
-            <dd><span class="detail-value detail-value--locked">{{ selectedProps.name }}</span><span class="detail-field-tag">不可修改</span></dd>
-          </div>
-          <div class="detail-field">
-            <dt>楼层名称</dt>
-            <dd><input v-model="floorForm.floorName" class="detail-input" placeholder="如 3F" /></dd>
-          </div>
-          <div class="detail-field">
-            <dt>编码</dt>
-            <dd><input v-model="floorForm.code" class="detail-input" /></dd>
-          </div>
-          <div class="detail-field">
-            <dt>图形标识</dt>
-            <dd><input v-model="floorForm.graphicMark" class="detail-input" /></dd>
-          </div>
-          <div class="detail-field">
-            <dt>楼层号</dt>
-            <dd><input v-model.number="floorForm.floorNo" type="number" class="detail-input" /></dd>
-          </div>
-        </dl>
-        <p v-if="floorEditError" class="floor-edit__error">{{ floorEditError }}</p>
-        <div class="floor-edit__actions">
-          <button class="detail-footer-btn" @click="floorEditOpen = false">取消</button>
-          <button class="detail-footer-btn detail-footer-btn--primary" @click="saveFloor">保存</button>
         </div>
       </div>
     </div>
@@ -2482,7 +2463,14 @@ function buildFloorRows(p: BuildingProps): FloorRow[] {
 }
 watch(
   () => selectedProps.value.name,
-  () => { floorRows.value = buildFloorRows(selectedProps.value); floorPage.value = 1; },
+  () => {
+    floorRows.value = buildFloorRows(selectedProps.value);
+    floorPage.value = 1;
+    // 切换楼宇时退出行内编辑，避免草稿与数据错行
+    floorEditingRow.value = null;
+    floorEditingIsNew.value = false;
+    floorEditError.value = '';
+  },
 );
 
 // ---- 楼层分页 ----
@@ -2491,62 +2479,81 @@ const floorPageCount = computed(() => Math.max(1, Math.ceil(floorRows.value.leng
 const pagedFloorRows = computed(() => floorRows.value.slice(
   (floorPage.value - 1) * PAGE_SIZE, floorPage.value * PAGE_SIZE,
 ));
-watch(floorRows, () => { floorPage.value = 1; });
+/** 行数变化后把当前页收敛到有效范围（新增跳末页、删除防空页） */
+function clampFloorPage(): void {
+  const max = Math.max(1, Math.ceil(floorRows.value.length / PAGE_SIZE));
+  if (floorPage.value > max) floorPage.value = max;
+}
 
-// ---- 楼层新增 / 修改（弹窗） ----
-const floorEditOpen = ref(false);
-const floorEditingCode = ref<string | null>(null); // null=新增
-const floorForm = reactive({ floorName: '', code: '', graphicMark: '', floorNo: 0 });
+// ---- 楼层行内新增 / 修改（不打开弹窗，直接在表格里改） ----
+const floorEditingRow = ref<FloorRow | null>(null); // 正在编辑的行（null=无）
+const floorEditingIsNew = ref(false);               // 该行是否为「新增」产生的临时行
+const floorDraft = reactive({ floorName: '', code: '', graphicMark: '', floorNo: 0 });
 const floorEditError = ref('');
 
 function openFloorCreate(): void {
-  floorEditingCode.value = null;
+  if (floorEditingRow.value) cancelFloorEdit(); // 先收起上一行
   floorEditError.value = '';
-  floorForm.floorName = '';
-  floorForm.code = `FL-${String([...selectedProps.value.name].reduce((s, c) => s + c.charCodeAt(0), 0)).padStart(6, '0')}-${String(floorRows.value.length + 1).padStart(2, '0')}`;
-  floorForm.graphicMark = '标准层';
-  floorForm.floorNo = floorRows.value.length + 1;
-  floorEditOpen.value = true;
+  const p = selectedProps.value;
+  const row: FloorRow = {
+    buildingName: p.name,
+    floorName: '',
+    code: `FL-${String([...p.name].reduce((s, c) => s + c.charCodeAt(0), 0)).padStart(6, '0')}-${String(floorRows.value.length + 1).padStart(2, '0')}`,
+    graphicMark: '标准层',
+    floorNo: floorRows.value.length + 1,
+    cadFile: '',
+    cadTime: '',
+  };
+  floorRows.value.push(row);
+  floorEditingRow.value = row;
+  floorEditingIsNew.value = true;
+  Object.assign(floorDraft, { floorName: '', code: row.code, graphicMark: row.graphicMark, floorNo: row.floorNo });
+  // 跳到新增行所在页，保证用户能立刻看到
+  floorPage.value = Math.max(1, Math.ceil(floorRows.value.length / PAGE_SIZE));
 }
+
 function editFloor(row: FloorRow): void {
-  floorEditingCode.value = row.code;
+  if (floorEditingRow.value && floorEditingRow.value !== row) cancelFloorEdit();
   floorEditError.value = '';
-  floorForm.floorName = row.floorName;
-  floorForm.code = row.code;
-  floorForm.graphicMark = row.graphicMark;
-  floorForm.floorNo = row.floorNo;
-  floorEditOpen.value = true;
+  floorEditingRow.value = row;
+  floorEditingIsNew.value = false;
+  Object.assign(floorDraft, {
+    floorName: row.floorName, code: row.code,
+    graphicMark: row.graphicMark, floorNo: row.floorNo,
+  });
 }
-function saveFloor(): void {
-  if (!floorForm.floorName.trim()) { floorEditError.value = '楼层名称不能为空'; return; }
-  if (!floorForm.code.trim()) { floorEditError.value = '编码不能为空'; return; }
-  // 编码唯一性校验（排除自身）
-  if (floorRows.value.some((r) => r.code === floorForm.code.trim() && r.code !== floorEditingCode.value)) {
+
+/** 取消编辑：新增行直接移除，修改行丢弃草稿（原数据从未改动） */
+function cancelFloorEdit(): void {
+  const row = floorEditingRow.value;
+  const wasNew = floorEditingIsNew.value;
+  floorEditingRow.value = null;
+  floorEditingIsNew.value = false;
+  floorEditError.value = '';
+  if (wasNew && row) {
+    floorRows.value = floorRows.value.filter((r) => r !== row);
+    clampFloorPage();
+  }
+}
+
+/** 保存编辑：校验后把草稿写回该行，操作列恢复为「上传CAD/修改/删除」 */
+function saveFloorEdit(): void {
+  const row = floorEditingRow.value;
+  if (!row) return;
+  if (!floorDraft.floorName.trim()) { floorEditError.value = '楼层名称不能为空'; return; }
+  if (!floorDraft.code.trim()) { floorEditError.value = '编码不能为空'; return; }
+  if (floorRows.value.some((r) => r !== row && r.code === floorDraft.code.trim())) {
     floorEditError.value = '编码已存在，请更换'; return;
   }
-  if (floorEditingCode.value === null) {
-    const p = selectedProps.value;
-    floorRows.value.push({
-      buildingName: p.name,
-      floorName: floorForm.floorName.trim(),
-      code: floorForm.code.trim(),
-      graphicMark: floorForm.graphicMark,
-      floorNo: Number(floorForm.floorNo) || floorRows.value.length + 1,
-      cadFile: '',
-      cadTime: '',
-    });
-    ElMessage.success('已新增楼层（本次页面生效，刷新后还原）');
-  } else {
-    const row = floorRows.value.find((r) => r.code === floorEditingCode.value);
-    if (row) {
-      row.floorName = floorForm.floorName.trim();
-      row.code = floorForm.code.trim();
-      row.graphicMark = floorForm.graphicMark;
-      row.floorNo = Number(floorForm.floorNo) || row.floorNo;
-    }
-    ElMessage.success('已保存修改（本次页面生效，刷新后还原）');
-  }
-  floorEditOpen.value = false;
+  const wasNew = floorEditingIsNew.value;
+  row.floorName = floorDraft.floorName.trim();
+  row.code = floorDraft.code.trim();
+  row.graphicMark = floorDraft.graphicMark;
+  row.floorNo = Number(floorDraft.floorNo) || row.floorNo;
+  floorEditingRow.value = null;
+  floorEditingIsNew.value = false;
+  floorEditError.value = '';
+  ElMessage.success(wasNew ? '已新增楼层（本次页面生效，刷新后还原）' : '已保存修改（本次页面生效，刷新后还原）');
 }
 
 /** 上传CAD：示例数据无真实文件，用文件输入取文件名展示，提示为临时演示 */
@@ -2574,7 +2581,12 @@ async function deleteFloor(row: FloorRow): Promise<void> {
       { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' },
     );
   } catch { return; }
-  floorRows.value = floorRows.value.filter((r) => r.code !== row.code);
+  floorRows.value = floorRows.value.filter((r) => r !== row);
+  if (floorEditingRow.value === row) {
+    floorEditingRow.value = null;
+    floorEditingIsNew.value = false;
+  }
+  clampFloorPage();
   ElMessage.success('已删除楼层（本次页面生效，刷新后还原）');
 }
 
@@ -4568,26 +4580,19 @@ select.detail-input option { background: #ffffff; color: #1e293b; }
 .asset-table--floor tbody tr:hover td.floor-ops { background: #f0f7fd; }
 .floor-ops { display: flex; gap: 10px; justify-content: center; }
 
-/* 楼层新增/修改弹窗 */
-.floor-edit-modal {
-  position: fixed; inset: 0; z-index: 2000;
-  display: flex; align-items: center; justify-content: center;
-  background: rgba(6, 10, 20, 0.45); backdrop-filter: blur(2px);
+/* 楼层行内编辑（不弹窗，直接在表格上改） */
+.floor-edit-error { margin: 0 12px 8px; color: #dc2626; font-size: 12px; }
+.asset-table--floor tbody tr.floor-row--editing td { background: #eff6ff; }
+.asset-table--floor tbody tr.floor-row--editing td.floor-ops { background: #eff6ff; }
+.floor-cell-input {
+  width: 100%; box-sizing: border-box; height: 28px;
+  padding: 2px 6px; font-size: 12px;
+  color: #0f172a; background: #ffffff;
+  border: 1px solid #93c5fd; border-radius: 4px; outline: none;
 }
-.floor-edit-card {
-  width: 560px; max-width: 90vw; overflow: hidden;
-  border: 1px solid #dbe3ed; border-radius: 10px; background: #ffffff;
-  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.28);
-}
-.floor-edit__head {
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 12px 16px; border-bottom: 1px solid #e2e8f0; font-size: 14px; color: #0f172a;
-}
-.floor-edit__error { margin: 0 16px 6px; color: #dc2626; font-size: 12px; }
-.floor-edit__actions {
-  display: flex; justify-content: center; gap: 18px;
-  padding: 10px 16px 14px; border-top: 1px solid #e2e8f0;
-}
+.floor-cell-input:focus { border-color: #2563eb; box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.14); }
+.floor-cell-input--center { text-align: center; }
+.floor-cell-input--right { text-align: right; }
 
 /* 数据单元格对齐：字符串居左 / 纯数字居右 / 枚举字典值居中（表头仍统一居中） */
 .detail-tabpane td.cell-text { text-align: left; }

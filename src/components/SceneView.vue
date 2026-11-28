@@ -495,7 +495,7 @@
                       :checked="selectedAttachNames.includes(a.name)" @change="onSelectOne($event, a.name)"
                     />
                   </td>
-                  <td v-if="colOn(attachVisibleCols, 'idx')" class="attach-idx cell-num">{{ (attachPage - 1) * PAGE_SIZE + i + 1 }}</td>
+                  <td v-if="colOn(attachVisibleCols, 'idx')" class="attach-idx cell-num">{{ (attachPage - 1) * pageSize + i + 1 }}</td>
                   <td v-if="colOn(attachVisibleCols, 'name')" class="attach-name-cell cell-text">
                     <span class="attach-icon" :class="`attach-icon--${a.type}`">{{ a.type === 'img' ? '图' : '档' }}</span>
                     <span class="attach-name">{{ a.name }}</span>
@@ -521,6 +521,9 @@
               <button :disabled="attachPage <= 1" @click="attachPage--">上一页</button>
               <button v-for="p in attachPageCount" :key="p" :class="{ active: p === attachPage }" @click="attachPage = p">{{ p }}</button>
               <button :disabled="attachPage >= attachPageCount" @click="attachPage++">下一页</button>
+              <select class="table-pager__size" v-model.number="pageSize" title="每页显示条数">
+                <option v-for="n in PAGE_SIZE_OPTIONS" :key="n" :value="n">{{ n }} 条/页</option>
+              </select>
             </div>
             <p class="tab-note">示例附件的删除仅在当前页面生效，刷新后还原；正式删除需业务系统接口。</p>
           </div>
@@ -607,6 +610,9 @@
               <button :disabled="assetPage <= 1" @click="assetPage--">上一页</button>
               <button v-for="p in assetPageCount" :key="p" :class="{ active: p === assetPage }" @click="assetPage = p">{{ p }}</button>
               <button :disabled="assetPage >= assetPageCount" @click="assetPage++">下一页</button>
+              <select class="table-pager__size" v-model.number="pageSize" title="每页显示条数">
+                <option v-for="n in PAGE_SIZE_OPTIONS" :key="n" :value="n">{{ n }} 条/页</option>
+              </select>
             </div>
             <p class="tab-note">资产信息为指定楼栋的示例明细，金额按建筑面积测算；正式数据由资产台账同步。</p>
           </div>
@@ -686,6 +692,9 @@
               <button :disabled="floorPage <= 1" @click="floorPage--">上一页</button>
               <button v-for="pg in floorPageCount" :key="pg" :class="{ active: pg === floorPage }" @click="floorPage = pg">{{ pg }}</button>
               <button :disabled="floorPage >= floorPageCount" @click="floorPage++">下一页</button>
+              <select class="table-pager__size" v-model.number="pageSize" title="每页显示条数">
+                <option v-for="n in PAGE_SIZE_OPTIONS" :key="n" :value="n">{{ n }} 条/页</option>
+              </select>
             </div>
             <p class="tab-note">楼层为示例数据，新增/修改/删除/上传仅当前页面生效，刷新后还原。</p>
           </div>
@@ -2175,8 +2184,9 @@ function onDocClickForColPanel(e: MouseEvent): void {
   if (!(e.target as HTMLElement)?.closest?.('.col-picker')) colPanel.value = null;
 }
 
-// ---- 通用分页：每页条数（弹窗内表格） ----
-const PAGE_SIZE = 3;
+// ---- 通用分页：每页条数可由用户选择（附件 / 资产 / 楼层共用） ----
+const pageSize = ref(3);
+const PAGE_SIZE_OPTIONS = [3, 5, 10, 20];
 
 // ---- 附件查询：文件名关键词 + 附件分类筛选 ----
 const attachKeyword = ref('');
@@ -2191,9 +2201,9 @@ const filteredAttachments = computed<AttachmentItem[]>(() => {
 });
 /** 附件分页：筛选结果按每页条数切片，筛选/删除变化后回到第一页 */
 const attachPage = ref(1);
-const attachPageCount = computed(() => Math.max(1, Math.ceil(filteredAttachments.value.length / PAGE_SIZE)));
+const attachPageCount = computed(() => Math.max(1, Math.ceil(filteredAttachments.value.length / pageSize.value)));
 const pagedAttachments = computed(() => filteredAttachments.value.slice(
-  (attachPage.value - 1) * PAGE_SIZE, attachPage.value * PAGE_SIZE,
+  (attachPage.value - 1) * pageSize.value, attachPage.value * pageSize.value,
 ));
 watch(filteredAttachments, () => { attachPage.value = 1; });
 
@@ -2314,9 +2324,9 @@ const filteredAssetRows = computed<AssetDetailRow[]>(() => {
   );
 });
 const assetPage = ref(1);
-const assetPageCount = computed(() => Math.max(1, Math.ceil(filteredAssetRows.value.length / PAGE_SIZE)));
+const assetPageCount = computed(() => Math.max(1, Math.ceil(filteredAssetRows.value.length / pageSize.value)));
 const pagedAssetRows = computed(() => filteredAssetRows.value.slice(
-  (assetPage.value - 1) * PAGE_SIZE, assetPage.value * PAGE_SIZE,
+  (assetPage.value - 1) * pageSize.value, assetPage.value * pageSize.value,
 ));
 watch(filteredAssetRows, () => { assetPage.value = 1; });
 function resetAssetQuery(): void {
@@ -2475,15 +2485,22 @@ watch(
 
 // ---- 楼层分页 ----
 const floorPage = ref(1);
-const floorPageCount = computed(() => Math.max(1, Math.ceil(floorRows.value.length / PAGE_SIZE)));
+const floorPageCount = computed(() => Math.max(1, Math.ceil(floorRows.value.length / pageSize.value)));
 const pagedFloorRows = computed(() => floorRows.value.slice(
-  (floorPage.value - 1) * PAGE_SIZE, floorPage.value * PAGE_SIZE,
+  (floorPage.value - 1) * pageSize.value, floorPage.value * pageSize.value,
 ));
 /** 行数变化后把当前页收敛到有效范围（新增跳末页、删除防空页） */
 function clampFloorPage(): void {
-  const max = Math.max(1, Math.ceil(floorRows.value.length / PAGE_SIZE));
+  const max = Math.max(1, Math.ceil(floorRows.value.length / pageSize.value));
   if (floorPage.value > max) floorPage.value = max;
 }
+
+/** 切换每页条数时，三个表格都回到第 1 页，避免停在不存在的页码 */
+watch(pageSize, () => {
+  attachPage.value = 1;
+  assetPage.value = 1;
+  floorPage.value = 1;
+});
 
 // ---- 楼层行内新增 / 修改（不打开弹窗，直接在表格里改） ----
 const floorEditingRow = ref<FloorRow | null>(null); // 正在编辑的行（null=无）
@@ -2509,7 +2526,7 @@ function openFloorCreate(): void {
   floorEditingIsNew.value = true;
   Object.assign(floorDraft, { floorName: '', code: row.code, graphicMark: row.graphicMark, floorNo: row.floorNo });
   // 跳到新增行所在页，保证用户能立刻看到
-  floorPage.value = Math.max(1, Math.ceil(floorRows.value.length / PAGE_SIZE));
+  floorPage.value = Math.max(1, Math.ceil(floorRows.value.length / pageSize.value));
 }
 
 function editFloor(row: FloorRow): void {
@@ -4621,6 +4638,13 @@ select.detail-input option { background: #ffffff; color: #1e293b; }
   border-color: #0b6fb8; color: #fff; background: #0b6fb8;
 }
 .table-pager button:disabled { cursor: not-allowed; opacity: .45; }
+.table-pager__size {
+  appearance: none; cursor: pointer; outline: none;
+  margin-left: 6px; height: 24px; padding: 0 4px;
+  font-size: 11.5px; border-radius: 4px;
+  border: 1px solid #cbd5e1; background: #ffffff; color: #475569;
+}
+.table-pager__size:hover, .table-pager__size:focus { border-color: #0284c7; color: #0284c7; }
 
 .tab-note { margin: 4px 16px 14px; color: #64748b; font-size: 11px; line-height: 1.6; }
 .tab-empty { margin: 18px 16px; color: #64748b; font-size: 13px; text-align: center; }
